@@ -1,0 +1,55 @@
+// =====================================================================================
+// AEGIS ONE - Agent <-> Server contract, v1
+// enrollment.proto: first contact. The ONLY RPC an agent calls without a client cert.
+// Maps to DB tables: enrollment_tokens, devices, agents, agent_certificates.
+// =====================================================================================
+syntax = "proto3";
+
+package aegis.agent.v1;
+
+import "aegis/agent/v1/common.proto";
+import "aegis/agent/v1/inventory.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "aegis-one/gen/aegis/agent/v1;agentv1";
+
+// Served on server-auth TLS only (no client cert yet). The installer ships the server's CA
+// certificate and the agent pins it, so a network attacker can't impersonate the server.
+// The server must rate-limit this RPC per source IP and lock a token after repeated failures.
+service EnrollmentService {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+// Matches agents.install_method in the database.
+enum InstallMethod {
+  INSTALL_METHOD_UNSPECIFIED = 0;
+  INSTALL_METHOD_WINRM_SSH_PUSH = 1;
+  INSTALL_METHOD_GPO_LOGIN_SCRIPT = 2;
+  INSTALL_METHOD_SELF_INSTALL_LINK = 3;
+  INSTALL_METHOD_THIRD_PARTY_RMM = 4;
+  INSTALL_METHOD_OFFLINE_INSTALLER = 5;
+}
+
+message EnrollRequest {
+  // Raw token from the installer. The server hashes it and looks up
+  // enrollment_tokens.token_hash; the raw value is never stored or logged.
+  string enrollment_token = 1;
+  // PKCS#10 CSR. The key pair is generated ON the device and the private key never leaves
+  // it (TPM / Secure Enclave when available).
+  bytes csr_der = 2;
+  bool key_is_hardware_bound = 3;
+  InstallMethod install_method = 4;
+  string agent_version = 5;
+  DeviceInfo device = 6;             // initial identity; server uses it for duplicate detection
+}
+
+message EnrollResponse {
+  string agent_id = 1;
+  string device_id = 2;
+  bytes certificate_der = 3;         // short-lived client certificate (days, not years)
+  repeated bytes ca_chain_der = 4;
+  google.protobuf.Timestamp certificate_not_after = 5;
+  SignedEnvelope trusted_keys = 6;   // SignedContent.trusted_keys - the bootstrap key set
+  SignedEnvelope config = 7;         // SignedContent.config
+  string connect_endpoint = 8;       // 'host:port' of AgentService
+}

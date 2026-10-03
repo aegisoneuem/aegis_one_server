@@ -1,0 +1,13 @@
+# Generates Go code for both the server and the agent (both are Go).
+# Uses LOCAL plugins so generation also works on an offline / air-gapped build machine:
+#   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+#   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+# Then run:  buf generate
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: gen
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: gen
+    opt: paths=source_relative

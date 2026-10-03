@@ -1,0 +1,74 @@
+// =====================================================================================
+// AEGIS ONE - Agent <-> Server contract, v1
+// patch.proto: patch scan results.
+// Maps to DB tables: device_patch_state, devices.last_patch_scan_*, unmatched_patch_reports.
+// =====================================================================================
+syntax = "proto3";
+
+package aegis.agent.v1;
+
+import "aegis/agent/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "aegis-one/gen/aegis/agent/v1;agentv1";
+
+enum PatchDetectionSource {
+  PATCH_DETECTION_SOURCE_UNSPECIFIED = 0;
+  PATCH_DETECTION_SOURCE_WINDOWS_UPDATE_AGENT = 1;  // DB: agent_wua
+  PATCH_DETECTION_SOURCE_PACKAGE_MANAGER = 2;       // DB: agent_package_manager (apt, dnf/yum, zypper)
+  PATCH_DETECTION_SOURCE_RULE = 3;                  // DB: agent_rule (patch_applicability_rules)
+}
+
+enum PatchScanStatus {
+  PATCH_SCAN_STATUS_UNSPECIFIED = 0;
+  PATCH_SCAN_STATUS_SUCCEEDED = 1;
+  PATCH_SCAN_STATUS_PARTIAL = 2;
+  PATCH_SCAN_STATUS_FAILED = 3;
+}
+
+// 'superseded' is not here on purpose: the server derives it from patch_supersedence.
+enum PatchState {
+  PATCH_STATE_UNSPECIFIED = 0;
+  PATCH_STATE_MISSING = 1;
+  PATCH_STATE_INSTALLED = 2;
+  PATCH_STATE_PENDING_REBOOT = 3;
+  PATCH_STATE_FAILED = 4;
+}
+
+// A patch scan is always a FULL snapshot of every APPLICABLE update on the device
+// (missing + installed + pending reboot). Not-applicable updates are never sent.
+//
+// Server reconciliation:
+//   * status SUCCEEDED: rows in device_patch_state for this device+source that are NOT in
+//     `results` are no longer applicable and are removed.
+//   * status PARTIAL or FAILED: upsert what was reported, but NEVER delete - a broken scan
+//     must not wipe a device's known missing patches (that would fake compliance).
+//   * An identifier not found in patch_catalog goes to unmatched_patch_reports.
+message PatchScanReport {
+  google.protobuf.Timestamp scan_started_at = 1;
+  google.protobuf.Timestamp scan_completed_at = 2;
+  PatchScanStatus status = 3;
+  PatchDetectionSource source = 4;
+  string catalog_version = 5;         // offline scan-cab version / repo metadata timestamp used
+  repeated PatchResult results = 6;
+  string error_message = 7;
+}
+
+message PatchResult {
+  oneof identifier {
+    string vendor_update_id = 1;      // Windows UpdateID GUID
+    PackageRef package = 2;           // Linux / macOS package
+    string catalog_patch_id = 3;      // patch_catalog.id, for rule-evaluated (third-party) patches
+  }
+  string kb_or_advisory_id = 4;       // 'KB5041288', 'USN-7000-1' - informational
+  string title = 5;
+  PatchState state = 6;
+  google.protobuf.Timestamp installed_at = 7;
+  string last_error = 8;
+}
+
+message PackageRef {
+  string name = 1;                    // 'openssl'
+  string version = 2;                 // available/fixed version, 'epoch:version-release'
+  Architecture architecture = 3;
+}

@@ -1,0 +1,144 @@
+// =====================================================================================
+// AEGIS ONE - Agent <-> Server contract, v1
+// agent_service.proto: the long-lived stream every enrolled agent keeps open.
+// =====================================================================================
+syntax = "proto3";
+
+package aegis.agent.v1;
+
+import "aegis/agent/v1/commands.proto";
+import "aegis/agent/v1/common.proto";
+import "aegis/agent/v1/inventory.proto";
+import "aegis/agent/v1/patch.proto";
+import "aegis/agent/v1/telemetry.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "aegis-one/gen/aegis/agent/v1;agentv1";
+
+// All RPCs here require mTLS. The server identifies the agent from the client
+// certificate fingerprint (agent_certificates) - never from any id inside a message.
+// A revoked certificate or revoked agent is refused at the TLS/auth layer.
+service AgentService {
+  // Bidirectional, agent-initiated (the endpoint never listens for this). The agent
+  // reconnects with exponential backoff + random jitter so a server restart doesn't cause
+  // 50,000 agents to reconnect in the same second.
+  rpc Connect(stream ConnectRequest) returns (stream ConnectResponse);
+
+  // Short-lived certs are renewed before expiry using the current (still valid) cert.
+  rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
+
+  // Resumable download of a file listed in a signed ContentManifest. The agent verifies the
+  // complete file's SHA-256 against the manifest before use and deletes it on mismatch.
+  rpc DownloadContent(DownloadContentRequest) returns (stream DownloadContentResponse);
+}
+
+// ---- Agent -> Server ------------------------------------------------------------------
+
+message ConnectRequest {
+  string message_id = 1;             // unique per message, for tracing only
+  google.protobuf.Timestamp sent_at = 2;
+  // Set for sequenced data (inventory, software, patch scan, dex, command results).
+  // Unset (UNSPECIFIED / 0) for hello, heartbeat and command_ack.
+  DataStream stream = 3;
+  uint64 sequence = 4;               // monotonic per (agent, stream); survives agent restarts
+  oneof payload {
+    Hello hello = 10;
+    Heartbeat heartbeat = 11;
+    InventoryReport inventory = 12;
+    SoftwareInventoryReport software_inventory = 13;
+    PatchScanReport patch_scan = 14;
+    DexReport dex = 15;
+    CommandAck command_ack = 16;
+    CommandResult command_result = 17;
+  }
+}
+
+// Must be the first message on every new stream.
+message Hello {
+  string agent_version = 1;
+  OsFamily os_family = 2;
+  Architecture architecture = 3;
+  uint32 applied_config_version = 4;
+  uint64 trusted_key_set_version = 5;
+  string inventory_state_hash = 6;
+  string software_state_hash = 7;
+  repeated StreamPosition last_sent = 8;   // highest sequence the agent has produced per stream
+}
+
+// ---- Server -> Agent ------------------------------------------------------------------
+
+message ConnectResponse {
+  string message_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+  oneof payload {
+    HelloAck hello_ack = 10;
+    Ack ack = 11;
+    SignedEnvelope command = 12;       // SignedContent.command
+    SignedEnvelope config = 13;        // SignedContent.config
+    SignedEnvelope trusted_keys = 14;  // SignedContent.trusted_keys
+    RequestFullSync request_full_sync = 15;
+    Throttle throttle = 16;
+  }
+}
+
+message HelloAck {
+  string agent_id = 1;                 // informational; derived from the client certificate
+  // Agent computes its clock offset from this. Command expiry and certificate validity are
+  // checked against server-corrected time, so a drifted endpoint clock can't break them.
+  google.protobuf.Timestamp server_time = 2;
+  // Highest sequence the server has STORED per stream. The agent deletes everything up to
+  // this from its local buffer and resends the rest.
+  repeated StreamPosition server_positions = 3;
+}
+
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  ACK_STATUS_ACCEPTED = 1;
+  ACK_STATUS_DUPLICATE = 2;          // already stored earlier - agent drops it from its buffer
+  ACK_STATUS_REJECTED_INVALID = 3;   // malformed; agent logs it and drops it (retrying won't help)
+}
+
+// Sent once the message is durably handed off (DB or queue) - only then may the agent
+// delete it from its local buffer.
+message Ack {
+  DataStream stream = 1;
+  uint64 sequence = 2;
+  AckStatus status = 3;
+  string detail = 4;
+}
+
+message RequestFullSync {
+  repeated DataStream streams = 1;
+  string reason = 2;                 // e.g. 'inventory hash mismatch'
+}
+
+// Backpressure: during overload or a mass reconnect the server asks agents to slow down.
+// The agent stops sending non-heartbeat data for retry_after_seconds (plus jitter).
+message Throttle {
+  uint32 retry_after_seconds = 1;
+  string reason = 2;
+}
+
+// ---- Certificate renewal and content download ----------------------------------------
+
+message RenewCertificateRequest {
+  bytes csr_der = 1;                 // new key pair, generated on the device
+}
+
+message RenewCertificateResponse {
+  bytes certificate_der = 1;
+  repeated bytes ca_chain_der = 2;
+  google.protobuf.Timestamp certificate_not_after = 3;
+}
+
+message DownloadContentRequest {
+  string manifest_id = 1;
+  string file_name = 2;
+  uint64 offset = 3;                 // resume from here after an interrupted download
+}
+
+message DownloadContentResponse {
+  bytes data = 1;                    // chunks of at most 1 MiB
+  uint64 offset = 2;
+  bool last_chunk = 3;
+}

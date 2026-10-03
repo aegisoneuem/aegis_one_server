@@ -1,0 +1,24 @@
+# buf configuration for the Aegis One agent <-> server contract.
+#   buf lint      -> style + correctness checks
+#   buf generate  -> Go code into ./gen (see buf.gen.yaml)
+#   buf breaking --against '.git#branch=main'  -> fails if a change would break deployed agents
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - SERVICE_SUFFIX
+  ignore_only:
+    RPC_REQUEST_STANDARD_NAME:
+      - proto/agentcontrol/v1/control_plane.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - proto/agentcontrol/v1/control_plane.proto
+    SERVICE_SUFFIX:
+      - proto/agentcontrol/v1/control_plane.proto
+breaking:
+  use:
+    - WIRE_JSON

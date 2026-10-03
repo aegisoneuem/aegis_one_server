@@ -1,0 +1,39 @@
+// =====================================================================================
+// AEGIS ONE - Agent <-> Server contract, v1
+// telemetry.proto: heartbeat and DEX samples.
+// Maps to DB tables: agent_heartbeats, agents.last_heartbeat_at, device_dex_metrics.
+// =====================================================================================
+syntax = "proto3";
+
+package aegis.agent.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "aegis-one/gen/aegis/agent/v1;agentv1";
+
+// Small and frequent (interval from AgentConfig). Heartbeats are NOT sequenced or
+// buffered offline - a missed heartbeat is simply a gap, not data to replay.
+message Heartbeat {
+  float cpu_pct = 1;
+  float ram_pct = 2;
+  float disk_free_gb = 3;
+  bool pending_reboot = 4;
+  uint32 buffered_messages = 5;       // data queued locally, not yet acknowledged
+  uint32 applied_config_version = 6;
+  string agent_version = 7;
+}
+
+// DEX samples are batched: the agent samples every dex_sample_interval_seconds and sends
+// a batch with its next report, so one message can carry many samples.
+message DexReport {
+  repeated DexSample samples = 1;
+}
+
+message DexSample {
+  google.protobuf.Timestamp sampled_at = 1;
+  optional float boot_time_seconds = 2;   // only on the first sample after a boot
+  uint32 app_crash_count = 3;             // crashes since the previous sample
+  float cpu_pct = 4;
+  float ram_pct = 5;
+  float disk_pct = 6;
+}

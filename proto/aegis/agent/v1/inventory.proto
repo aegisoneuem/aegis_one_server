@@ -1,0 +1,190 @@
+// =====================================================================================
+// AEGIS ONE - Agent <-> Server contract, v1
+// inventory.proto: hardware/OS inventory and installed software.
+// Maps to DB tables: devices, device_network_interfaces, device_ip_addresses,
+// device_disks, device_security_posture, device_attribute_values, software_inventory.
+// =====================================================================================
+syntax = "proto3";
+
+package aegis.agent.v1;
+
+import "aegis/agent/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "aegis-one/gen/aegis/agent/v1;agentv1";
+
+// Delta rules (keeps bandwidth low - ADR "delta updates"):
+//   * Each SECTION (device, network, disks, security_posture, custom_attributes) is a
+//     message. A section that is PRESENT replaces that whole section on the server.
+//     A section that is ABSENT means "unchanged since last report".
+//   * is_full = true: every section is present; this is a complete snapshot.
+//   * state_hash is always sent: a hash of the agent's complete inventory. If the server's
+//     own hash of what it has stored doesn't match, it sends RequestFullSync.
+message InventoryReport {
+  bool is_full = 1;
+  string state_hash = 2;
+  DeviceInfo device = 3;
+  NetworkSection network = 4;
+  DiskSection disks = 5;
+  SecurityPosture security_posture = 6;
+  CustomAttributeSection custom_attributes = 7;
+}
+
+message DeviceInfo {
+  string hostname = 1;
+  string fqdn = 2;
+  OsFamily os_family = 3;
+  string os_version = 4;             // '10.0', '22.04', '14.5'
+  string os_edition = 5;             // 'Windows Server 2019 Datacenter', 'Ubuntu', 'macOS Sonoma'
+  string os_build = 6;               // '17763', '23F79'
+  optional int32 os_ubr = 7;         // Windows Update Build Revision
+  string kernel_version = 8;
+  Architecture architecture = 9;
+  bool is_server_os = 10;            // server derives devices.device_class from this
+  string smbios_uuid = 11;           // duplicate detection only - cloned VMs can share it
+  string machine_id = 12;
+  string manufacturer = 13;
+  string model = 14;
+  string serial_number = 15;
+  string cpu_model = 16;
+  double ram_gb = 17;
+  string bios_vendor = 18;
+  string bios_version = 19;
+  string domain_name = 20;
+  optional bool is_domain_joined = 21;
+  string time_zone = 22;
+  string locale = 23;
+  google.protobuf.Timestamp os_installed_at = 24;
+  google.protobuf.Timestamp last_boot_at = 25;
+  bool pending_reboot = 26;
+  string pending_reboot_reason = 27;
+  // PII. Collected only if the agent config allows it; empty otherwise.
+  string last_logged_on_user = 28;
+}
+
+enum InterfaceType {
+  INTERFACE_TYPE_UNSPECIFIED = 0;
+  INTERFACE_TYPE_ETHERNET = 1;
+  INTERFACE_TYPE_WIFI = 2;
+  INTERFACE_TYPE_VPN = 3;
+  INTERFACE_TYPE_VIRTUAL = 4;
+  INTERFACE_TYPE_OTHER = 5;
+}
+
+message NetworkSection {
+  repeated NetworkInterface interfaces = 1;
+}
+
+message NetworkInterface {
+  string name = 1;                   // 'Ethernet0', 'eth0', 'en0'
+  string mac_address = 2;            // 'aa:bb:cc:dd:ee:ff'
+  InterfaceType type = 3;
+  bool is_up = 4;
+  uint32 speed_mbps = 5;
+  bool dhcp_enabled = 6;
+  string gateway = 7;
+  repeated string dns_servers = 8;
+  repeated IpAddress ip_addresses = 9;
+}
+
+message IpAddress {
+  string address = 1;                // '10.20.5.14' or 'fe80::1'
+  uint32 prefix_length = 2;          // 24, 64 ...
+  bool is_primary = 3;
+}
+
+enum EncryptionType {
+  ENCRYPTION_TYPE_UNSPECIFIED = 0;
+  ENCRYPTION_TYPE_BITLOCKER = 1;
+  ENCRYPTION_TYPE_FILEVAULT = 2;
+  ENCRYPTION_TYPE_LUKS = 3;
+  ENCRYPTION_TYPE_OTHER = 4;
+  ENCRYPTION_TYPE_NONE = 5;
+}
+
+enum EncryptionStatus {
+  ENCRYPTION_STATUS_UNSPECIFIED = 0;
+  ENCRYPTION_STATUS_ENCRYPTED = 1;
+  ENCRYPTION_STATUS_ENCRYPTING = 2;
+  ENCRYPTION_STATUS_DECRYPTED = 3;
+}
+
+message DiskSection {
+  repeated Disk disks = 1;
+}
+
+message Disk {
+  string mount_point = 1;            // 'C:', '/', '/var'
+  string filesystem = 2;
+  double size_gb = 3;
+  double free_gb = 4;
+  EncryptionType encryption_type = 5;
+  EncryptionStatus encryption_status = 6;
+}
+
+message SecurityPosture {
+  optional bool tpm_present = 1;
+  string tpm_version = 2;
+  optional bool secure_boot_enabled = 3;
+  optional bool firewall_enabled = 4;
+  string av_product = 5;
+  optional bool av_realtime_enabled = 6;
+  google.protobuf.Timestamp av_signatures_updated_at = 7;
+  optional uint32 local_admin_count = 8;
+}
+
+message CustomAttributeSection {
+  repeated CustomAttributeValue values = 1;
+}
+
+// Value of an admin-defined attribute (attribute_definitions in the DB).
+message CustomAttributeValue {
+  string attribute_id = 1;
+  oneof value {
+    string text_value = 2;
+    double number_value = 3;
+    bool bool_value = 4;
+    google.protobuf.Timestamp time_value = 5;
+    string json_value = 6;
+  }
+  google.protobuf.Timestamp collected_at = 7;
+  string error = 8;                  // set when collection failed; value is then empty
+}
+
+// ---- Installed software -------------------------------------------------------------
+
+enum InstallSource {
+  INSTALL_SOURCE_UNSPECIFIED = 0;
+  INSTALL_SOURCE_MSI = 1;
+  INSTALL_SOURCE_WINDOWS_REGISTRY = 2;
+  INSTALL_SOURCE_WINDOWS_STORE = 3;
+  INSTALL_SOURCE_DEB = 4;
+  INSTALL_SOURCE_RPM = 5;
+  INSTALL_SOURCE_SNAP = 6;
+  INSTALL_SOURCE_MACOS_PKG = 7;
+  INSTALL_SOURCE_MACOS_APP_BUNDLE = 8;
+  INSTALL_SOURCE_OTHER = 9;
+}
+
+// is_full = true: `installed` is the complete list (server marks everything else removed).
+// is_full = false: `installed` holds only new/changed apps and `removed` lists uninstalls.
+message SoftwareInventoryReport {
+  bool is_full = 1;
+  string state_hash = 2;
+  repeated InstalledApp installed = 3;
+  repeated InstalledAppKey removed = 4;
+}
+
+message InstalledApp {
+  string name = 1;
+  string version = 2;
+  string publisher = 3;
+  string install_date = 4;           // 'YYYY-MM-DD' as reported by the OS; may be empty
+  Architecture architecture = 5;
+  InstallSource source = 6;
+}
+
+message InstalledAppKey {
+  string name = 1;
+  string version = 2;
+}

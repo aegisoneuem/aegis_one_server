@@ -1,0 +1,241 @@
+// =====================================================================================
+// AEGIS ONE - Agent <-> Server contract, v1
+// commands.proto: everything the server signs - commands, agent config, trusted keys,
+// content manifests - plus the agent's acknowledgements and results.
+// Maps to DB tables: agent_commands, agent_config_profiles, signing_keys,
+// content_manifests, agent_releases, agent_local_acl_policies.
+// =====================================================================================
+syntax = "proto3";
+
+package aegis.agent.v1;
+
+import "aegis/agent/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "aegis-one/gen/aegis/agent/v1;agentv1";
+
+// The only thing ever serialized into SignedEnvelope.signed_content.
+// Required signing key purpose:
+//   command, config, trusted_keys -> SIGNING_KEY_PURPOSE_COMMAND_SIGNING
+//   manifest (patch / software)   -> SIGNING_KEY_PURPOSE_MANIFEST_SIGNING
+//   manifest (agent release)      -> SIGNING_KEY_PURPOSE_AGENT_RELEASE_SIGNING
+// The agent rejects content signed with a key of the wrong purpose.
+message SignedContent {
+  oneof content {
+    CommandPayload command = 1;
+    AgentConfig config = 2;
+    TrustedKeySet trusted_keys = 3;
+    ContentManifest manifest = 4;
+  }
+}
+
+// ---- Commands -----------------------------------------------------------------------
+
+// Agent-side checks, in order, before anything runs:
+//   1. signature valid, key trusted, key purpose = COMMAND_SIGNING
+//   2. target_agent_id == this agent's own id    (stops replay onto another device)
+//   3. now < expires_at, using server-corrected time (stops replay later in time)
+//   4. idempotency_key not already executed       (retry returns the earlier result)
+// Any failure -> CommandAck with the matching REJECTED_* status; nothing is executed.
+message CommandPayload {
+  string command_id = 1;             // agent_commands.id
+  string target_agent_id = 2;
+  string idempotency_key = 3;
+  google.protobuf.Timestamp issued_at = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  string run_as_user = 6;            // empty = agent service account; non-empty is audited server-side
+  oneof action {
+    InstallPatches install_patches = 10;
+    SoftwareAction software_action = 11;
+    RunScan run_scan = 12;
+    Reboot reboot = 13;
+    ApplyLocalAcl apply_local_acl = 14;
+    UpdateAgent update_agent = 15;
+    CollectAttributes collect_attributes = 16;
+  }
+}
+
+enum RebootBehavior {
+  REBOOT_BEHAVIOR_UNSPECIFIED = 0;
+  REBOOT_BEHAVIOR_IMMEDIATE = 1;
+  REBOOT_BEHAVIOR_USER_DEFERRED = 2;
+  REBOOT_BEHAVIOR_NO_REBOOT = 3;
+}
+
+message InstallPatches {
+  // Each envelope wraps SignedContent.manifest, signed with the MANIFEST key. Every file is
+  // hash-checked after download and again right before install (ADR: fail-closed).
+  repeated SignedEnvelope manifests = 1;
+  RebootBehavior reboot_behavior = 2;
+  uint32 reboot_defer_minutes = 3;
+  uint32 max_attempts = 4;
+  google.protobuf.Timestamp do_not_start_after = 5;   // end of maintenance window
+}
+
+enum SoftwareActionType {
+  SOFTWARE_ACTION_TYPE_UNSPECIFIED = 0;
+  SOFTWARE_ACTION_TYPE_INSTALL = 1;
+  SOFTWARE_ACTION_TYPE_UPDATE = 2;
+  SOFTWARE_ACTION_TYPE_REMOVE = 3;
+}
+
+message SoftwareAction {
+  SoftwareActionType action = 1;
+  SignedEnvelope manifest = 2;       // SignedContent.manifest; not needed for REMOVE by name
+  string package_name = 3;           // used for REMOVE
+  string install_arguments = 4;      // silent args from software_packages
+  string uninstall_command = 5;
+}
+
+enum ScanType {
+  SCAN_TYPE_UNSPECIFIED = 0;
+  SCAN_TYPE_PATCH = 1;
+  SCAN_TYPE_SOFTWARE_INVENTORY = 2;
+  SCAN_TYPE_FULL_INVENTORY = 3;
+}
+
+message RunScan {
+  repeated ScanType types = 1;
+}
+
+message Reboot {
+  uint32 delay_seconds = 1;
+  string user_message = 2;
+  bool force = 3;                    // close apps without waiting; use sparingly
+}
+
+// LAAC: which local groups may talk to the agent's IPC channel.
+message ApplyLocalAcl {
+  uint32 policy_version = 1;         // agent ignores a version older than the one it has
+  repeated string windows_groups = 2;
+  repeated string linux_groups = 3;
+  repeated string macos_groups = 4;
+}
+
+message UpdateAgent {
+  string version = 1;                // '1.4.2'
+  repeated uint32 version_sort = 2;  // [1, 4, 2]
+  SignedEnvelope release_manifest = 3;  // SignedContent.manifest, AGENT_RELEASE_SIGNING key
+  // Anti-downgrade: the agent refuses a version lower than its own unless this is true,
+  // and it is only set when an admin explicitly authorised a rollback.
+  bool allow_downgrade = 4;
+}
+
+// Collect admin-defined attributes. Specs that execute code on the endpoint are only
+// ever delivered inside this signed command - never as free text.
+message CollectAttributes {
+  repeated AttributeSpec attributes = 1;
+}
+
+message AttributeSpec {
+  string attribute_id = 1;           // attribute_definitions.id
+  string source = 2;                 // 'registry', 'wmi', 'file', 'script', 'plist', 'command'
+  string spec_json = 3;              // attribute_definitions.collection_spec
+}
+
+// ---- Command acknowledgements and results --------------------------------------------
+
+enum CommandAckStatus {
+  COMMAND_ACK_STATUS_UNSPECIFIED = 0;
+  COMMAND_ACK_STATUS_ACCEPTED = 1;
+  COMMAND_ACK_STATUS_REJECTED_SIGNATURE = 2;      // DB: agent_commands.status = rejected_signature
+  COMMAND_ACK_STATUS_REJECTED_UNTRUSTED_KEY = 3;
+  COMMAND_ACK_STATUS_REJECTED_WRONG_TARGET = 4;
+  COMMAND_ACK_STATUS_REJECTED_EXPIRED = 5;
+  COMMAND_ACK_STATUS_DUPLICATE = 6;               // already executed; result is re-sent
+}
+
+// Sent immediately on receipt, before execution starts.
+message CommandAck {
+  string command_id = 1;
+  CommandAckStatus status = 2;
+  string detail = 3;
+}
+
+enum CommandOutcome {
+  COMMAND_OUTCOME_UNSPECIFIED = 0;
+  COMMAND_OUTCOME_SUCCEEDED = 1;
+  COMMAND_OUTCOME_PARTIAL = 2;
+  COMMAND_OUTCOME_FAILED = 3;
+  COMMAND_OUTCOME_CANCELLED = 4;
+}
+
+// Sent on the DATA_STREAM_COMMAND_RESULT stream (sequenced, buffered offline).
+message CommandResult {
+  string command_id = 1;
+  CommandOutcome outcome = 2;
+  google.protobuf.Timestamp started_at = 3;
+  google.protobuf.Timestamp completed_at = 4;
+  int32 exit_code = 5;
+  string output = 6;                 // truncated to 64 KiB by the agent
+  bool output_truncated = 7;
+  repeated ItemResult items = 8;     // per patch / per package
+  bool reboot_required = 9;
+}
+
+message ItemResult {
+  string item_id = 1;                // manifest content_id
+  CommandOutcome outcome = 2;
+  string error = 3;
+}
+
+// ---- Agent configuration --------------------------------------------------------------
+
+// Resolved on the server from agent_config_profiles, delivered signed.
+message AgentConfig {
+  uint32 config_version = 1;
+  uint32 heartbeat_interval_seconds = 2;
+  uint32 inventory_interval_seconds = 3;
+  uint32 patch_scan_interval_seconds = 4;
+  uint32 dex_sample_interval_seconds = 5;
+  optional uint32 bandwidth_limit_kbps = 6;   // unset = no limit
+  bool peer_cache_allowed = 7;
+  repeated string modules_enabled = 8;        // 'patch', 'software', 'inventory', 'va', 'dex'
+  string log_level = 9;
+  bool collect_logged_on_user = 10;           // PII switch for DeviceInfo.last_logged_on_user
+}
+
+// ---- Trusted signing keys (rotation with dual-key overlap) ----------------------------
+
+// Accepted only if BOTH hold:
+//   * signed by a key already in the agent's CURRENT set with COMMAND_SIGNING purpose
+//   * version is higher than the agent's current version (no rollback to an old key set)
+// Bootstrap: the very first set arrives in EnrollResponse over TLS pinned to the server CA
+// shipped in the installer - that pinned channel, not a prior key, is what it's trusted by.
+message TrustedKeySet {
+  uint64 version = 1;
+  repeated TrustedKey keys = 2;
+}
+
+message TrustedKey {
+  string key_id = 1;                 // signing_keys.id
+  SigningKeyPurpose purpose = 2;
+  bytes public_key = 3;              // 32-byte Ed25519 public key
+  google.protobuf.Timestamp not_after = 4;   // set for a retiring key = end of overlap window
+}
+
+// ---- Content manifests ---------------------------------------------------------------
+
+enum ContentType {
+  CONTENT_TYPE_UNSPECIFIED = 0;
+  CONTENT_TYPE_PATCH = 1;
+  CONTENT_TYPE_SOFTWARE_PACKAGE = 2;
+  CONTENT_TYPE_AGENT_RELEASE = 3;
+}
+
+message ContentManifest {
+  string manifest_id = 1;            // content_manifests.id
+  ContentType content_type = 2;
+  string content_id = 3;             // patch_catalog.id / software_packages.id / agent_releases.id
+  string version = 4;
+  repeated ContentFile files = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+message ContentFile {
+  string file_name = 1;
+  uint64 size_bytes = 2;
+  bytes sha256 = 3;                  // 32 bytes
+  Architecture architecture = 4;
+  string language = 5;
+}

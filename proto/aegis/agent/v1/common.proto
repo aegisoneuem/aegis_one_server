@@ -1,0 +1,71 @@
+// =====================================================================================
+// AEGIS ONE - Agent <-> Server contract, v1
+// common.proto: shared enums and the signed-envelope wrapper.
+//
+// Compatibility rules for this package (enforced by `buf breaking`):
+//   * Never change or reuse a field number. Remove a field by marking it `reserved`.
+//   * Never change a field's type. Add a new field instead.
+//   * New enum values are fine; agents must treat unknown values as UNSPECIFIED.
+//   * A breaking change means a new package (aegis.agent.v2) - old agents keep working on v1.
+// =====================================================================================
+syntax = "proto3";
+
+package aegis.agent.v1;
+
+option go_package = "aegis-one/gen/aegis/agent/v1;agentv1";
+
+enum OsFamily {
+  OS_FAMILY_UNSPECIFIED = 0;
+  OS_FAMILY_WINDOWS = 1;
+  OS_FAMILY_LINUX = 2;
+  OS_FAMILY_MACOS = 3;
+}
+
+enum Architecture {
+  ARCHITECTURE_UNSPECIFIED = 0;
+  ARCHITECTURE_X86 = 1;
+  ARCHITECTURE_X64 = 2;
+  ARCHITECTURE_ARM64 = 3;
+}
+
+// Matches agent_stream_offsets.stream in the database. Every non-heartbeat message from
+// the agent carries (stream, sequence) so data resent after an offline period is applied
+// exactly once.
+enum DataStream {
+  DATA_STREAM_UNSPECIFIED = 0;
+  DATA_STREAM_INVENTORY = 1;
+  DATA_STREAM_SOFTWARE_INVENTORY = 2;
+  DATA_STREAM_PATCH_SCAN = 3;
+  DATA_STREAM_VULN_SCAN = 4;
+  DATA_STREAM_DEX = 5;
+  DATA_STREAM_COMMAND_RESULT = 6;
+}
+
+// Matches signing_keys.key_purpose in the database.
+enum SigningKeyPurpose {
+  SIGNING_KEY_PURPOSE_UNSPECIFIED = 0;
+  SIGNING_KEY_PURPOSE_COMMAND_SIGNING = 1;   // commands, agent config, trusted-key-set updates
+  SIGNING_KEY_PURPOSE_MANIFEST_SIGNING = 2;  // patch / software content manifests
+  SIGNING_KEY_PURPOSE_AGENT_RELEASE_SIGNING = 3;
+}
+
+// Anything the agent must verify BEFORE acting on it travels in this wrapper.
+//
+// `signed_content` is a serialized SignedContent message (commands.proto). The Ed25519
+// signature covers these exact bytes. The agent verifies first, then parses - it never
+// re-serializes and re-checks, because protobuf encoding is not canonical and the same
+// message can legally encode to different bytes.
+//
+// The content type lives INSIDE the signed bytes (SignedContent is a oneof), so a validly
+// signed config blob cannot be replayed as a command by moving it to a different field.
+message SignedEnvelope {
+  bytes signed_content = 1;
+  bytes signature = 2;         // 64-byte Ed25519 signature over signed_content
+  string signing_key_id = 3;   // signing_keys.id; must be in the agent's current trusted key set
+}
+
+// Last sequence number seen for one stream - used in Hello / HelloAck to resync buffers.
+message StreamPosition {
+  DataStream stream = 1;
+  uint64 sequence = 2;
+}

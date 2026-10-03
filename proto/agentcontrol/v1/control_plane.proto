@@ -1,0 +1,123 @@
+// =====================================================================================
+// AEGIS ONE - Agent <-> Server contract actually implemented by the shipped agent
+// (aegis_one_agent-main.zip), reconstructed from its usage of a sibling Go module
+// "github.com/aegisoneuem/aegis_one_proto" (package alias "pb") that was not
+// included with the agent source.
+//
+// STATUS: reconstructed, not authoritative. Field numbers below are assigned by us
+// in declaration order; they are NOT sourced from the original aegis_one_proto
+// repo. This is fine as long as both ends are generated from THIS file, but it is
+// NOT wire-compatible with a copy of the agent built against the colleague's real
+// aegis_one_proto module. Replace this file (and regenerate) the moment the real
+// aegis_one_proto source is available, reconciling field numbers against it.
+//
+// Deliberately NOT the locked ADR v7 / Agent Spec v5 contract in
+// proto/aegis/agent/v1 (no Hello/HelloAck handshake, no SignedEnvelope, no
+// per-stream sequence dedup, no TrustedKeySet rotation - commands are verified
+// against a single Ed25519 key hardcoded in the agent binary). Sam's call
+// (2026-10-02): server implements this simpler contract first since the agent is
+// already written against it.
+// =====================================================================================
+syntax = "proto3";
+
+package agentcontrol.v1;
+
+option go_package = "aegis-one/gen/agentcontrol/v1;agentcontrolv1";
+
+// Bidirectional, agent-initiated, one stream per connected agent.
+service AgentControlPlane {
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+}
+
+// ---- Agent -> Server ------------------------------------------------------------------
+
+message AgentMessage {
+  oneof payload {
+    Heartbeat heartbeat = 1;
+    CommandResult command_result = 2;
+    InstallStatus install_status = 3;
+    PatchScanResult patch_scan_result = 4;
+  }
+}
+
+message Heartbeat {
+  string device_id = 1;
+  string agent_version = 2;
+  string os = 3;
+  string hostname = 4;
+  int64 timestamp = 5;   // unix seconds
+}
+
+message CommandResult {
+  string command_id = 1;
+  string status = 2;     // "success" | "failed" | "rejected"
+  string message = 3;
+}
+
+enum InstallPhase {
+  INSTALL_PHASE_UNSPECIFIED = 0;
+  INSTALL_PHASE_QUEUED = 1;
+  INSTALL_PHASE_DOWNLOADING = 2;
+  INSTALL_PHASE_VERIFYING = 3;
+  INSTALL_PHASE_RUNNING = 4;
+  INSTALL_PHASE_SUCCESS = 5;
+  INSTALL_PHASE_FAILED = 6;
+}
+
+message InstallStatus {
+  string command_id = 1;
+  string kb = 2;
+  InstallPhase phase = 3;
+  int32 exit_code = 4;
+  bool reboot_required = 5;
+  string reason = 6;     // failure reason
+  string detail = 7;     // e.g. "already installed (skipped)"
+}
+
+message MissingUpdate {
+  string update_id = 1;
+  repeated string kb_article_ids = 2;
+  string title = 3;
+  string classification = 4;
+  repeated string products = 5;
+  string type = 6;
+  string msrc_severity = 7;
+  repeated string cve_ids = 8;
+  double size_mb = 9;
+  bool reboot_required = 10;
+}
+
+message PatchScanResult {
+  string device_id = 1;
+  string product_name = 2;
+  string display_version = 3;
+  string build = 4;
+  string architecture = 5;
+  int64 collected_at = 6;    // unix seconds
+  string source = 7;         // e.g. "offline-cab"
+  repeated MissingUpdate missing = 8;
+}
+
+// ---- Server -> Agent ------------------------------------------------------------------
+
+message ServerMessage {
+  oneof payload {
+    Command command = 1;
+  }
+}
+
+// Signature is an Ed25519 signature over payload, verified by the agent against
+// its single hardcoded trusted public key (no key rotation in this contract).
+message Command {
+  string command_id = 1;
+  string type = 2;        // "hostname" | "whoami" | "echo" | "install_patch" | ...
+  bytes payload = 3;       // opaque to the envelope; "install_patch" carries a serialized InstallPatchSpec
+  bytes signature = 4;
+}
+
+message InstallPatchSpec {
+  string kb = 1;
+  string file_path = 2;         // path on the AGENT machine; server does not stream bytes here
+  string expected_hash = 3;
+  string hash_algorithm = 4;
+}
