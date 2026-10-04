@@ -18,6 +18,7 @@ import (
 	"log/slog"
 
 	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	"aegis-one/internal/commands"
 	"aegis-one/internal/complianceapi"
 	"aegis-one/internal/config"
 	"aegis-one/internal/crypto"
@@ -73,7 +74,11 @@ func main() {
 	if pool == nil {
 		log.Warn("identity tracking disabled (no database); trusting agent-reported device_id as-is")
 	}
-	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool))
+	var cmdStore *commands.Store
+	if pool != nil {
+		cmdStore = commands.New(pool)
+	}
+	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool), cmdStore)
 	agentcontrolv1.RegisterAgentControlPlaneServer(grpcSrv, agentSrv)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
@@ -83,16 +88,26 @@ func main() {
 	}
 
 	var signingKey ed25519.PrivateKey
+	var signingKeyID string
 	if key, err := signing.LoadPrivateKey(cfg.CommandSigningKeyFile); err != nil {
 		log.Warn("command signing key not loaded; push API will 503", "error", err.Error())
 	} else {
 		signingKey = key
 		log.Info("command signing key loaded", "file", cfg.CommandSigningKeyFile)
+		if cmdStore != nil {
+			id, err := cmdStore.ResolveSigningKey(ctx, key, cfg.CommandSigningKeyFile)
+			if err != nil {
+				log.Error("could not resolve signing key in signing_keys", "error", err.Error())
+				os.Exit(1)
+			}
+			signingKeyID = id
+			log.Info("command signing key registered", "signing_key_id", id)
+		}
 	}
 
 	httpSrv := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: httpMux(pool, agentSrv, signingKey, log),
+		Handler: httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, log),
 	}
 
 	var wg sync.WaitGroup
@@ -128,7 +143,7 @@ func main() {
 	log.Info("shutdown complete")
 }
 
-func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, signingKey ed25519.PrivateKey, log *slog.Logger) http.Handler {
+func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -145,7 +160,7 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, signingKey ed25519
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ready"))
 	})
-	mux.Handle("/internal/push", pushapi.New(agentSrv, signingKey, log))
+	mux.Handle("/internal/push", pushapi.New(agentSrv, cmdStore, signingKey, signingKeyID, log))
 	mux.Handle("/internal/compliance", complianceapi.New(pool))
 	return mux
 }

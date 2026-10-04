@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	"aegis-one/internal/commands"
 	"aegis-one/internal/identity"
 	"aegis-one/internal/ingest"
 
@@ -35,13 +36,14 @@ type Server struct {
 	log      *slog.Logger
 	identity *identity.Resolver
 	ingest   *ingest.Store
+	commands *commands.Store
 
 	mu      sync.Mutex
 	clients map[string]chan *agentcontrolv1.ServerMessage // device_id -> outbound queue
 }
 
-func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store) *Server {
-	return &Server{log: log, identity: idr, ingest: ing, clients: make(map[string]chan *agentcontrolv1.ServerMessage)}
+func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store, cmds *commands.Store) *Server {
+	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, clients: make(map[string]chan *agentcontrolv1.ServerMessage)}
 }
 
 // Dispatch queues msg for delivery to the agent currently connected as deviceID.
@@ -252,6 +254,13 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			"command_id", cr.GetCommandId(),
 			"status", cr.GetStatus(),
 			"message", cr.GetMessage())
+		if known != nil {
+			if applied, err := s.commands.ApplyCommandResult(ctx, known.AgentUUID, cr); err != nil {
+				s.log.Error("record command result failed", "command_id", cr.GetCommandId(), "error", err.Error())
+			} else if !applied {
+				s.log.Warn("command result matched no open command for this agent", "command_id", cr.GetCommandId())
+			}
+		}
 
 	case *agentcontrolv1.AgentMessage_InstallStatus:
 		st := payload.InstallStatus
@@ -262,6 +271,13 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			"exit_code", st.GetExitCode(),
 			"reboot_required", st.GetRebootRequired(),
 			"reason", st.GetReason())
+		if known != nil {
+			if applied, err := s.commands.ApplyInstallStatus(ctx, known.AgentUUID, st); err != nil {
+				s.log.Error("record install status failed", "command_id", st.GetCommandId(), "error", err.Error())
+			} else if !applied {
+				s.log.Warn("install status matched no open command for this agent", "command_id", st.GetCommandId())
+			}
+		}
 
 	case *agentcontrolv1.AgentMessage_PatchScanResult:
 		psr := payload.PatchScanResult

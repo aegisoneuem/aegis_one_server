@@ -1,24 +1,24 @@
 // Package pushapi is a minimal, internal-only HTTP trigger for pushing a signed
 // command to a connected agent. There is no admin UI/API layer yet, so this
-// exists purely so a signed dispatch can be tested/operated from curl; it is NOT
-// meant to be exposed outside the management network.
+// exists so a signed dispatch can be operated from curl; it is NOT meant to be
+// exposed outside the management network (no authentication).
 //
-// It does not persist to agent_commands (that table's agent_id is a UUID FK into
-// agents, which assumes a proper enrollment flow this simplified agent contract
-// doesn't have - see memory/project notes). A command sent here is fire-and-forget
-// at the DB level: delivery still happens over the signed gRPC channel, just
-// without an audit row yet.
+// Every push is recorded in agent_commands (+ audit_log) BEFORE it is sent, and
+// the row's UUID is the wire command_id. A database is therefore required -
+// un-audited command dispatch to endpoints is refused.
 package pushapi
 
 import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 
 	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	"aegis-one/internal/commands"
 	"aegis-one/internal/signing"
 
 	"google.golang.org/protobuf/proto"
@@ -29,26 +29,33 @@ type Dispatcher interface {
 }
 
 type Handler struct {
-	dispatcher Dispatcher
-	signingKey ed25519.PrivateKey // nil if unavailable; handler 503s instead of crashing
-	log        *slog.Logger
+	dispatcher   Dispatcher
+	store        *commands.Store // nil when no database is configured
+	signingKey   ed25519.PrivateKey
+	signingKeyID string
+	log          *slog.Logger
 }
 
-func New(dispatcher Dispatcher, signingKey ed25519.PrivateKey, log *slog.Logger) *Handler {
-	return &Handler{dispatcher: dispatcher, signingKey: signingKey, log: log}
+func New(dispatcher Dispatcher, store *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, log *slog.Logger) *Handler {
+	return &Handler{dispatcher: dispatcher, store: store, signingKey: signingKey, signingKeyID: signingKeyID, log: log}
 }
 
 // ServeHTTP handles POST /internal/push.
 //
 // Generic command:   ?device_id=X&type=hostname
 // Install a patch:   ?device_id=X&type=install_patch&kb=KB123&file_path=C:\...\patch.msu[&expected_hash=...&hash_algorithm=sha256]
+// Optional on both:  &idempotency_key=K  - a repeat with the same key is NOT re-sent.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	if h.signingKey == nil {
-		http.Error(w, "command signing key not loaded on this server (run cmd/keygen)", http.StatusServiceUnavailable)
+	if h.store == nil {
+		http.Error(w, "database required: commands are only dispatched with an agent_commands audit row", http.StatusServiceUnavailable)
+		return
+	}
+	if h.signingKey == nil || h.signingKeyID == "" {
+		http.Error(w, "command signing key not loaded/registered on this server (run cmd/keygen)", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -60,59 +67,91 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload []byte
+	var wirePayload []byte
+	var auditPayload map[string]any
 	switch cmdType {
 	case "install_patch":
-		kb := q.Get("kb")
-		filePath := q.Get("file_path")
-		if kb == "" || filePath == "" {
-			http.Error(w, "install_patch requires kb and file_path", http.StatusBadRequest)
-			return
-		}
 		spec := &agentcontrolv1.InstallPatchSpec{
-			Kb:            kb,
-			FilePath:      filePath,
+			Kb:            q.Get("kb"),
+			FilePath:      q.Get("file_path"),
 			ExpectedHash:  q.Get("expected_hash"),
 			HashAlgorithm: q.Get("hash_algorithm"),
+		}
+		if spec.Kb == "" || spec.FilePath == "" {
+			http.Error(w, "install_patch requires kb and file_path", http.StatusBadRequest)
+			return
 		}
 		marshaled, err := proto.Marshal(spec)
 		if err != nil {
 			http.Error(w, "marshal install spec: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		payload = marshaled
+		wirePayload = marshaled
+		auditPayload = map[string]any{
+			"kb": spec.Kb, "file_path": spec.FilePath,
+			"expected_hash": spec.ExpectedHash, "hash_algorithm": spec.HashAlgorithm,
+		}
 	default:
-		payload = []byte(q.Get("payload"))
+		wirePayload = []byte(q.Get("payload"))
+		auditPayload = map[string]any{"payload": q.Get("payload")}
 	}
 
-	commandID, err := randomID()
+	ctx := r.Context()
+	agentUUID, err := h.store.AgentForDevice(ctx, deviceID)
+	if errors.Is(err, commands.ErrNoAgent) {
+		http.Error(w, fmt.Sprintf("unknown device_id %q (never connected, or its agent is revoked)", deviceID), http.StatusNotFound)
+		return
+	}
 	if err != nil {
-		http.Error(w, "generate command id: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "resolve agent: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	cmd := &agentcontrolv1.Command{
-		CommandId: commandID,
-		Type:      cmdType,
-		Payload:   payload,
-		Signature: signing.Sign(h.signingKey, payload),
+	idemKey := q.Get("idempotency_key")
+	if idemKey == "" {
+		if idemKey, err = randomKey(); err != nil {
+			http.Error(w, "generate idempotency key: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
-	msg := &agentcontrolv1.ServerMessage{Payload: &agentcontrolv1.ServerMessage_Command{Command: cmd}}
 
+	signature := signing.Sign(h.signingKey, wirePayload)
+	commandID, existing, err := h.store.Create(ctx, commands.Issue{
+		AgentUUID: agentUUID, DeviceID: deviceID, Type: cmdType, Payload: auditPayload,
+		Signature: signature, SigningKeyID: h.signingKeyID, IdempotencyKey: idemKey,
+	})
+	if err != nil {
+		http.Error(w, "record command: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if existing != nil {
+		http.Error(w, fmt.Sprintf("idempotency_key already used by command_id=%s (status=%s); not re-sent", existing.ID, existing.Status), http.StatusConflict)
+		return
+	}
+
+	msg := &agentcontrolv1.ServerMessage{Payload: &agentcontrolv1.ServerMessage_Command{Command: &agentcontrolv1.Command{
+		CommandId: commandID, Type: cmdType, Payload: wirePayload, Signature: signature,
+	}}}
 	if err := h.dispatcher.Dispatch(deviceID, msg); err != nil {
+		if mErr := h.store.MarkFailed(ctx, commandID, err.Error()); mErr != nil {
+			h.log.Error("could not mark command failed", "command_id", commandID, "error", mErr.Error())
+		}
 		h.log.Warn("push failed", "device_id", deviceID, "command_id", commandID, "error", err.Error())
-		http.Error(w, err.Error(), http.StatusConflict)
+		http.Error(w, fmt.Sprintf("%v (recorded as command_id=%s, status=failed)", err, commandID), http.StatusConflict)
 		return
+	}
+	if err := h.store.MarkDispatched(ctx, commandID); err != nil {
+		h.log.Error("could not mark command dispatched", "command_id", commandID, "error", err.Error())
 	}
 
 	h.log.Info("command pushed", "device_id", deviceID, "command_id", commandID, "type", cmdType)
-	fmt.Fprintf(w, "queued command_id=%s for device_id=%s\n", commandID, deviceID)
+	fmt.Fprintf(w, "dispatched command_id=%s to device_id=%s\n", commandID, deviceID)
 }
 
-func randomID() (string, error) {
-	b := make([]byte, 8)
+func randomKey() (string, error) {
+	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return "cmd-" + hex.EncodeToString(b), nil
+	return "auto-" + hex.EncodeToString(b), nil
 }
