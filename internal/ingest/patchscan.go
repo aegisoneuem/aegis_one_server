@@ -15,6 +15,7 @@ type PatchScanSummary struct {
 	Matched         int // missing updates linked to a known patch_catalog row
 	Unmatched       int // missing updates with no matching KB in patch_catalog yet
 	MarkedInstalled int // previously-missing rows no longer reported missing
+	SLAAssigned     int // open rows that got a policy + sla_due_at this scan
 }
 
 // PatchScan treats every received PatchScanResult as a full, successful snapshot
@@ -59,10 +60,15 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *agent
 			INSERT INTO device_patch_state (device_id, patch_id, state, detection_source, first_detected_missing_at, last_evaluated_at)
 			VALUES ($1, $2, 'missing', 'agent_wua', now(), now())
 			ON CONFLICT (device_id, patch_id) DO UPDATE SET
-				state = 'missing',
 				detection_source = 'agent_wua',
 				last_evaluated_at = now(),
-				first_detected_missing_at = COALESCE(device_patch_state.first_detected_missing_at, now())`,
+				-- A patch that was installed and is missing again (e.g. rolled back)
+				-- starts a fresh SLA clock rather than inheriting the old one.
+				first_detected_missing_at = CASE WHEN device_patch_state.state = 'installed' THEN now()
+				                                 ELSE COALESCE(device_patch_state.first_detected_missing_at, now()) END,
+				sla_due_at = CASE WHEN device_patch_state.state = 'installed' THEN NULL ELSE device_patch_state.sla_due_at END,
+				policy_id  = CASE WHEN device_patch_state.state = 'installed' THEN NULL ELSE device_patch_state.policy_id END,
+				state = 'missing'`,
 			known.DeviceUUID, patchID,
 		); err != nil {
 			return summary, fmt.Errorf("upsert device_patch_state for patch %s: %w", patchID, err)
@@ -81,6 +87,10 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *agent
 		return summary, fmt.Errorf("mark resolved device_patch_state rows: %w", err)
 	}
 	summary.MarkedInstalled = int(tag.RowsAffected())
+
+	if summary.SLAAssigned, err = assignSLA(ctx, tx, known.DeviceUUID); err != nil {
+		return summary, fmt.Errorf("assign SLA: %w", err)
+	}
 
 	// device_patch_compliance_current treats a stale last_patch_scan_at as
 	// 'unknown' compliance (0005/0007) - without this, every device would show
