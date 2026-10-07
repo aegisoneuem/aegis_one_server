@@ -20,9 +20,11 @@ import (
 
 	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
 	"aegis-one/internal/apiauth"
+	"aegis-one/internal/cabfeed"
 	"aegis-one/internal/commands"
 	"aegis-one/internal/complianceapi"
 	"aegis-one/internal/config"
+	"aegis-one/internal/contentapi"
 	"aegis-one/internal/crypto"
 	"aegis-one/internal/db"
 	"aegis-one/internal/feedsched"
@@ -112,14 +114,14 @@ func main() {
 
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, log),
+		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, cfg.ContentDir, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		// net/http logs TLS handshake errors etc. through the std logger; route
 		// them through slog so every server log line stays structured JSON.
 		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 	if cfg.HTTPTLS {
-		tlsCfg, err := crypto.HTTPServerTLSConfig(cfg.HTTPTLSCertFile, cfg.HTTPTLSKeyFile)
+		tlsCfg, err := crypto.HTTPServerTLSConfig(cfg.HTTPTLSCertFile, cfg.HTTPTLSKeyFile, cfg.TLSCAFile)
 		if err != nil {
 			log.Error("HTTPS setup failed (set AEGIS_HTTP_TLS_CERT/KEY, or AEGIS_HTTP_TLS=off only behind a TLS proxy)", "error", err.Error())
 			os.Exit(1)
@@ -165,7 +167,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			log.Info("feed scheduler started", "check_every", feedsched.CheckEvery.String())
-			feedsched.New(pool, log, feedJobs()...).Run(ctx)
+			feedsched.New(pool, log, feedJobs(cfg.ContentDir)...).Run(ctx)
 		}()
 	}
 
@@ -186,7 +188,7 @@ func main() {
 // feedJobs lists the scheduled feeds. Names must match the content_feeds.name
 // each sync records under. MSRC runs first, but either order converges
 // (both call kev.Apply).
-func feedJobs() []feedsched.Job {
+func feedJobs(contentDir string) []feedsched.Job {
 	return []feedsched.Job{
 		{Name: "microsoft_cvrf", Run: func(ctx context.Context, pool *pgxpool.Pool) (string, error) {
 			s, err := patchfeed.RunLatest(ctx, pool)
@@ -198,10 +200,23 @@ func feedJobs() []feedsched.Job {
 			return fmt.Sprintf("catalog %s: %d entries, %d CVE added, %d flagged, %d un-flagged, %d has_kev changed, %d deadlines tightened",
 				s.CatalogVersion, s.Entries, s.CVEsAdded, s.CVEsFlagged, s.CVEsUnflagged, s.PatchesChanged, s.DeadlinesTightened), err
 		}},
+		// ~640 MB; a conditional GET makes the daily check a 304 when unchanged,
+		// but a real download needs far more than the default run timeout.
+		{Name: "microsoft_wsusscn2", Timeout: time.Hour, Run: func(ctx context.Context, pool *pgxpool.Pool) (string, error) {
+			res, err := cabfeed.Sync(ctx, pool, contentDir)
+			if err != nil || res.Catalog == nil {
+				return "no catalog", err
+			}
+			state := "unchanged"
+			if res.Changed {
+				state = "downloaded"
+			}
+			return fmt.Sprintf("%s, sha256 %s, %d bytes", state, res.Catalog.SHA256, res.Catalog.SizeBytes), nil
+		}},
 	}
 }
 
-func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, log *slog.Logger) http.Handler {
+func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, contentDir string, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -224,5 +239,7 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 	auth := apiauth.New(pool, log)
 	mux.Handle("/internal/push", auth.Require("", pushapi.New(agentSrv, cmdStore, signingKey, signingKeyID, log)))
 	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool)))
+	// /content/* authorizes per request: agent mTLS cert or a content.download token.
+	mux.Handle("/content/", contentapi.New(pool, contentDir, identity.New(pool), auth, log))
 	return mux
 }

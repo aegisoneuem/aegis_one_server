@@ -29,8 +29,9 @@ const (
 // Job is one feed: Name must match the content_feeds.name its sync writes.
 // Run returns a short human-readable result for the log.
 type Job struct {
-	Name string
-	Run  func(ctx context.Context, pool *pgxpool.Pool) (string, error)
+	Name    string
+	Run     func(ctx context.Context, pool *pgxpool.Pool) (string, error)
+	Timeout time.Duration // 0 = RunTimeout
 }
 
 type Scheduler struct {
@@ -99,7 +100,11 @@ func (s *Scheduler) runIfDue(ctx context.Context, job Job) {
 	}
 
 	s.log.Info("feed sync starting", "feed", job.Name, "reason", reason)
-	runCtx, cancel := context.WithTimeout(ctx, RunTimeout)
+	timeout := job.Timeout
+	if timeout == 0 {
+		timeout = RunTimeout
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	started := time.Now()
 	result, err := job.Run(runCtx, s.pool)

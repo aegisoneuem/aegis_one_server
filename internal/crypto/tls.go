@@ -27,19 +27,27 @@ func loadCAPool(caPath string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// HTTPServerTLSConfig loads the HTTPS API's certificate. Server-auth only (API
-// callers authenticate with bearer tokens, not client certs). Minimum TLS 1.2,
-// not the agent channel's 1.3: corporate proxies and scanners in front of the
-// API/console still commonly speak only 1.2. Loaded at startup so a missing or
-// bad cert fails fast instead of on the first request.
-func HTTPServerTLSConfig(certPath, keyPath string) (*tls.Config, error) {
+// HTTPServerTLSConfig loads the HTTPS API's certificate. API callers use bearer
+// tokens; agents fetching content (/content/*) may instead present their mTLS
+// client cert, so a client cert is requested but optional - if one IS sent it
+// must chain to the agent CA (agentCAPath), or the handshake fails. Minimum TLS
+// 1.2, not the agent channel's 1.3: corporate proxies and scanners in front of
+// the API/console still commonly speak only 1.2. Loaded at startup so a missing
+// or bad cert fails fast instead of on the first request.
+func HTTPServerTLSConfig(certPath, keyPath, agentCAPath string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("load HTTP TLS cert/key: %w", err)
 	}
+	pool, err := loadCAPool(agentCAPath)
+	if err != nil {
+		return nil, err
+	}
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{cert},
+		ClientCAs:    pool,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}, nil
 }
 

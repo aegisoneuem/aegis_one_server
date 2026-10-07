@@ -13,7 +13,9 @@ package identity
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -130,6 +132,13 @@ func (r *Resolver) Bootstrap(ctx context.Context, fingerprint string, cert *x509
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 	return &Known{DeviceUUID: deviceUUID, DeviceID: deviceID, AgentUUID: agentUUID}, nil
+}
+
+// Fingerprint is the agent identity key: hex SHA-256 of the client cert's DER,
+// as stored in agent_certificates.fingerprint_sha256.
+func Fingerprint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:])
 }
 
 func firstNonEmpty(s, fallback string) string {

@@ -35,6 +35,10 @@ const (
 	PermPatchDeploy  = "patch.deploy"
 	PermReportsView  = "reports.view"
 	PermAgentCommand = "agent.command"
+	// PermContentDownload lets IT tooling (not agents - they use their mTLS
+	// cert) fetch redistributable content such as the scan cab. Admin-only by
+	// default, like agent.command.
+	PermContentDownload = "content.download"
 )
 
 type Principal struct {
@@ -88,7 +92,9 @@ func New(pool *pgxpool.Pool, log *slog.Logger) *Authenticator {
 	return &Authenticator{pool: pool, log: log}
 }
 
-var errUnauthenticated = errors.New("unauthenticated")
+// ErrUnauthenticated: no token, or a token that is unknown, expired, revoked, or
+// belongs to a disabled client.
+var ErrUnauthenticated = errors.New("unauthenticated")
 
 // Require wraps next so it only runs for an authenticated caller holding perm.
 // Pass perm "" when the handler checks permissions itself (e.g. push, where the
@@ -99,9 +105,9 @@ func (a *Authenticator) Require(perm string, next http.Handler) http.Handler {
 			http.Error(w, "database required for API authentication", http.StatusServiceUnavailable)
 			return
 		}
-		p, err := a.authenticate(r)
+		p, err := a.Authenticate(r)
 		if err != nil {
-			if !errors.Is(err, errUnauthenticated) {
+			if !errors.Is(err, ErrUnauthenticated) {
 				a.log.Error("api auth lookup failed", "error", err.Error())
 				http.Error(w, "authentication unavailable", http.StatusServiceUnavailable)
 				return
@@ -125,11 +131,13 @@ func Deny(w http.ResponseWriter, log *slog.Logger, p Principal, perm string, r *
 	http.Error(w, "forbidden: this token needs the '"+perm+"' permission", http.StatusForbidden)
 }
 
-func (a *Authenticator) authenticate(r *http.Request) (Principal, error) {
+// Authenticate resolves the bearer token on r, for handlers that accept more
+// than one kind of credential (e.g. agent cert OR token).
+func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	raw = strings.TrimSpace(raw)
 	if !ok || !strings.HasPrefix(raw, tokenPrefix) {
-		return Principal{}, errUnauthenticated
+		return Principal{}, ErrUnauthenticated
 	}
 
 	var p Principal
@@ -144,7 +152,7 @@ func (a *Authenticator) authenticate(r *http.Request) (Principal, error) {
 		  AND c.disabled_at IS NULL`, HashToken(raw),
 	).Scan(&p.TokenID, &p.ClientID, &p.ClientName, &permsJSON, &p.scopes)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Principal{}, errUnauthenticated
+		return Principal{}, ErrUnauthenticated
 	}
 	if err != nil {
 		return Principal{}, err

@@ -11,9 +11,7 @@ package grpcserver
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -90,7 +88,7 @@ func (s *Server) Connect(stream agentcontrolv1.AgentControlPlane_ConnectServer) 
 		s.log.Warn("rejecting connect: no usable client certificate", "error", err.Error())
 		return status.Error(codes.Unauthenticated, "client certificate required")
 	}
-	fingerprint := fingerprintOf(cert)
+	fingerprint := identity.Fingerprint(cert)
 
 	var known *identity.Known
 	if s.identity.Enabled() {
@@ -188,11 +186,6 @@ func peerCert(ctx context.Context) (*x509.Certificate, error) {
 		return nil, fmt.Errorf("no client certificate presented")
 	}
 	return tlsInfo.State.PeerCertificates[0], nil
-}
-
-func fingerprintOf(cert *x509.Certificate) string {
-	sum := sha256.Sum256(cert.Raw)
-	return hex.EncodeToString(sum[:])
 }
 
 func shortFingerprint(fp string) string {

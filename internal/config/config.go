@@ -34,6 +34,10 @@ type Config struct {
 	// cmd/keygen) used to sign commands pushed to agents.
 	CommandSigningKeyFile string
 
+	// ContentDir holds content the server redistributes to agents (the ~640 MB
+	// scan cab, current + previous version). Needs a persistent volume in Docker.
+	ContentDir string
+
 	// FeedScheduler runs the MSRC/CISA KEV syncs in-process (needs a database and
 	// outbound internet). Set AEGIS_FEED_SCHEDULER=off on air-gapped deployments.
 	FeedScheduler bool
@@ -64,6 +68,7 @@ func Load() Config {
 		HTTPTLSKeyFile:        getenv("AEGIS_HTTP_TLS_KEY", tlsKey),
 		DatabaseURL:           getenv("AEGIS_DATABASE_URL", ""),
 		CommandSigningKeyFile: getenv("AEGIS_COMMAND_SIGNING_KEY_FILE", "secrets/command_signing.key"),
+		ContentDir:            getenv("AEGIS_CONTENT_DIR", "content"),
 		FeedScheduler:         !strings.EqualFold(getenv("AEGIS_FEED_SCHEDULER", "on"), "off"),
 		LogLevel:              getenv("AEGIS_LOG_LEVEL", "info"),
 		ShutdownTimeout:       10 * time.Second,
