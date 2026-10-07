@@ -6,12 +6,14 @@ import (
 	"strings"
 	"time"
 
+	"aegis-one/internal/feedrun"
+	"aegis-one/internal/kev"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const feedName = "microsoft_cvrf"
-const feedSourceURL = "https://api.msrc.microsoft.com/cvrf/v3.0"
+var feed = feedrun.Feed{Name: "microsoft_cvrf", Type: "patch_metadata", SourceURL: "https://api.msrc.microsoft.com/cvrf/v3.0"}
 
 type Summary struct {
 	DocumentID         string
@@ -23,69 +25,19 @@ type Summary struct {
 	PatchesUpdated     int
 	ApplicabilityRules int
 	SupersedenceLinks  int
+	KEVPatchesChanged  int
+	DeadlinesTightened int
 }
 
 // Sync upserts the extracted CVE/KB data for one MSRC document into Postgres,
 // recording the attempt in content_feeds/feed_sync_runs either way.
 func Sync(ctx context.Context, pool *pgxpool.Pool, documentID string, cves map[string]*CVEDetail, kbs map[string]*KBRecord) (Summary, error) {
 	summary := Summary{DocumentID: documentID, CVEsSeen: len(cves), KBsSeen: len(kbs)}
-
-	feedID, err := ensureFeed(ctx, pool)
-	if err != nil {
-		return summary, fmt.Errorf("ensure content_feeds row: %w", err)
-	}
-	runID, err := startRun(ctx, pool, feedID)
-	if err != nil {
-		return summary, fmt.Errorf("start feed_sync_runs row: %w", err)
-	}
-
-	err = runSync(ctx, pool, cves, kbs, &summary)
-
-	status := "succeeded"
-	var errMsg *string
-	if err != nil {
-		status = "failed"
-		msg := err.Error()
-		errMsg = &msg
-	}
-	if finErr := finishRun(ctx, pool, runID, status, summary, errMsg); finErr != nil {
-		return summary, fmt.Errorf("sync error (%v) AND could not record feed_sync_runs: %w", err, finErr)
-	}
-	if err == nil {
-		if _, updErr := pool.Exec(ctx,
-			`UPDATE content_feeds SET last_success_at = now(), sync_cursor = $2 WHERE id = $1`,
-			feedID, documentID); updErr != nil {
-			return summary, fmt.Errorf("update content_feeds.last_success_at: %w", updErr)
-		}
-	}
+	err := feedrun.Track(ctx, pool, feed, documentID, func() (int, int, error) {
+		err := runSync(ctx, pool, cves, kbs, &summary)
+		return summary.PatchesAdded + summary.CVEsAdded, summary.PatchesUpdated + summary.CVEsUpdated, err
+	})
 	return summary, err
-}
-
-func ensureFeed(ctx context.Context, pool *pgxpool.Pool) (string, error) {
-	var id string
-	err := pool.QueryRow(ctx, `
-		INSERT INTO content_feeds (name, feed_type, source_mode, source_url)
-		VALUES ($1, 'patch_metadata', 'online', $2)
-		ON CONFLICT (name) DO UPDATE SET source_url = EXCLUDED.source_url
-		RETURNING id`, feedName, feedSourceURL).Scan(&id)
-	return id, err
-}
-
-func startRun(ctx context.Context, pool *pgxpool.Pool, feedID string) (int64, error) {
-	var id int64
-	err := pool.QueryRow(ctx,
-		`INSERT INTO feed_sync_runs (feed_id, status) VALUES ($1, 'running') RETURNING id`,
-		feedID).Scan(&id)
-	return id, err
-}
-
-func finishRun(ctx context.Context, pool *pgxpool.Pool, runID int64, status string, s Summary, errMsg *string) error {
-	_, err := pool.Exec(ctx, `
-		UPDATE feed_sync_runs
-		SET status = $2, items_added = $3, items_updated = $4, completed_at = now(), error_message = $5
-		WHERE id = $1`,
-		runID, status, s.PatchesAdded+s.CVEsAdded, s.PatchesUpdated+s.CVEsUpdated, errMsg)
-	return err
 }
 
 func runSync(ctx context.Context, pool *pgxpool.Pool, cves map[string]*CVEDetail, kbs map[string]*KBRecord, summary *Summary) error {
@@ -167,6 +119,11 @@ func runSync(ctx context.Context, pool *pgxpool.Pool, cves map[string]*CVEDetail
 			return fmt.Errorf("link supersedence %s -> %s: %w", kb.KB, kb.Supersedes, err)
 		}
 		summary.SupersedenceLinks++
+	}
+
+	// New patch->CVE links may point at CVEs already flagged by the KEV feed.
+	if summary.KEVPatchesChanged, summary.DeadlinesTightened, err = kev.Apply(ctx, tx); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {

@@ -67,9 +67,9 @@ func main() {
 		fatalf("sync failed (partially applied changes were rolled back): %v", err)
 	}
 
-	fmt.Printf("done: %d CVE added, %d CVE updated, %d patch added, %d patch updated, %d applicability rules, %d supersedence links\n",
+	fmt.Printf("done: %d CVE added, %d CVE updated, %d patch added, %d patch updated, %d applicability rules, %d supersedence links, %d patch has_kev changed, %d deadlines tightened\n",
 		summary.CVEsAdded, summary.CVEsUpdated, summary.PatchesAdded, summary.PatchesUpdated,
-		summary.ApplicabilityRules, summary.SupersedenceLinks)
+		summary.ApplicabilityRules, summary.SupersedenceLinks, summary.KEVPatchesChanged, summary.DeadlinesTightened)
 }
 
 func printSample(kbs map[string]*patchfeed.KBRecord) {

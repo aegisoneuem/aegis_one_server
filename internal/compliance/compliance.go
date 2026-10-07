@@ -52,6 +52,7 @@ type DeviceRow struct {
 	InstalledCount   int     `json:"installed_count"`
 	MissingCount     int     `json:"missing_count"`
 	MissingCritical  int     `json:"missing_critical"`
+	MissingKEV       int     `json:"missing_kev"`
 	OverdueCount     int     `json:"overdue_count"`
 	CompliancePct    float64 `json:"compliance_pct"`
 	ComplianceStatus string  `json:"compliance_status"`
@@ -60,7 +61,7 @@ type DeviceRow struct {
 func ListDevices(ctx context.Context, pool *pgxpool.Pool) ([]DeviceRow, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT coalesce(d.agent_reported_id, ''), c.hostname, c.installed_count, c.missing_count,
-		       c.missing_critical, c.overdue_count, c.compliance_pct, c.compliance_status
+		       c.missing_critical, c.missing_kev, c.overdue_count, c.compliance_pct, c.compliance_status
 		FROM device_patch_compliance_current c
 		JOIN devices d ON d.id = c.device_id
 		ORDER BY c.missing_count DESC`)
@@ -73,7 +74,7 @@ func ListDevices(ctx context.Context, pool *pgxpool.Pool) ([]DeviceRow, error) {
 	for rows.Next() {
 		var r DeviceRow
 		if err := rows.Scan(&r.DeviceID, &r.Hostname, &r.InstalledCount, &r.MissingCount,
-			&r.MissingCritical, &r.OverdueCount, &r.CompliancePct, &r.ComplianceStatus); err != nil {
+			&r.MissingCritical, &r.MissingKEV, &r.OverdueCount, &r.CompliancePct, &r.ComplianceStatus); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
