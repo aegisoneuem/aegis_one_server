@@ -20,6 +20,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -84,12 +85,19 @@ func HashToken(raw string) string {
 }
 
 type Authenticator struct {
-	pool *pgxpool.Pool // nil when no database is configured
-	log  *slog.Logger
+	pool  *pgxpool.Pool // nil when no database is configured
+	log   *slog.Logger
+	limit *limiter
 }
 
 func New(pool *pgxpool.Pool, log *slog.Logger) *Authenticator {
-	return &Authenticator{pool: pool, log: log}
+	return &Authenticator{pool: pool, log: log, limit: newLimiter()}
+}
+
+// WriteRateLimited sends 429 with Retry-After for a RateLimitedError.
+func WriteRateLimited(w http.ResponseWriter, e *RateLimitedError) {
+	w.Header().Set("Retry-After", strconv.Itoa(e.RetryAfterSeconds()))
+	http.Error(w, "rate limit exceeded for this API client", http.StatusTooManyRequests)
 }
 
 // ErrUnauthenticated: no token, or a token that is unknown, expired, revoked, or
@@ -107,6 +115,11 @@ func (a *Authenticator) Require(perm string, next http.Handler) http.Handler {
 		}
 		p, err := a.Authenticate(r)
 		if err != nil {
+			var rl *RateLimitedError
+			if errors.As(err, &rl) {
+				WriteRateLimited(w, rl)
+				return
+			}
 			if !errors.Is(err, ErrUnauthenticated) {
 				a.log.Error("api auth lookup failed", "error", err.Error())
 				http.Error(w, "authentication unavailable", http.StatusServiceUnavailable)
@@ -142,15 +155,16 @@ func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 
 	var p Principal
 	var permsJSON []byte
+	var perMinute int
 	err := a.pool.QueryRow(r.Context(), `
-		SELECT t.id, c.id, c.name, r.permissions, t.scopes
+		SELECT t.id, c.id, c.name, r.permissions, t.scopes, c.rate_limit_per_minute
 		FROM api_tokens t
 		JOIN api_clients c ON c.id = t.api_client_id
 		JOIN roles r ON r.id = c.role_id
 		WHERE t.token_hash = $1
 		  AND t.revoked_at IS NULL AND t.expires_at > now()
 		  AND c.disabled_at IS NULL`, HashToken(raw),
-	).Scan(&p.TokenID, &p.ClientID, &p.ClientName, &permsJSON, &p.scopes)
+	).Scan(&p.TokenID, &p.ClientID, &p.ClientName, &permsJSON, &p.scopes, &perMinute)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -159,6 +173,15 @@ func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 	}
 	if err := json.Unmarshal(permsJSON, &p.rolePerms); err != nil {
 		return Principal{}, err
+	}
+
+	// Per client (all its tokens share one bucket), before any permission check,
+	// so denied requests count too.
+	if ok, retry, warn := a.limit.allow(p.ClientID, perMinute); !ok {
+		if warn {
+			a.log.Warn("api rate limit exceeded", "client", p.ClientName, "limit_per_minute", perMinute, "path", r.URL.Path)
+		}
+		return Principal{}, &RateLimitedError{RetryAfter: retry}
 	}
 
 	// Throttled so a busy client doesn't turn every request into a write.

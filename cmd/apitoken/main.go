@@ -4,11 +4,14 @@
 //	go run ./cmd/apitoken mint   -client ops-team -role operator -scopes patch.deploy,reports.view [-days 90]
 //	go run ./cmd/apitoken list
 //	go run ./cmd/apitoken revoke -token-id <uuid>
+//	go run ./cmd/apitoken limit  -client ops-team -per-minute 120
 //
 // mint creates the client if it doesn't exist (then -role is required) and
 // prints the raw token ONCE - only its hash is stored. Scopes use role
 // permission names (patch.deploy, reports.view, agent.command, ...) or "*".
-// Mint and revoke are written to audit_log as actor_type 'os_admin'.
+// limit sets api_clients.rate_limit_per_minute (new clients get the schema
+// default, 600); running servers pick it up on the client's next request.
+// Mint, revoke and limit are written to audit_log as actor_type 'os_admin'.
 package main
 
 import (
@@ -53,8 +56,10 @@ func main() {
 		list(ctx, pool)
 	case "revoke":
 		revoke(ctx, pool, os.Args[2:])
+	case "limit":
+		setLimit(ctx, pool, os.Args[2:])
 	default:
-		fatalf("unknown subcommand %q (want mint, list or revoke)", os.Args[1])
+		fatalf("unknown subcommand %q (want mint, list, revoke or limit)", os.Args[1])
 	}
 }
 
@@ -192,15 +197,53 @@ func revoke(ctx context.Context, pool *pgxpool.Pool, args []string) {
 	fmt.Println("revoked", *tokenID)
 }
 
+func setLimit(ctx context.Context, pool *pgxpool.Pool, args []string) {
+	fs := flag.NewFlagSet("limit", flag.ExitOnError)
+	client := fs.String("client", "", "api client name")
+	perMinute := fs.Int("per-minute", 0, "allowed requests per minute (per server instance)")
+	fs.Parse(args)
+	if *client == "" || *perMinute <= 0 {
+		fatalf("limit needs -client and a positive -per-minute")
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
+	var clientID string
+	var old int
+	if err := tx.QueryRow(ctx, `
+		UPDATE api_clients c SET rate_limit_per_minute = $2
+		FROM (SELECT id, rate_limit_per_minute AS old FROM api_clients WHERE name = $1) prev
+		WHERE c.id = prev.id
+		RETURNING c.id, prev.old`, *client, *perMinute).Scan(&clientID, &old); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			fatalf("no api client named %q", *client)
+		}
+		fatalf("update: %v", err)
+	}
+	details, _ := json.Marshal(map[string]any{"client": *client, "from": old, "to": *perMinute})
+	auditTarget(ctx, tx, "api_client.rate_limit", "api_client", clientID, string(details))
+	if err := tx.Commit(ctx); err != nil {
+		fatalf("commit: %v", err)
+	}
+	fmt.Printf("rate limit for %q: %d -> %d requests/minute\n", *client, old, *perMinute)
+}
+
 func audit(ctx context.Context, tx pgx.Tx, action, tokenID, details string) {
+	auditTarget(ctx, tx, action, "api_token", tokenID, details)
+}
+
+func auditTarget(ctx context.Context, tx pgx.Tx, action, targetType, targetID, details string) {
 	label := "unknown"
 	if u, err := user.Current(); err == nil {
 		label = "os:" + u.Username
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_log (source, actor_type, actor_label, action, target_type, target_id, details)
-		VALUES ('application', 'os_admin', $1, $2, 'api_token', $3, $4::jsonb)`,
-		label, action, tokenID, details); err != nil {
+		VALUES ('application', 'os_admin', $1, $2, $3, $4, $5::jsonb)`,
+		label, action, targetType, targetID, details); err != nil {
 		fatalf("audit_log: %v", err)
 	}
 }

@@ -12,6 +12,7 @@ package contentapi
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -45,9 +46,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database required", http.StatusServiceUnavailable)
 		return
 	}
-	who, status := h.caller(r)
-	if status != http.StatusOK {
-		http.Error(w, http.StatusText(status), status)
+	who, ok := h.caller(w, r)
+	if !ok {
 		return
 	}
 
@@ -96,29 +96,45 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// caller authorizes r and returns a label for logs, or the HTTP status to fail
-// with: 401 no usable credential, 403 known credential without access.
-func (h *Handler) caller(r *http.Request) (string, int) {
+// caller authorizes r and returns a label for logs. On failure it has already
+// written the response (401 no usable credential, 403 credential without
+// access, 429 token client over its rate limit, 503 lookup failure).
+func (h *Handler) caller(w http.ResponseWriter, r *http.Request) (string, bool) {
+	fail := func(code int) (string, bool) {
+		http.Error(w, http.StatusText(code), code)
+		return "", false
+	}
+
 	if r.TLS != nil && len(r.TLS.VerifiedChains) > 0 {
 		known, err := h.idr.Lookup(r.Context(), identity.Fingerprint(r.TLS.PeerCertificates[0]))
 		if err != nil {
 			h.log.Error("content: agent lookup failed", "error", err.Error())
-			return "", http.StatusServiceUnavailable
+			return fail(http.StatusServiceUnavailable)
 		}
 		if known == nil || known.Revoked {
 			h.log.Warn("content: rejected agent certificate (unknown or revoked)", "remote", r.RemoteAddr)
-			return "", http.StatusForbidden
+			return fail(http.StatusForbidden)
 		}
-		return "agent:" + known.DeviceID, http.StatusOK
+		return "agent:" + known.DeviceID, true
 	}
 
 	p, err := h.auth.Authenticate(r)
 	if err != nil {
-		return "", http.StatusUnauthorized
+		var rl *apiauth.RateLimitedError
+		switch {
+		case errors.As(err, &rl):
+			apiauth.WriteRateLimited(w, rl)
+			return "", false
+		case errors.Is(err, apiauth.ErrUnauthenticated):
+			return fail(http.StatusUnauthorized)
+		default:
+			h.log.Error("content: token lookup failed", "error", err.Error())
+			return fail(http.StatusServiceUnavailable)
+		}
 	}
 	if !p.Can(apiauth.PermContentDownload) {
 		h.log.Warn("content: token lacks content.download", "client", p.ClientName)
-		return "", http.StatusForbidden
+		return fail(http.StatusForbidden)
 	}
-	return "client:" + p.ClientName, http.StatusOK
+	return "client:" + p.ClientName, true
 }
