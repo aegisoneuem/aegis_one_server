@@ -111,8 +111,22 @@ func main() {
 	}
 
 	httpSrv := &http.Server{
-		Addr:    cfg.HTTPAddr,
-		Handler: httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, log),
+		Addr:              cfg.HTTPAddr,
+		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, log),
+		ReadHeaderTimeout: 10 * time.Second,
+		// net/http logs TLS handshake errors etc. through the std logger; route
+		// them through slog so every server log line stays structured JSON.
+		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
+	if cfg.HTTPTLS {
+		tlsCfg, err := crypto.HTTPServerTLSConfig(cfg.HTTPTLSCertFile, cfg.HTTPTLSKeyFile)
+		if err != nil {
+			log.Error("HTTPS setup failed (set AEGIS_HTTP_TLS_CERT/KEY, or AEGIS_HTTP_TLS=off only behind a TLS proxy)", "error", err.Error())
+			os.Exit(1)
+		}
+		httpSrv.TLSConfig = tlsCfg
+	} else {
+		log.Warn("HTTP API is plain HTTP (AEGIS_HTTP_TLS=off): API tokens travel in cleartext unless a TLS-terminating proxy is in front")
 	}
 
 	var wg sync.WaitGroup
@@ -128,8 +142,15 @@ func main() {
 
 	go func() {
 		defer wg.Done()
-		log.Info("http server listening", "addr", cfg.HTTPAddr)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if cfg.HTTPTLS {
+			log.Info("https server listening", "addr", cfg.HTTPAddr, "cert", cfg.HTTPTLSCertFile)
+			err = httpSrv.ListenAndServeTLS("", "") // cert already in TLSConfig
+		} else {
+			log.Info("http server listening", "addr", cfg.HTTPAddr)
+			err = httpSrv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("http server stopped", "error", err.Error())
 		}
 	}()
