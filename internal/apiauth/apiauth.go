@@ -1,0 +1,163 @@
+// Package apiauth authenticates /internal/* HTTP calls with platform API tokens
+// (api_clients / api_tokens, 0001) and authorizes them with the same role
+// permissions the console uses (roles.permissions, 0003).
+//
+// A request carries "Authorization: Bearer aeg_...". Only the SHA-256 of the
+// token is stored (token_hash) - tokens are 256-bit random, so a fast hash is
+// the right tool here (Argon2 is for low-entropy passwords). A permission is
+// granted only if BOTH the client's role and the token's scopes allow it
+// ("*" matches anything), so a token can be narrower than its client's role but
+// never wider.
+package apiauth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const tokenPrefix = "aeg_"
+
+// Permission names. Existing ones come from 0003_seed_roles.sql; AgentCommand is
+// new and is held by no seeded role except admin ("*") - running arbitrary
+// commands on endpoints is admin-only by default.
+const (
+	PermPatchDeploy  = "patch.deploy"
+	PermReportsView  = "reports.view"
+	PermAgentCommand = "agent.command"
+)
+
+type Principal struct {
+	ClientID   string
+	ClientName string
+	TokenID    string
+	rolePerms  map[string]bool
+	scopes     []string
+}
+
+func (p Principal) Can(perm string) bool {
+	roleOK := p.rolePerms["*"] || p.rolePerms[perm]
+	scopeOK := false
+	for _, s := range p.scopes {
+		if s == "*" || s == perm {
+			scopeOK = true
+			break
+		}
+	}
+	return roleOK && scopeOK
+}
+
+type ctxKey struct{}
+
+func FromContext(ctx context.Context) (Principal, bool) {
+	p, ok := ctx.Value(ctxKey{}).(Principal)
+	return p, ok
+}
+
+// NewToken returns a fresh raw token and the hash to store.
+func NewToken() (raw, hash string, err error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", err
+	}
+	raw = tokenPrefix + base64.RawURLEncoding.EncodeToString(b)
+	return raw, HashToken(raw), nil
+}
+
+func HashToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+type Authenticator struct {
+	pool *pgxpool.Pool // nil when no database is configured
+	log  *slog.Logger
+}
+
+func New(pool *pgxpool.Pool, log *slog.Logger) *Authenticator {
+	return &Authenticator{pool: pool, log: log}
+}
+
+var errUnauthenticated = errors.New("unauthenticated")
+
+// Require wraps next so it only runs for an authenticated caller holding perm.
+// Pass perm "" when the handler checks permissions itself (e.g. push, where the
+// required permission depends on the command type).
+func (a *Authenticator) Require(perm string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.pool == nil {
+			http.Error(w, "database required for API authentication", http.StatusServiceUnavailable)
+			return
+		}
+		p, err := a.authenticate(r)
+		if err != nil {
+			if !errors.Is(err, errUnauthenticated) {
+				a.log.Error("api auth lookup failed", "error", err.Error())
+				http.Error(w, "authentication unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			a.log.Warn("api auth rejected", "path", r.URL.Path, "remote", r.RemoteAddr)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="aegis"`)
+			http.Error(w, "missing, invalid, expired or revoked API token", http.StatusUnauthorized)
+			return
+		}
+		if perm != "" && !p.Can(perm) {
+			Deny(w, a.log, p, perm, r)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, p)))
+	})
+}
+
+// Deny writes a 403 for an authenticated caller lacking perm, and logs it.
+func Deny(w http.ResponseWriter, log *slog.Logger, p Principal, perm string, r *http.Request) {
+	log.Warn("api permission denied", "client", p.ClientName, "permission", perm, "path", r.URL.Path)
+	http.Error(w, "forbidden: this token needs the '"+perm+"' permission", http.StatusForbidden)
+}
+
+func (a *Authenticator) authenticate(r *http.Request) (Principal, error) {
+	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	raw = strings.TrimSpace(raw)
+	if !ok || !strings.HasPrefix(raw, tokenPrefix) {
+		return Principal{}, errUnauthenticated
+	}
+
+	var p Principal
+	var permsJSON []byte
+	err := a.pool.QueryRow(r.Context(), `
+		SELECT t.id, c.id, c.name, r.permissions, t.scopes
+		FROM api_tokens t
+		JOIN api_clients c ON c.id = t.api_client_id
+		JOIN roles r ON r.id = c.role_id
+		WHERE t.token_hash = $1
+		  AND t.revoked_at IS NULL AND t.expires_at > now()
+		  AND c.disabled_at IS NULL`, HashToken(raw),
+	).Scan(&p.TokenID, &p.ClientID, &p.ClientName, &permsJSON, &p.scopes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Principal{}, errUnauthenticated
+	}
+	if err != nil {
+		return Principal{}, err
+	}
+	if err := json.Unmarshal(permsJSON, &p.rolePerms); err != nil {
+		return Principal{}, err
+	}
+
+	// Throttled so a busy client doesn't turn every request into a write.
+	if _, err := a.pool.Exec(r.Context(), `
+		UPDATE api_tokens SET last_used_at = now()
+		WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')`, p.TokenID); err != nil {
+		a.log.Warn("could not update api token last_used_at", "error", err.Error())
+	}
+	return p, nil
+}

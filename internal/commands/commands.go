@@ -72,6 +72,9 @@ type Issue struct {
 	Signature      []byte
 	SigningKeyID   string
 	IdempotencyKey string
+
+	IssuedByAPIClientID string // the authenticated caller (api_clients.id)
+	IssuedByLabel       string // api_clients.name, for audit_log.actor_label
 }
 
 // Existing describes the row already holding an idempotency key.
@@ -98,12 +101,12 @@ func (s *Store) Create(ctx context.Context, in Issue) (id string, existing *Exis
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO agent_commands
-			(agent_id, command_type, payload, idempotency_key, signature_ed25519, signing_key_id, expires_at)
-		VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)
+			(agent_id, command_type, payload, idempotency_key, signature_ed25519, signing_key_id, expires_at, issued_by_api_client_id)
+		VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8)
 		ON CONFLICT (idempotency_key) DO NOTHING
 		RETURNING id`,
 		in.AgentUUID, in.Type, string(payloadJSON), in.IdempotencyKey,
-		base64.StdEncoding.EncodeToString(in.Signature), in.SigningKeyID, time.Now().Add(DefaultTTL),
+		base64.StdEncoding.EncodeToString(in.Signature), in.SigningKeyID, time.Now().Add(DefaultTTL), in.IssuedByAPIClientID,
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var ex Existing
@@ -123,12 +126,10 @@ func (s *Store) Create(ctx context.Context, in Issue) (id string, existing *Exis
 		"command_type": in.Type,
 		"device_id":    in.DeviceID,
 	})
-	// No authenticated caller exists yet (the push API is unauthenticated,
-	// internal-only), so the actor is recorded honestly as 'system'.
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO audit_log (actor_type, actor_label, action, target_type, target_id, details)
-		VALUES ('system', 'internal-push-api', 'agent.command.issue', 'agent', $1, $2::jsonb)`,
-		in.AgentUUID, string(details),
+		INSERT INTO audit_log (actor_type, actor_api_client_id, actor_label, action, target_type, target_id, details)
+		VALUES ('api_client', $1, $2, 'agent.command.issue', 'agent', $3, $4::jsonb)`,
+		in.IssuedByAPIClientID, in.IssuedByLabel, in.AgentUUID, string(details),
 	); err != nil {
 		return "", nil, fmt.Errorf("insert audit_log: %w", err)
 	}

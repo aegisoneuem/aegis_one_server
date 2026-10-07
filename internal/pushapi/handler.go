@@ -1,7 +1,7 @@
-// Package pushapi is a minimal, internal-only HTTP trigger for pushing a signed
-// command to a connected agent. There is no admin UI/API layer yet, so this
-// exists so a signed dispatch can be operated from curl; it is NOT meant to be
-// exposed outside the management network (no authentication).
+// Package pushapi is a minimal internal HTTP trigger for pushing a signed
+// command to a connected agent (no admin UI exists yet). It must be mounted
+// behind apiauth.Require: install_patch needs 'patch.deploy', any other command
+// type needs 'agent.command' (remote command execution - admin-only by default).
 //
 // Every push is recorded in agent_commands (+ audit_log) BEFORE it is sent, and
 // the row's UUID is the wire command_id. A database is therefore required -
@@ -18,6 +18,7 @@ import (
 	"net/http"
 
 	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	"aegis-one/internal/apiauth"
 	"aegis-one/internal/commands"
 	"aegis-one/internal/signing"
 
@@ -64,6 +65,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cmdType := q.Get("type")
 	if deviceID == "" || cmdType == "" {
 		http.Error(w, "device_id and type are required", http.StatusBadRequest)
+		return
+	}
+
+	caller, ok := apiauth.FromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	needed := apiauth.PermAgentCommand
+	if cmdType == "install_patch" {
+		needed = apiauth.PermPatchDeploy
+	}
+	if !caller.Can(needed) {
+		apiauth.Deny(w, h.log, caller, needed, r)
 		return
 	}
 
@@ -119,6 +134,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	commandID, existing, err := h.store.Create(ctx, commands.Issue{
 		AgentUUID: agentUUID, DeviceID: deviceID, Type: cmdType, Payload: auditPayload,
 		Signature: signature, SigningKeyID: h.signingKeyID, IdempotencyKey: idemKey,
+		IssuedByAPIClientID: caller.ClientID, IssuedByLabel: caller.ClientName,
 	})
 	if err != nil {
 		http.Error(w, "record command: "+err.Error(), http.StatusInternalServerError)
@@ -144,7 +160,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("could not mark command dispatched", "command_id", commandID, "error", err.Error())
 	}
 
-	h.log.Info("command pushed", "device_id", deviceID, "command_id", commandID, "type", cmdType)
+	h.log.Info("command pushed", "device_id", deviceID, "command_id", commandID, "type", cmdType, "client", caller.ClientName)
 	fmt.Fprintf(w, "dispatched command_id=%s to device_id=%s\n", commandID, deviceID)
 }
 

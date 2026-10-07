@@ -19,6 +19,7 @@ import (
 	"log/slog"
 
 	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	"aegis-one/internal/apiauth"
 	"aegis-one/internal/commands"
 	"aegis-one/internal/complianceapi"
 	"aegis-one/internal/config"
@@ -196,7 +197,11 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ready"))
 	})
-	mux.Handle("/internal/push", pushapi.New(agentSrv, cmdStore, signingKey, signingKeyID, log))
-	mux.Handle("/internal/compliance", complianceapi.New(pool))
+	// /healthz and /readyz stay open for orchestrator probes; everything under
+	// /internal requires an API token. Push checks its permission itself (it
+	// depends on the command type).
+	auth := apiauth.New(pool, log)
+	mux.Handle("/internal/push", auth.Require("", pushapi.New(agentSrv, cmdStore, signingKey, signingKeyID, log)))
+	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool)))
 	return mux
 }
