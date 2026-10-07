@@ -22,14 +22,40 @@ type Summary struct {
 	DeadlinesTightened int // open device_patch_state SLAs pulled in to the KEV deadline
 }
 
-// Sync applies one KEV catalog as a full snapshot, in one transaction:
+// Run fetches the current catalog and syncs it - the unattended path used by
+// the feed scheduler. The fetch is inside the tracked run, so an unreachable
+// CISA endpoint is recorded as a failed feed_sync_runs row (and backed off).
+func Run(ctx context.Context, pool *pgxpool.Pool) (Summary, error) {
+	var s Summary
+	err := feedrun.Track(ctx, pool, feed, func() (string, int, int, error) {
+		cat, err := Fetch(ctx)
+		if err != nil {
+			return "", 0, 0, err
+		}
+		err = syncTx(ctx, pool, cat, &s)
+		return cat.CatalogVersion, s.CVEsAdded, s.CVEsFlagged + s.CVEsUnflagged, err
+	})
+	return s, err
+}
+
+// Sync applies one already-fetched catalog (cmd/synckev), recorded as a run.
+func Sync(ctx context.Context, pool *pgxpool.Pool, cat *Catalog) (Summary, error) {
+	var s Summary
+	err := feedrun.Track(ctx, pool, feed, func() (string, int, int, error) {
+		err := syncTx(ctx, pool, cat, &s)
+		return cat.CatalogVersion, s.CVEsAdded, s.CVEsFlagged + s.CVEsUnflagged, err
+	})
+	return s, err
+}
+
+// syncTx applies one KEV catalog as a full snapshot, in one transaction:
 //  1. every KEV CVE: is_kev = true, kev_added_at = dateAdded. CVEs we don't
 //     have yet are inserted (KEV covers all vendors, not just Microsoft);
 //     existing rows keep their MSRC description/severity.
 //  2. any CVE flagged earlier but no longer in the catalog is un-flagged.
 //  3. Apply: patch_catalog.has_kev + SLA tightening.
-func Sync(ctx context.Context, pool *pgxpool.Pool, cat *Catalog) (Summary, error) {
-	s := Summary{CatalogVersion: cat.CatalogVersion, Entries: len(cat.Vulnerabilities)}
+func syncTx(ctx context.Context, pool *pgxpool.Pool, cat *Catalog, s *Summary) error {
+	s.CatalogVersion, s.Entries = cat.CatalogVersion, len(cat.Vulnerabilities)
 
 	ids := make([]string, len(cat.Vulnerabilities))
 	descs := make([]string, len(cat.Vulnerabilities))
@@ -38,59 +64,56 @@ func Sync(ctx context.Context, pool *pgxpool.Pool, cat *Catalog) (Summary, error
 		ids[i], descs[i], added[i] = v.CVEID, v.ShortDescription, v.DateAdded
 	}
 
-	err := feedrun.Track(ctx, pool, feed, cat.CatalogVersion, func() (int, int, error) {
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			return 0, 0, err
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
 
-		rows, err := tx.Query(ctx, `
-			INSERT INTO cve_catalog (cve_id, description, is_kev, kev_added_at)
-			SELECT id, descr, true, added::date
-			FROM unnest($1::text[], $2::text[], $3::text[]) AS t(id, descr, added)
-			ON CONFLICT (cve_id) DO UPDATE SET
-				is_kev = true, kev_added_at = EXCLUDED.kev_added_at, updated_at = now()
-			WHERE cve_catalog.is_kev IS DISTINCT FROM true
-			   OR cve_catalog.kev_added_at IS DISTINCT FROM EXCLUDED.kev_added_at
-			RETURNING (xmax = 0)`, ids, descs, added)
-		if err != nil {
-			return 0, 0, fmt.Errorf("upsert KEV CVEs: %w", err)
+	rows, err := tx.Query(ctx, `
+		INSERT INTO cve_catalog (cve_id, description, is_kev, kev_added_at)
+		SELECT id, descr, true, added::date
+		FROM unnest($1::text[], $2::text[], $3::text[]) AS t(id, descr, added)
+		ON CONFLICT (cve_id) DO UPDATE SET
+			is_kev = true, kev_added_at = EXCLUDED.kev_added_at, updated_at = now()
+		WHERE cve_catalog.is_kev IS DISTINCT FROM true
+		   OR cve_catalog.kev_added_at IS DISTINCT FROM EXCLUDED.kev_added_at
+		RETURNING (xmax = 0)`, ids, descs, added)
+	if err != nil {
+		return fmt.Errorf("upsert KEV CVEs: %w", err)
+	}
+	for rows.Next() {
+		var inserted bool
+		if err := rows.Scan(&inserted); err != nil {
+			rows.Close()
+			return err
 		}
-		for rows.Next() {
-			var inserted bool
-			if err := rows.Scan(&inserted); err != nil {
-				rows.Close()
-				return 0, 0, err
-			}
-			if inserted {
-				s.CVEsAdded++
-			} else {
-				s.CVEsFlagged++
-			}
+		if inserted {
+			s.CVEsAdded++
+		} else {
+			s.CVEsFlagged++
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return 0, 0, fmt.Errorf("upsert KEV CVEs: %w", err)
-		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("upsert KEV CVEs: %w", err)
+	}
 
-		tag, err := tx.Exec(ctx, `
-			UPDATE cve_catalog SET is_kev = false, kev_added_at = NULL, updated_at = now()
-			WHERE is_kev AND NOT (cve_id = ANY($1))`, ids)
-		if err != nil {
-			return 0, 0, fmt.Errorf("un-flag removed CVEs: %w", err)
-		}
-		s.CVEsUnflagged = int(tag.RowsAffected())
+	tag, err := tx.Exec(ctx, `
+		UPDATE cve_catalog SET is_kev = false, kev_added_at = NULL, updated_at = now()
+		WHERE is_kev AND NOT (cve_id = ANY($1))`, ids)
+	if err != nil {
+		return fmt.Errorf("un-flag removed CVEs: %w", err)
+	}
+	s.CVEsUnflagged = int(tag.RowsAffected())
 
-		if s.PatchesChanged, s.DeadlinesTightened, err = Apply(ctx, tx); err != nil {
-			return 0, 0, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return 0, 0, err
-		}
-		return s.CVEsAdded, s.CVEsFlagged + s.CVEsUnflagged, nil
-	})
-	return s, err
+	if s.PatchesChanged, s.DeadlinesTightened, err = Apply(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Apply re-derives patch_catalog.has_kev from cve_catalog.is_kev via patch_cves,

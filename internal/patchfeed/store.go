@@ -8,6 +8,7 @@ import (
 
 	"aegis-one/internal/feedrun"
 	"aegis-one/internal/kev"
+	"aegis-one/internal/msrc"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,13 +30,37 @@ type Summary struct {
 	DeadlinesTightened int
 }
 
-// Sync upserts the extracted CVE/KB data for one MSRC document into Postgres,
-// recording the attempt in content_feeds/feed_sync_runs either way.
+// RunLatest fetches the most recently released MSRC document and syncs it - the
+// unattended path used by the feed scheduler. Older months are not backfilled;
+// import those with cmd/syncpatchfeed <document-id>.
+func RunLatest(ctx context.Context, pool *pgxpool.Pool) (Summary, error) {
+	var summary Summary
+	err := feedrun.Track(ctx, pool, feed, func() (string, int, int, error) {
+		client := msrc.NewClient()
+		docID, err := client.LatestUpdateID(ctx)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("find latest MSRC document: %w", err)
+		}
+		summary.DocumentID = docID
+		doc, err := client.FetchDocument(ctx, docID)
+		if err != nil {
+			return "", 0, 0, err
+		}
+		cves, kbs := Extract(doc)
+		summary.CVEsSeen, summary.KBsSeen = len(cves), len(kbs)
+		err = runSync(ctx, pool, cves, kbs, &summary)
+		return docID, summary.PatchesAdded + summary.CVEsAdded, summary.PatchesUpdated + summary.CVEsUpdated, err
+	})
+	return summary, err
+}
+
+// Sync upserts the extracted CVE/KB data for one already-fetched MSRC document
+// (cmd/syncpatchfeed), recording the attempt in content_feeds/feed_sync_runs.
 func Sync(ctx context.Context, pool *pgxpool.Pool, documentID string, cves map[string]*CVEDetail, kbs map[string]*KBRecord) (Summary, error) {
 	summary := Summary{DocumentID: documentID, CVEsSeen: len(cves), KBsSeen: len(kbs)}
-	err := feedrun.Track(ctx, pool, feed, documentID, func() (int, int, error) {
+	err := feedrun.Track(ctx, pool, feed, func() (string, int, int, error) {
 		err := runSync(ctx, pool, cves, kbs, &summary)
-		return summary.PatchesAdded + summary.CVEsAdded, summary.PatchesUpdated + summary.CVEsUpdated, err
+		return documentID, summary.PatchesAdded + summary.CVEsAdded, summary.PatchesUpdated + summary.CVEsUpdated, err
 	})
 	return summary, err
 }

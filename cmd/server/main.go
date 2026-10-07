@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -23,10 +24,13 @@ import (
 	"aegis-one/internal/config"
 	"aegis-one/internal/crypto"
 	"aegis-one/internal/db"
+	"aegis-one/internal/feedsched"
 	"aegis-one/internal/grpcserver"
 	"aegis-one/internal/identity"
 	"aegis-one/internal/ingest"
+	"aegis-one/internal/kev"
 	"aegis-one/internal/logging"
+	"aegis-one/internal/patchfeed"
 	"aegis-one/internal/pushapi"
 	"aegis-one/internal/signing"
 
@@ -129,6 +133,20 @@ func main() {
 		}
 	}()
 
+	switch {
+	case pool == nil:
+		log.Warn("feed scheduler disabled (no database)")
+	case !cfg.FeedScheduler:
+		log.Info("feed scheduler disabled (AEGIS_FEED_SCHEDULER=off)")
+	default:
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Info("feed scheduler started", "check_every", feedsched.CheckEvery.String())
+			feedsched.New(pool, log, feedJobs()...).Run(ctx)
+		}()
+	}
+
 	<-ctx.Done()
 	log.Info("shutdown signal received, draining")
 
@@ -141,6 +159,24 @@ func main() {
 
 	wg.Wait()
 	log.Info("shutdown complete")
+}
+
+// feedJobs lists the scheduled feeds. Names must match the content_feeds.name
+// each sync records under. MSRC runs first, but either order converges
+// (both call kev.Apply).
+func feedJobs() []feedsched.Job {
+	return []feedsched.Job{
+		{Name: "microsoft_cvrf", Run: func(ctx context.Context, pool *pgxpool.Pool) (string, error) {
+			s, err := patchfeed.RunLatest(ctx, pool)
+			return fmt.Sprintf("%s: %d KBs, %d CVEs, %d has_kev changed, %d deadlines tightened",
+				s.DocumentID, s.KBsSeen, s.CVEsSeen, s.KEVPatchesChanged, s.DeadlinesTightened), err
+		}},
+		{Name: "cisa_kev", Run: func(ctx context.Context, pool *pgxpool.Pool) (string, error) {
+			s, err := kev.Run(ctx, pool)
+			return fmt.Sprintf("catalog %s: %d entries, %d CVE added, %d flagged, %d un-flagged, %d has_kev changed, %d deadlines tightened",
+				s.CatalogVersion, s.Entries, s.CVEsAdded, s.CVEsFlagged, s.CVEsUnflagged, s.PatchesChanged, s.DeadlinesTightened), err
+		}},
+	}
 }
 
 func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, log *slog.Logger) http.Handler {

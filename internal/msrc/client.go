@@ -20,7 +20,9 @@ type Client struct {
 }
 
 func NewClient() *Client {
-	return &Client{httpClient: &http.Client{Timeout: 30 * time.Second}}
+	// A monthly document is ~20 MB and took ~24s on a good link; this timeout
+	// covers the whole body download, so it needs real headroom.
+	return &Client{httpClient: &http.Client{Timeout: 3 * time.Minute}}
 }
 
 // UpdateSummary is one entry from GET /updates: the index of available monthly

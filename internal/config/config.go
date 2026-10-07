@@ -26,6 +26,10 @@ type Config struct {
 	// cmd/keygen) used to sign commands pushed to agents.
 	CommandSigningKeyFile string
 
+	// FeedScheduler runs the MSRC/CISA KEV syncs in-process (needs a database and
+	// outbound internet). Set AEGIS_FEED_SCHEDULER=off on air-gapped deployments.
+	FeedScheduler bool
+
 	LogLevel string // debug | info | warn | error
 
 	ShutdownTimeout time.Duration
@@ -47,6 +51,7 @@ func Load() Config {
 		TLSKeyFile:            getenv("AEGIS_TLS_KEY", "certs/server.key"),
 		DatabaseURL:           getenv("AEGIS_DATABASE_URL", ""),
 		CommandSigningKeyFile: getenv("AEGIS_COMMAND_SIGNING_KEY_FILE", "secrets/command_signing.key"),
+		FeedScheduler:         !strings.EqualFold(getenv("AEGIS_FEED_SCHEDULER", "on"), "off"),
 		LogLevel:              getenv("AEGIS_LOG_LEVEL", "info"),
 		ShutdownTimeout:       10 * time.Second,
 	}

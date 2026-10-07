@@ -6,6 +6,7 @@ package feedrun
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -18,9 +19,12 @@ type Feed struct {
 
 // Track ensures the content_feeds row, opens a feed_sync_runs row ('running'),
 // runs fn, then records the outcome. On success it also sets
-// content_feeds.last_success_at and sync_cursor. The run row is written outside
-// fn's own transaction on purpose: a failed sync must still leave its record.
-func Track(ctx context.Context, pool *pgxpool.Pool, feed Feed, cursor string, fn func() (added, updated int, err error)) error {
+// content_feeds.last_success_at and sync_cursor (returned by fn, since it is
+// usually only known after fetching). fn should include the network fetch, so
+// an unreachable source is recorded as a failed run too. The run row is written
+// outside fn's own transaction on purpose: a failed sync must still leave its
+// record.
+func Track(ctx context.Context, pool *pgxpool.Pool, feed Feed, fn func() (cursor string, added, updated int, err error)) error {
 	var feedID string
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO content_feeds (name, feed_type, source_mode, source_url)
@@ -37,7 +41,7 @@ func Track(ctx context.Context, pool *pgxpool.Pool, feed Feed, cursor string, fn
 		return fmt.Errorf("start feed_sync_runs row: %w", err)
 	}
 
-	added, updated, err := fn()
+	cursor, added, updated, err := fn()
 
 	status := "succeeded"
 	var errMsg *string
@@ -46,7 +50,11 @@ func Track(ctx context.Context, pool *pgxpool.Pool, feed Feed, cursor string, fn
 		msg := err.Error()
 		errMsg = &msg
 	}
-	if _, finErr := pool.Exec(ctx, `
+	// If ctx was cancelled mid-sync (server shutdown), still record the outcome
+	// rather than leaving the run stuck at 'running'.
+	finCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, finErr := pool.Exec(finCtx, `
 		UPDATE feed_sync_runs
 		SET status = $2, items_added = $3, items_updated = $4, completed_at = now(), error_message = $5
 		WHERE id = $1`, runID, status, added, updated, errMsg); finErr != nil {
