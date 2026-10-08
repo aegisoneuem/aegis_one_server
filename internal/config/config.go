@@ -34,6 +34,10 @@ type Config struct {
 	// cmd/keygen) used to sign commands pushed to agents.
 	CommandSigningKeyFile string
 
+	// AllowPrivilegedDB lets the server start even if its DB login is a superuser
+	// or table owner (which can disable audit_log's protections). Local dev ONLY.
+	AllowPrivilegedDB bool
+
 	// ContentDir holds content the server redistributes to agents (the ~640 MB
 	// scan cab, current + previous version). Needs a persistent volume in Docker.
 	ContentDir string
@@ -68,6 +72,7 @@ func Load() Config {
 		HTTPTLSKeyFile:        getenv("AEGIS_HTTP_TLS_KEY", tlsKey),
 		DatabaseURL:           getenv("AEGIS_DATABASE_URL", ""),
 		CommandSigningKeyFile: getenv("AEGIS_COMMAND_SIGNING_KEY_FILE", "secrets/command_signing.key"),
+		AllowPrivilegedDB:     strings.EqualFold(getenv("AEGIS_ALLOW_PRIVILEGED_DB", "no"), "yes"),
 		ContentDir:            getenv("AEGIS_CONTENT_DIR", "content"),
 		FeedScheduler:         !strings.EqualFold(getenv("AEGIS_FEED_SCHEDULER", "on"), "off"),
 		LogLevel:              getenv("AEGIS_LOG_LEVEL", "info"),

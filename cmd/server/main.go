@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -59,6 +60,25 @@ func main() {
 		pool = p
 		defer pool.Close()
 		log.Info("database connected")
+
+		rep, err := db.CheckPrivileges(ctx, pool)
+		if err != nil {
+			log.Error("database privilege check failed", "error", err.Error())
+			os.Exit(1)
+		}
+		for _, w := range rep.Warnings {
+			log.Warn("database login "+w, "db_user", rep.User)
+		}
+		if len(rep.Fatal) > 0 {
+			problems := strings.Join(rep.Fatal, "; ")
+			if !cfg.AllowPrivilegedDB {
+				log.Error("refusing to start: database login can bypass audit_log protections - connect as a login in the aegis_app role (AEGIS_ALLOW_PRIVILEGED_DB=yes overrides, local dev only)",
+					"db_user", rep.User, "problems", problems)
+				os.Exit(1)
+			}
+			log.Warn("INSECURE: running with a privileged database login (AEGIS_ALLOW_PRIVILEGED_DB=yes) - never do this outside local dev",
+				"db_user", rep.User, "problems", problems)
+		}
 	} else {
 		log.Warn("AEGIS_DATABASE_URL not set; /readyz will not check the database")
 	}
