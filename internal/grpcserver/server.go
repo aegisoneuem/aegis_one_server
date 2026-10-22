@@ -20,9 +20,11 @@ import (
 
 	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/commands"
+	"aegis-one/internal/enroll"
 	"aegis-one/internal/identity"
 	"aegis-one/internal/ingest"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
@@ -35,13 +37,84 @@ type Server struct {
 	identity *identity.Resolver
 	ingest   *ingest.Store
 	commands *commands.Store
+	// enroll is nil when no enrollment CA is configured. When it is set, every
+	// legitimate agent cert was issued (and recorded) at enrollment, so
+	// trust-on-first-use for unknown certificates is turned off.
+	enroll *enroll.Service
 
 	mu      sync.Mutex
 	clients map[string]chan *aegisonev1.ServerMessage // device_id -> outbound queue
 }
 
-func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store, cmds *commands.Store) *Server {
-	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, clients: make(map[string]chan *aegisonev1.ServerMessage)}
+func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store, cmds *commands.Store, enr *enroll.Service) *Server {
+	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, enroll: enr, clients: make(map[string]chan *aegisonev1.ServerMessage)}
+}
+
+// EnrollMethod is the one RPC callable without a client certificate.
+const EnrollMethod = "/aegisone.v1.AgentControlPlane/Enroll"
+
+func (s *Server) Enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*aegisonev1.EnrollResponse, error) {
+	if s.enroll == nil {
+		return &aegisonev1.EnrollResponse{Error: "enrollment is not enabled on this server"}, nil
+	}
+	remote := ""
+	if p, ok := peer.FromContext(ctx); ok {
+		remote = p.Addr.String()
+	}
+	return s.enroll.Enroll(ctx, req, remote), nil
+}
+
+func (s *Server) Renew(ctx context.Context, req *aegisonev1.RenewRequest) (*aegisonev1.RenewResponse, error) {
+	if s.enroll == nil {
+		return &aegisonev1.RenewResponse{Error: "enrollment is not enabled on this server"}, nil
+	}
+	cert, err := peerCert(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "client certificate required")
+	}
+	known, err := s.identity.Lookup(ctx, identity.Fingerprint(cert))
+	if err != nil {
+		s.log.Error("renew: identity lookup failed", "error", err.Error())
+		return nil, status.Error(codes.Internal, "identity lookup failed")
+	}
+	if known == nil || known.Revoked {
+		return nil, status.Error(codes.PermissionDenied, "certificate not recognized or revoked")
+	}
+	return s.enroll.Renew(ctx, known, req), nil
+}
+
+// RequireClientCert enforces that every RPC except Enroll comes over a TLS
+// connection with a VERIFIED client certificate. The listener only asks for a
+// cert optionally (a not-yet-enrolled agent has none and must reach Enroll on
+// the same port), so this is where "mTLS required" is actually enforced.
+func RequireClientCert() (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
+	check := func(ctx context.Context, method string) error {
+		if method == EnrollMethod {
+			return nil
+		}
+		p, ok := peer.FromContext(ctx)
+		if !ok {
+			return status.Error(codes.Unauthenticated, "client certificate required")
+		}
+		tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+		if !ok || len(tlsInfo.State.VerifiedChains) == 0 {
+			return status.Error(codes.Unauthenticated, "client certificate required")
+		}
+		return nil
+	}
+	unary := func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if err := check(ctx, info.FullMethod); err != nil {
+			return nil, err
+		}
+		return handler(ctx, req)
+	}
+	stream := func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if err := check(ss.Context(), info.FullMethod); err != nil {
+			return err
+		}
+		return handler(srv, ss)
+	}
+	return unary, stream
 }
 
 // Dispatch queues msg for delivery to the agent currently connected as deviceID.
@@ -100,6 +173,10 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 		if k != nil && k.Revoked {
 			s.log.Warn("rejecting connect: revoked agent", "device_id", k.DeviceID)
 			return status.Error(codes.PermissionDenied, "agent revoked")
+		}
+		if k == nil && s.enroll != nil {
+			s.log.Warn("rejecting connect: certificate was not issued by enrollment", "fingerprint", shortFingerprint(fingerprint))
+			return status.Error(codes.PermissionDenied, "certificate not recognized - enroll first")
 		}
 		known = k
 	}

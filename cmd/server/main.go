@@ -21,6 +21,7 @@ import (
 
 	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/apiauth"
+	"aegis-one/internal/ca"
 	"aegis-one/internal/cabfeed"
 	"aegis-one/internal/commands"
 	"aegis-one/internal/complianceapi"
@@ -28,6 +29,7 @@ import (
 	"aegis-one/internal/contentapi"
 	"aegis-one/internal/crypto"
 	"aegis-one/internal/db"
+	"aegis-one/internal/enroll"
 	"aegis-one/internal/feedsched"
 	"aegis-one/internal/grpcserver"
 	"aegis-one/internal/identity"
@@ -89,8 +91,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	requireCertUnary, requireCertStream := grpcserver.RequireClientCert()
 	grpcSrv := grpc.NewServer(
 		grpc.Creds(creds),
+		grpc.ChainUnaryInterceptor(requireCertUnary),
+		grpc.ChainStreamInterceptor(requireCertStream),
 		// The agent pings on its own keepalive timer (default 60s); without a
 		// permissive enforcement policy the server would GOAWAY it as abusive.
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
@@ -105,7 +110,12 @@ func main() {
 	if pool != nil {
 		cmdStore = commands.New(pool)
 	}
-	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool), cmdStore)
+	enrollSvc, err := setupEnrollment(cfg, pool, log)
+	if err != nil {
+		log.Error("enrollment setup failed", "error", err.Error())
+		os.Exit(1)
+	}
+	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool), cmdStore, enrollSvc)
 	aegisonev1.RegisterAgentControlPlaneServer(grpcSrv, agentSrv)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
@@ -262,4 +272,34 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 	// /content/* authorizes per request: agent mTLS cert or a content.download token.
 	mux.Handle("/content/", contentapi.New(pool, contentDir, identity.New(pool), auth, log))
 	return mux
+}
+
+// setupEnrollment loads the enrollment CA if one is provisioned (cmd/cagen).
+// No CA key file -> enrollment off (dev / pre-provisioned certs; TOFU stays on).
+// A CA key file WITHOUT a working passphrase is a misconfiguration and stops the
+// server rather than silently running with enrollment disabled.
+func setupEnrollment(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger) (*enroll.Service, error) {
+	if _, err := os.Stat(cfg.CAKeyFile); err != nil {
+		log.Warn("enrollment disabled: no enrollment CA key (run cmd/cagen); unknown agent certs fall back to trust-on-first-use",
+			"ca_key_file", cfg.CAKeyFile)
+		return nil, nil
+	}
+	if pool == nil {
+		log.Warn("enrollment disabled: needs a database")
+		return nil, nil
+	}
+	passphrase, err := config.CAKeyPassphrase()
+	if err != nil {
+		return nil, err
+	}
+	if passphrase == "" {
+		return nil, fmt.Errorf("%s exists but AEGIS_CA_KEY_PASSPHRASE / AEGIS_CA_KEY_PASSPHRASE_FILE is not set", cfg.CAKeyFile)
+	}
+	authority, err := ca.Load(cfg.CACertFile, cfg.CAKeyFile, passphrase)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("enrollment enabled", "ca", authority.Cert.Subject.CommonName, "ca_not_after", authority.Cert.NotAfter,
+		"agent_cert_ttl", cfg.AgentCertTTL.String(), "license_max_devices", cfg.LicenseMaxDevices)
+	return enroll.New(pool, authority, cfg.AgentCertTTL, cfg.LicenseMaxDevices, log), nil
 }

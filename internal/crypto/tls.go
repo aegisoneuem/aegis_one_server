@@ -51,8 +51,11 @@ func HTTPServerTLSConfig(certPath, keyPath, agentCAPath string) (*tls.Config, er
 	}, nil
 }
 
-// ServerCredentials loads the server's mTLS transport credentials: it presents
-// certPath/keyPath and requires + verifies a client cert against caPath.
+// ServerCredentials loads the agent port's TLS credentials: it presents
+// certPath/keyPath and verifies a client cert against caPath IF one is sent.
+// The cert is optional at the TLS layer only because a not-yet-enrolled agent
+// must reach Enroll on this same port; grpcserver.RequireClientCert makes it
+// mandatory for every other RPC.
 func ServerCredentials(caPath, certPath, keyPath string) (credentials.TransportCredentials, error) {
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
@@ -66,6 +69,6 @@ func ServerCredentials(caPath, certPath, keyPath string) (credentials.TransportC
 		MinVersion:   minTLS,
 		Certificates: []tls.Certificate{cert},
 		ClientCAs:    pool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}), nil
 }

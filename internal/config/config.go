@@ -5,7 +5,9 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,6 +36,18 @@ type Config struct {
 	// cmd/keygen) used to sign commands pushed to agents.
 	CommandSigningKeyFile string
 
+	// Enrollment CA (cmd/cagen). Enrollment is enabled only when the CA key file
+	// exists and a passphrase is provided (CAKeyPassphrase - kept out of this
+	// struct on purpose so it can't end up in a log of the config).
+	CACertFile string
+	CAKeyFile  string
+	// AgentCertTTL is the lifetime of issued agent client certs; the agent renews
+	// at ~2/3 of it. 398 days follows the agent team's handoff (BigFix convention).
+	AgentCertTTL time.Duration
+	// LicenseMaxDevices caps devices that hold a seat (0 = unlimited). Interim:
+	// a signed license file (licenses table) isn't verified yet.
+	LicenseMaxDevices int
+
 	// AllowPrivilegedDB lets the server start even if its DB login is a superuser
 	// or table owner (which can disable audit_log's protections). Local dev ONLY.
 	AllowPrivilegedDB bool
@@ -61,10 +75,23 @@ func getenv(key, fallback string) string {
 func Load() Config {
 	tlsCert := getenv("AEGIS_TLS_CERT", "certs/server.crt")
 	tlsKey := getenv("AEGIS_TLS_KEY", "certs/server.key")
+	tlsCA := getenv("AEGIS_TLS_CA", "certs/ca.crt")
+	certTTL, err := time.ParseDuration(getenv("AEGIS_AGENT_CERT_TTL", "9552h")) // 398 days
+	if err != nil || certTTL <= 0 {
+		certTTL = 9552 * time.Hour
+	}
+	licenseMax, err := strconv.Atoi(getenv("AEGIS_LICENSE_MAX_DEVICES", "0"))
+	if err != nil || licenseMax < 0 {
+		licenseMax = 0
+	}
 	return Config{
 		GRPCAddr:              getenv("AEGIS_GRPC_ADDR", ":50051"),
 		HTTPAddr:              getenv("AEGIS_HTTP_ADDR", ":8080"),
-		TLSCAFile:             getenv("AEGIS_TLS_CA", "certs/ca.crt"),
+		TLSCAFile:             tlsCA,
+		CACertFile:            getenv("AEGIS_CA_CERT", tlsCA),
+		CAKeyFile:             getenv("AEGIS_CA_KEY_FILE", "certs/ca.key.enc"),
+		AgentCertTTL:          certTTL,
+		LicenseMaxDevices:     licenseMax,
 		TLSCertFile:           tlsCert,
 		TLSKeyFile:            tlsKey,
 		HTTPTLS:               !strings.EqualFold(getenv("AEGIS_HTTP_TLS", "on"), "off"),
@@ -78,4 +105,21 @@ func Load() Config {
 		LogLevel:              getenv("AEGIS_LOG_LEVEL", "info"),
 		ShutdownTimeout:       10 * time.Second,
 	}
+}
+
+// CAKeyPassphrase returns the enrollment CA key passphrase from
+// AEGIS_CA_KEY_PASSPHRASE, or from the file named by AEGIS_CA_KEY_PASSPHRASE_FILE
+// (e.g. a Docker/K8s secret mount). "" when neither is set.
+func CAKeyPassphrase() (string, error) {
+	if v := os.Getenv("AEGIS_CA_KEY_PASSPHRASE"); v != "" {
+		return v, nil
+	}
+	if f := strings.TrimSpace(os.Getenv("AEGIS_CA_KEY_PASSPHRASE_FILE")); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return "", fmt.Errorf("read AEGIS_CA_KEY_PASSPHRASE_FILE: %w", err)
+		}
+		return strings.TrimRight(string(b), "\r\n"), nil
+	}
+	return "", nil
 }
