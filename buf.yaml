@@ -8,17 +8,16 @@ modules:
 lint:
   use:
     - STANDARD
-  except:
-    - RPC_REQUEST_STANDARD_NAME
-    - RPC_RESPONSE_STANDARD_NAME
-    - SERVICE_SUFFIX
+  # aegisone/v1/agent.proto mirrors the agent team's contract byte-for-byte
+  # (names are pinned by the shipped agent), so only that file is exempt from
+  # the naming rules it predates.
   ignore_only:
     RPC_REQUEST_STANDARD_NAME:
-      - proto/agentcontrol/v1/control_plane.proto
+      - proto/aegisone/v1/agent.proto
     RPC_RESPONSE_STANDARD_NAME:
-      - proto/agentcontrol/v1/control_plane.proto
+      - proto/aegisone/v1/agent.proto
     SERVICE_SUFFIX:
-      - proto/agentcontrol/v1/control_plane.proto
+      - proto/aegisone/v1/agent.proto
 breaking:
   use:
     - WIRE_JSON

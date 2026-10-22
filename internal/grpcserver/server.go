@@ -18,7 +18,7 @@ import (
 	"log/slog"
 	"sync"
 
-	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/commands"
 	"aegis-one/internal/identity"
 	"aegis-one/internal/ingest"
@@ -30,23 +30,23 @@ import (
 )
 
 type Server struct {
-	agentcontrolv1.UnimplementedAgentControlPlaneServer
+	aegisonev1.UnimplementedAgentControlPlaneServer
 	log      *slog.Logger
 	identity *identity.Resolver
 	ingest   *ingest.Store
 	commands *commands.Store
 
 	mu      sync.Mutex
-	clients map[string]chan *agentcontrolv1.ServerMessage // device_id -> outbound queue
+	clients map[string]chan *aegisonev1.ServerMessage // device_id -> outbound queue
 }
 
 func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store, cmds *commands.Store) *Server {
-	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, clients: make(map[string]chan *agentcontrolv1.ServerMessage)}
+	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, clients: make(map[string]chan *aegisonev1.ServerMessage)}
 }
 
 // Dispatch queues msg for delivery to the agent currently connected as deviceID.
 // Returns an error if that device has no live connection or its queue is full.
-func (s *Server) Dispatch(deviceID string, msg *agentcontrolv1.ServerMessage) error {
+func (s *Server) Dispatch(deviceID string, msg *aegisonev1.ServerMessage) error {
 	s.mu.Lock()
 	ch, ok := s.clients[deviceID]
 	s.mu.Unlock()
@@ -61,8 +61,8 @@ func (s *Server) Dispatch(deviceID string, msg *agentcontrolv1.ServerMessage) er
 	}
 }
 
-func (s *Server) register(deviceID string) chan *agentcontrolv1.ServerMessage {
-	ch := make(chan *agentcontrolv1.ServerMessage, 16)
+func (s *Server) register(deviceID string) chan *aegisonev1.ServerMessage {
+	ch := make(chan *aegisonev1.ServerMessage, 16)
 	s.mu.Lock()
 	s.clients[deviceID] = ch
 	s.mu.Unlock()
@@ -77,10 +77,10 @@ func (s *Server) unregister(deviceID string) {
 
 type registration struct {
 	deviceID string
-	outbound chan *agentcontrolv1.ServerMessage
+	outbound chan *aegisonev1.ServerMessage
 }
 
-func (s *Server) Connect(stream agentcontrolv1.AgentControlPlane_ConnectServer) error {
+func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) error {
 	ctx := stream.Context()
 
 	cert, err := peerCert(ctx)
@@ -145,7 +145,7 @@ func (s *Server) Connect(stream agentcontrolv1.AgentControlPlane_ConnectServer) 
 	}()
 
 	var deviceID string
-	var outbound chan *agentcontrolv1.ServerMessage
+	var outbound chan *aegisonev1.ServerMessage
 	for {
 		select {
 		case err := <-recvErrCh:
@@ -195,11 +195,11 @@ func shortFingerprint(fp string) string {
 	return fp[:12]
 }
 
-func deviceIDOf(msg *agentcontrolv1.AgentMessage) string {
+func deviceIDOf(msg *aegisonev1.AgentMessage) string {
 	switch p := msg.GetPayload().(type) {
-	case *agentcontrolv1.AgentMessage_Heartbeat:
+	case *aegisonev1.AgentMessage_Heartbeat:
 		return p.Heartbeat.GetDeviceId()
-	case *agentcontrolv1.AgentMessage_PatchScanResult:
+	case *aegisonev1.AgentMessage_PatchScanResult:
 		return p.PatchScanResult.GetDeviceId()
 	default:
 		return ""
@@ -210,12 +210,12 @@ func deviceIDOf(msg *agentcontrolv1.AgentMessage) string {
 // device_id but no hostname/agent_version (those come from Heartbeat) - Bootstrap
 // falls back to sensible placeholders for those when triggered this way; a
 // Heartbeat typically follows shortly and could refine them (not done yet).
-func identityFieldsOf(msg *agentcontrolv1.AgentMessage) (deviceID, hostname, osFamily, agentVersion string) {
+func identityFieldsOf(msg *aegisonev1.AgentMessage) (deviceID, hostname, osFamily, agentVersion string) {
 	switch p := msg.GetPayload().(type) {
-	case *agentcontrolv1.AgentMessage_Heartbeat:
+	case *aegisonev1.AgentMessage_Heartbeat:
 		hb := p.Heartbeat
 		return hb.GetDeviceId(), hb.GetHostname(), hb.GetOs(), hb.GetAgentVersion()
-	case *agentcontrolv1.AgentMessage_PatchScanResult:
+	case *aegisonev1.AgentMessage_PatchScanResult:
 		return p.PatchScanResult.GetDeviceId(), "", "windows", ""
 	default:
 		return "", "", "", ""
@@ -226,9 +226,9 @@ func identityFieldsOf(msg *agentcontrolv1.AgentMessage) (deviceID, hostname, osF
 // identity and a database is configured - persists Heartbeat/PatchScanResult via
 // internal/ingest. known is nil until this connection's first identifying
 // message has been processed (or always nil if identity tracking is disabled).
-func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *agentcontrolv1.AgentMessage) {
+func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *aegisonev1.AgentMessage) {
 	switch payload := msg.GetPayload().(type) {
-	case *agentcontrolv1.AgentMessage_Heartbeat:
+	case *aegisonev1.AgentMessage_Heartbeat:
 		hb := payload.Heartbeat
 		s.log.Info("heartbeat",
 			"device_id", hb.GetDeviceId(),
@@ -241,7 +241,7 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			}
 		}
 
-	case *agentcontrolv1.AgentMessage_CommandResult:
+	case *aegisonev1.AgentMessage_CommandResult:
 		cr := payload.CommandResult
 		s.log.Info("command result",
 			"command_id", cr.GetCommandId(),
@@ -255,24 +255,44 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			}
 		}
 
-	case *agentcontrolv1.AgentMessage_InstallStatus:
-		st := payload.InstallStatus
-		s.log.Info("install status",
-			"command_id", st.GetCommandId(),
+	case *aegisonev1.AgentMessage_ActionStatus:
+		st := payload.ActionStatus
+		s.log.Info("action status",
+			"action_id", st.GetActionId(),
+			"action_type", st.GetActionType(),
 			"kb", st.GetKb(),
 			"phase", st.GetPhase().String(),
 			"exit_code", st.GetExitCode(),
 			"reboot_required", st.GetRebootRequired(),
 			"reason", st.GetReason())
-		if known != nil {
-			if applied, err := s.commands.ApplyInstallStatus(ctx, known.AgentUUID, st); err != nil {
-				s.log.Error("record install status failed", "command_id", st.GetCommandId(), "error", err.Error())
+		// Only actions we issued are tracked in agent_commands; the agent also
+		// reports its own scheduled scans ("scan-<unix>") this way.
+		if known != nil && commands.IsCommandID(st.GetActionId()) {
+			if applied, err := s.commands.ApplyActionStatus(ctx, known.AgentUUID, st); err != nil {
+				s.log.Error("record action status failed", "action_id", st.GetActionId(), "error", err.Error())
 			} else if !applied {
-				s.log.Warn("install status matched no open command for this agent", "command_id", st.GetCommandId())
+				s.log.Warn("action status matched no open command for this agent", "action_id", st.GetActionId())
 			}
 		}
 
-	case *agentcontrolv1.AgentMessage_PatchScanResult:
+	case *aegisonev1.AgentMessage_DeviceState:
+		ds := payload.DeviceState
+		s.log.Info("device state",
+			"device_id", ds.GetDeviceId(),
+			"build", ds.GetBuild(),
+			"reboot_pending", ds.GetRebootPending(),
+			"reboot_pending_kbs", ds.GetRebootPendingKbs())
+
+	case *aegisonev1.AgentMessage_CacheFull:
+		cf := payload.CacheFull
+		s.log.Warn("agent patch cache full",
+			"device_id", cf.GetDeviceId(),
+			"pending_id", cf.GetPendingId(),
+			"needed_bytes", cf.GetNeededBytes(),
+			"cap_bytes", cf.GetCapBytes(),
+			"message", cf.GetMessage())
+
+	case *aegisonev1.AgentMessage_PatchScanResult:
 		psr := payload.PatchScanResult
 		s.log.Info("patch scan result",
 			"device_id", psr.GetDeviceId(),
@@ -285,7 +305,9 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 				s.log.Error("persist patch scan failed", "device_id", known.DeviceID, "error", err.Error())
 			} else {
 				s.log.Info("patch scan persisted", "device_id", known.DeviceID,
-					"matched", summary.Matched, "unmatched", summary.Unmatched, "marked_installed", summary.MarkedInstalled,
+					"matched", summary.Matched, "unmatched", summary.Unmatched, "superseded", summary.Superseded,
+					"installed_reported", summary.InstalledReported, "no_longer_applicable", summary.NoLongerApplicable,
+					"marked_installed", summary.MarkedInstalled,
 					"sla_assigned", summary.SLAAssigned)
 			}
 		}

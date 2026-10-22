@@ -7,7 +7,7 @@ package ingest
 import (
 	"context"
 
-	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/identity"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,7 +24,7 @@ func New(pool *pgxpool.Pool) *Store {
 // Heartbeat records one agent_heartbeats row and bumps agents.last_heartbeat_at /
 // devices.last_seen_at. No CPU/RAM/disk telemetry is in this contract's Heartbeat,
 // so those columns stay NULL.
-func (s *Store) Heartbeat(ctx context.Context, known *identity.Known, hb *agentcontrolv1.Heartbeat) error {
+func (s *Store) Heartbeat(ctx context.Context, known *identity.Known, hb *aegisonev1.Heartbeat) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err

@@ -19,7 +19,7 @@ import (
 	"crypto/ed25519"
 	"log/slog"
 
-	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/apiauth"
 	"aegis-one/internal/cabfeed"
 	"aegis-one/internal/commands"
@@ -106,7 +106,7 @@ func main() {
 		cmdStore = commands.New(pool)
 	}
 	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool), cmdStore)
-	agentcontrolv1.RegisterAgentControlPlaneServer(grpcSrv, agentSrv)
+	aegisonev1.RegisterAgentControlPlaneServer(grpcSrv, agentSrv)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {

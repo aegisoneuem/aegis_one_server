@@ -1,0 +1,301 @@
+// =====================================================================================
+// AEGIS ONE - Agent <-> Server contract, as implemented by the shipped agent.
+//
+// SOURCE OF TRUTH: the agent team's aegis_one_proto module (grpc/agent.proto,
+// owner: Vijay). That source was not available, so this file was RECOVERED from
+// the FileDescriptorProto that protoc-gen-go embeds in the compiled agent
+// (dist/AegisOneClient.exe) and mockserver (dist/mockserver.exe); both binaries
+// carry byte-identical descriptors. It is checked against that descriptor
+// (same package, messages, fields, numbers, types, reserved ranges, service);
+// only the file name and go_package differ, neither of which is on the wire.
+// Replace it with the agent team's real file as soon as that is available, and
+// regenerate.
+//
+// Command signatures (Command.signature) are not described by this file: they
+// are Ed25519 over commandsign.CanonicalBytes - see internal/signing.
+// =====================================================================================
+syntax = "proto3";
+
+package aegisone.v1;
+
+option go_package = "aegis-one/gen/aegisone/v1;aegisonev1";
+
+service AgentControlPlane {
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+  rpc FetchContent(ContentRequest) returns (stream ContentChunk);
+  rpc UploadContent(stream UploadChunk) returns (UploadAck);
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc Renew(RenewRequest) returns (RenewResponse);
+  rpc ShellSession(stream ShellOutput) returns (stream ShellInput);
+}
+
+enum ActionPhase {
+  ACTION_PHASE_UNSPECIFIED = 0;
+  ACTION_PHASE_QUEUED = 1;
+  ACTION_PHASE_DOWNLOADING = 2;
+  ACTION_PHASE_VERIFYING = 3;
+  ACTION_PHASE_RUNNING = 4;
+  ACTION_PHASE_SUCCESS = 5;
+  ACTION_PHASE_FAILED = 6;
+  ACTION_PHASE_NOT_APPLICABLE = 7;
+}
+
+message Heartbeat {
+  string device_id = 1;
+  string agent_version = 2;
+  string os = 3;
+  string hostname = 4;
+  int64 timestamp = 5;
+}
+
+message CommandResult {
+  string command_id = 1;
+  string status = 2;
+  string message = 3;
+}
+
+message Command {
+  string command_id = 1;
+  string type = 2;
+  bytes payload = 3;
+  bytes signature = 4;
+}
+
+message MissingUpdate {
+  string update_id = 1;
+  repeated string kb_article_ids = 2;
+  string title = 3;
+  string classification = 4;
+  repeated string products = 5;
+  string type = 6;
+  string msrc_severity = 7;
+  repeated string cve_ids = 8;
+  double size_mb = 9;
+  bool reboot_required = 10;
+  bool superseded = 11;
+  repeated string superseded_update_ids = 12;
+  repeated string security_bulletin_ids = 13;
+  int32 revision_number = 14;
+  string support_url = 15;
+  string description = 16;
+  double min_size_mb = 17;
+}
+
+message PatchScanResult {
+  string device_id = 1;
+  string product_name = 2;
+  string display_version = 3;
+  string build = 4;
+  string architecture = 5;
+  int64 collected_at = 6;
+  string source = 7;
+  repeated MissingUpdate missing = 8;
+  repeated MissingUpdate installed = 9;
+}
+
+message InstallPatchSpec {
+  string kb = 1;
+  string file_path = 2;
+  string expected_hash = 3;
+  string hash_algorithm = 4;
+  string os_build = 5;
+}
+
+message RebootSpec {
+  int32 delay_seconds = 1;
+  string message = 2;
+}
+
+message SoftwareDeploySpec {
+  string package_id = 1;
+  string name = 2;
+  string version = 3;
+  string action = 4;
+  string installer_type = 5;
+  string file_path = 6;
+  string expected_hash = 7;
+  string hash_algorithm = 8;
+  string silent_args = 9;
+  repeated int32 success_exit_codes = 10;
+  int32 timeout_seconds = 11;
+  string content_id = 12;
+  bool require_signature = 13;
+  string product_code = 14;
+  string uninstall_key = 15;
+  string display_name = 16;
+  map<string, string> parameters = 17;
+}
+
+message ActionStatus {
+  string action_id = 1;
+  string action_type = 2;
+  string device_id = 3;
+  ActionPhase phase = 4;
+  int32 exit_code = 5;
+  bool reboot_required = 6;
+  string reason = 7;
+  string detail = 8;
+  int32 progress_pct = 9;
+  int64 started_at = 10;
+  int64 finished_at = 11;
+  string kb = 12;
+}
+
+message DeviceStateReport {
+  reserved 7;
+  string device_id = 1;
+  string product_name = 2;
+  string display_version = 3;
+  string build = 4;
+  string architecture = 5;
+  int64 collected_at = 6;
+  bool reboot_pending = 8;
+  repeated string reboot_pending_kbs = 9;
+  repeated string reboot_pending_sources = 10;
+}
+
+message CacheFullReport {
+  string device_id = 1;
+  string pending_id = 2;
+  int64 needed_bytes = 3;
+  int64 cap_bytes = 4;
+  int64 in_use_bytes = 5;
+  string message = 6;
+}
+
+message AgentMessage {
+  reserved 4, 5;
+  oneof payload {
+    Heartbeat heartbeat = 1;
+    CommandResult command_result = 2;
+    PatchScanResult patch_scan_result = 3;
+    DeviceStateReport device_state = 6;
+    CacheFullReport cache_full = 7;
+    ActionStatus action_status = 8;
+  }
+}
+
+message PatchBaseline {
+  string build = 1;
+  repeated string latest_kbs = 2;
+  int64 issued_at = 3;
+}
+
+message CabManifest {
+  string version = 1;
+  string sha256 = 2;
+}
+
+message ServerMessage {
+  oneof payload {
+    Command command = 1;
+    PatchBaseline patch_baseline = 2;
+    CabManifest cab_manifest = 3;
+  }
+}
+
+message ContentRequest {
+  string kind = 1;
+  string id = 2;
+  string sha256 = 3;
+}
+
+message ContentChunk {
+  bytes data = 1;
+}
+
+message EnrollRequest {
+  string enroll_token = 1;
+  string device_id = 2;
+  string csr_pem = 3;
+  string system_uuid = 4;
+  string machine_guid = 5;
+  string hostname = 6;
+  string os = 7;
+  string agent_version = 8;
+  string tpm_ek = 9;
+}
+
+message EnrollResponse {
+  string client_cert_pem = 1;
+  string ca_chain_pem = 2;
+  string assigned_device_id = 3;
+  string error = 4;
+  string computer_id = 5;
+}
+
+message CollectFileSpec {
+  repeated string paths = 1;
+  int64 max_bytes_each = 2;
+  int64 tail_bytes = 3;
+  int64 max_total_bytes = 4;
+}
+
+message UploadChunk {
+  string action_id = 1;
+  string name = 2;
+  bytes data = 3;
+  int64 total_size = 4;
+  string sha256_full = 5;
+}
+
+message UploadAck {
+  string stored_path = 1;
+  int64 received_bytes = 2;
+  bool integrity_ok = 3;
+  string error = 4;
+}
+
+message RenewRequest {
+  string csr_pem = 1;
+}
+
+message RenewResponse {
+  string client_cert_pem = 1;
+  string error = 2;
+}
+
+message OpenShellSpec {
+  string session_id = 1;
+  int32 ttl_seconds = 2;
+  int32 idle_timeout_seconds = 3;
+  int32 max_duration_seconds = 4;
+  int64 issued_at = 5;
+}
+
+message ShellInput {
+  bytes stdin = 1;
+  string control = 2;
+}
+
+message ShellOutput {
+  string session_id = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  bool closed = 4;
+  int32 exit_code = 5;
+  string reason = 6;
+}
+
+message RunCommandSpec {
+  string command = 1;
+  string shell = 2;
+  int32 timeout_seconds = 3;
+  int64 max_output_bytes = 4;
+  string upload_as = 5;
+  map<string, string> parameters = 6;
+  string working_dir = 7;
+  string run_as = 8;
+}
+
+message RunCommandResult {
+  int32 exit_code = 1;
+  string shell_used = 2;
+  int64 stdout_bytes = 3;
+  int64 stderr_bytes = 4;
+  string stdout = 5;
+  string stderr = 6;
+  bool truncated = 7;
+  string uploaded_path = 8;
+  int64 duration_ms = 9;
+}

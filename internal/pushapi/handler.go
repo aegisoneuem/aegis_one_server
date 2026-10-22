@@ -17,7 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/apiauth"
 	"aegis-one/internal/commands"
 	"aegis-one/internal/signing"
@@ -26,7 +26,7 @@ import (
 )
 
 type Dispatcher interface {
-	Dispatch(deviceID string, msg *agentcontrolv1.ServerMessage) error
+	Dispatch(deviceID string, msg *aegisonev1.ServerMessage) error
 }
 
 type Handler struct {
@@ -86,7 +86,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var auditPayload map[string]any
 	switch cmdType {
 	case "install_patch":
-		spec := &agentcontrolv1.InstallPatchSpec{
+		spec := &aegisonev1.InstallPatchSpec{
 			Kb:            q.Get("kb"),
 			FilePath:      q.Get("file_path"),
 			ExpectedHash:  q.Get("expected_hash"),
@@ -130,9 +130,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	signature := signing.Sign(h.signingKey, wirePayload)
+	newID, err := commands.NewID()
+	if err != nil {
+		http.Error(w, "generate command id: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	signature := signing.SignCommand(h.signingKey, cmdType, newID, wirePayload)
 	commandID, existing, err := h.store.Create(ctx, commands.Issue{
-		AgentUUID: agentUUID, DeviceID: deviceID, Type: cmdType, Payload: auditPayload,
+		ID: newID, AgentUUID: agentUUID, DeviceID: deviceID, Type: cmdType, Payload: auditPayload,
 		Signature: signature, SigningKeyID: h.signingKeyID, IdempotencyKey: idemKey,
 		IssuedByAPIClientID: caller.ClientID, IssuedByLabel: caller.ClientName,
 	})
@@ -145,7 +150,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg := &agentcontrolv1.ServerMessage{Payload: &agentcontrolv1.ServerMessage_Command{Command: &agentcontrolv1.Command{
+	msg := &aegisonev1.ServerMessage{Payload: &aegisonev1.ServerMessage_Command{Command: &aegisonev1.Command{
 		CommandId: commandID, Type: cmdType, Payload: wirePayload, Signature: signature,
 	}}}
 	if err := h.dispatcher.Dispatch(deviceID, msg); err != nil {

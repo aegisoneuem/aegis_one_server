@@ -5,34 +5,38 @@ import (
 	"fmt"
 	"strings"
 
-	agentcontrolv1 "aegis-one/gen/agentcontrol/v1"
+	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/identity"
 
 	"github.com/jackc/pgx/v5"
 )
 
 type PatchScanSummary struct {
-	Matched         int // missing updates linked to a known patch_catalog row
-	Unmatched       int // missing updates with no matching KB in patch_catalog yet
-	MarkedInstalled int // previously-missing rows no longer reported missing
-	SLAAssigned     int // open rows that got a policy + sla_due_at this scan
+	Matched            int // missing updates linked to a known patch_catalog row
+	Unmatched          int // missing updates with no matching KB in patch_catalog yet
+	Superseded         int // missing updates the agent flagged as superseded
+	InstalledReported  int // installed updates (agent's installed list) matched to the catalog
+	MarkedInstalled    int // fallback only: previously-open rows assumed installed
+	NoLongerApplicable int // previously-open rows in neither list (deleted)
+	SLAAssigned        int // open rows that got a policy + sla_due_at this scan
 }
 
-// PatchScan treats every received PatchScanResult as a full, successful snapshot
-// of what's currently missing (the agent only ever builds and sends one after a
-// scan that actually completed - a failed scan logs "status UNKNOWN" and sends
-// nothing, per the agent's own internal/patch/scan_offline_windows.go). So:
-//   - every Missing entry is upserted into device_patch_state as 'missing'
-//     (matched by KB against patch_catalog) or into unmatched_patch_reports
-//     (no catalog entry for that KB yet)
-//   - every row that WAS missing/pending_reboot/failed for this device but is
-//     NOT in this scan's Missing list is now treated as installed
-//
-// Limitation: a patch can also leave the missing list by becoming inapplicable
-// (e.g. superseded) rather than actually being installed; this scan has no way to
-// tell those apart from what the agent sends today, so it's recorded as
-// 'installed' either way. Revisit if that distinction turns out to matter.
-func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *agentcontrolv1.PatchScanResult) (PatchScanSummary, error) {
+// PatchScan applies a PatchScanResult as a full, successful snapshot (the agent
+// only sends one after a scan that completed; a failed scan sends nothing):
+//   - Missing, not superseded -> 'missing' (SLA clock per assignSLA); no catalog
+//     match -> unmatched_patch_reports.
+//   - Missing but superseded -> 'superseded': not counted as missing (its
+//     superseding update is reported missing itself), never gets an SLA.
+//   - Installed (the agent's authoritative WUA installed view) -> 'installed'.
+//     Installed updates with no catalog match are skipped, not recorded as
+//     unmatched: install history holds hundreds of old KBs outside our catalog.
+//   - Rows that were open (missing/failed/pending_reboot/superseded) but are in
+//     neither list:
+//   - installed list present -> no longer applicable to this device -> deleted
+//     (device_patch_state stores applicable patches only, 0005);
+//   - installed list empty (agent/source that doesn't send it) -> fall back to
+//     the old inference: assumed installed.
+func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegisonev1.PatchScanResult) (PatchScanSummary, error) {
 	var summary PatchScanSummary
 
 	tx, err := s.pool.Begin(ctx)
@@ -41,7 +45,7 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *agent
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
 
-	matchedPatchIDs := make([]string, 0, len(psr.GetMissing()))
+	seen := make([]string, 0, len(psr.GetMissing())+len(psr.GetInstalled()))
 
 	for _, m := range psr.GetMissing() {
 		patchID, found, err := resolvePatchID(ctx, tx, m.GetKbArticleIds())
@@ -53,6 +57,20 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *agent
 				return summary, fmt.Errorf("record unmatched update %s: %w", m.GetUpdateId(), err)
 			}
 			summary.Unmatched++
+			continue
+		}
+		seen = append(seen, patchID)
+
+		if m.GetSuperseded() {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO device_patch_state (device_id, patch_id, state, detection_source, last_evaluated_at)
+				VALUES ($1, $2, 'superseded', 'agent_wua', now())
+				ON CONFLICT (device_id, patch_id) DO UPDATE SET
+					state = 'superseded', detection_source = 'agent_wua', last_evaluated_at = now()`,
+				known.DeviceUUID, patchID); err != nil {
+				return summary, fmt.Errorf("upsert superseded patch %s: %w", patchID, err)
+			}
+			summary.Superseded++
 			continue
 		}
 
@@ -73,20 +91,53 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *agent
 		); err != nil {
 			return summary, fmt.Errorf("upsert device_patch_state for patch %s: %w", patchID, err)
 		}
-		matchedPatchIDs = append(matchedPatchIDs, patchID)
 		summary.Matched++
 	}
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE device_patch_state
-		SET state = 'installed', installed_at = now(), last_evaluated_at = now()
-		WHERE device_id = $1 AND state IN ('missing', 'pending_reboot', 'failed') AND NOT (patch_id = ANY($2))`,
-		known.DeviceUUID, matchedPatchIDs,
-	)
-	if err != nil {
-		return summary, fmt.Errorf("mark resolved device_patch_state rows: %w", err)
+	for _, inst := range psr.GetInstalled() {
+		patchID, found, err := resolvePatchID(ctx, tx, inst.GetKbArticleIds())
+		if err != nil {
+			return summary, fmt.Errorf("resolve installed update %s: %w", inst.GetUpdateId(), err)
+		}
+		if !found {
+			continue
+		}
+		seen = append(seen, patchID)
+		// installed_at = when we first saw it installed (the agent doesn't send
+		// the install date); kept across later scans.
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO device_patch_state (device_id, patch_id, state, detection_source, installed_at, last_evaluated_at)
+			VALUES ($1, $2, 'installed', 'agent_wua', now(), now())
+			ON CONFLICT (device_id, patch_id) DO UPDATE SET
+				installed_at = CASE WHEN device_patch_state.state = 'installed' AND device_patch_state.installed_at IS NOT NULL
+				                    THEN device_patch_state.installed_at ELSE now() END,
+				state = 'installed', detection_source = 'agent_wua', last_evaluated_at = now()`,
+			known.DeviceUUID, patchID); err != nil {
+			return summary, fmt.Errorf("upsert installed patch %s: %w", patchID, err)
+		}
+		summary.InstalledReported++
 	}
-	summary.MarkedInstalled = int(tag.RowsAffected())
+
+	if len(psr.GetInstalled()) > 0 {
+		tag, err := tx.Exec(ctx, `
+			DELETE FROM device_patch_state
+			WHERE device_id = $1 AND state IN ('missing', 'pending_reboot', 'failed', 'superseded')
+			  AND NOT (patch_id = ANY($2))`, known.DeviceUUID, seen)
+		if err != nil {
+			return summary, fmt.Errorf("remove no-longer-applicable rows: %w", err)
+		}
+		summary.NoLongerApplicable = int(tag.RowsAffected())
+	} else {
+		tag, err := tx.Exec(ctx, `
+			UPDATE device_patch_state
+			SET state = 'installed', installed_at = now(), last_evaluated_at = now()
+			WHERE device_id = $1 AND state IN ('missing', 'pending_reboot', 'failed') AND NOT (patch_id = ANY($2))`,
+			known.DeviceUUID, seen)
+		if err != nil {
+			return summary, fmt.Errorf("mark resolved device_patch_state rows: %w", err)
+		}
+		summary.MarkedInstalled = int(tag.RowsAffected())
+	}
 
 	if summary.SLAAssigned, err = assignSLA(ctx, tx, known.DeviceUUID); err != nil {
 		return summary, fmt.Errorf("assign SLA: %w", err)
@@ -136,7 +187,7 @@ func normalizeKB(kb string) string {
 	return kb
 }
 
-func recordUnmatched(ctx context.Context, tx pgx.Tx, deviceUUID string, m *agentcontrolv1.MissingUpdate) error {
+func recordUnmatched(ctx context.Context, tx pgx.Tx, deviceUUID string, m *aegisonev1.MissingUpdate) error {
 	kb := ""
 	if len(m.GetKbArticleIds()) > 0 {
 		kb = normalizeKB(m.GetKbArticleIds()[0])
