@@ -55,6 +55,10 @@ type Config struct {
 	// ContentDir holds content the server redistributes to agents (the ~640 MB
 	// scan cab, current + previous version). Needs a persistent volume in Docker.
 	ContentDir string
+	// ContentMaxStreams caps concurrent agent downloads (FetchContent); further
+	// requests wait for a free slot. Bounds server disk/network load when a new
+	// cab makes the whole fleet fetch at once.
+	ContentMaxStreams int
 
 	// FeedScheduler runs the MSRC/CISA KEV syncs in-process (needs a database and
 	// outbound internet). Set AEGIS_FEED_SCHEDULER=off on air-gapped deployments.
@@ -84,6 +88,10 @@ func Load() Config {
 	if err != nil || licenseMax < 0 {
 		licenseMax = 0
 	}
+	contentStreams, err := strconv.Atoi(getenv("AEGIS_CONTENT_MAX_STREAMS", "50"))
+	if err != nil || contentStreams < 1 {
+		contentStreams = 50
+	}
 	return Config{
 		GRPCAddr:              getenv("AEGIS_GRPC_ADDR", ":50051"),
 		HTTPAddr:              getenv("AEGIS_HTTP_ADDR", ":8080"),
@@ -101,6 +109,7 @@ func Load() Config {
 		CommandSigningKeyFile: getenv("AEGIS_COMMAND_SIGNING_KEY_FILE", "secrets/command_signing.key"),
 		AllowPrivilegedDB:     strings.EqualFold(getenv("AEGIS_ALLOW_PRIVILEGED_DB", "no"), "yes"),
 		ContentDir:            getenv("AEGIS_CONTENT_DIR", "content"),
+		ContentMaxStreams:     contentStreams,
 		FeedScheduler:         !strings.EqualFold(getenv("AEGIS_FEED_SCHEDULER", "on"), "off"),
 		LogLevel:              getenv("AEGIS_LOG_LEVEL", "info"),
 		ShutdownTimeout:       10 * time.Second,

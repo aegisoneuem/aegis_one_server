@@ -116,6 +116,11 @@ func main() {
 		os.Exit(1)
 	}
 	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool), cmdStore, enrollSvc)
+	if pool != nil {
+		agentSrv.EnableContent(pool, cfg.ContentDir, cfg.ContentMaxStreams)
+	} else {
+		log.Warn("content delivery to agents disabled (no database)")
+	}
 	aegisonev1.RegisterAgentControlPlaneServer(grpcSrv, agentSrv)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
@@ -186,6 +191,14 @@ func main() {
 			log.Error("http server stopped", "error", err.Error())
 		}
 	}()
+
+	if pool != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			agentSrv.WatchCab(ctx, time.Minute)
+		}()
+	}
 
 	switch {
 	case pool == nil:

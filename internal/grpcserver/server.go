@@ -1,5 +1,5 @@
-// Package grpcserver implements the AgentControlPlane service (proto/agentcontrol/v1)
-// that the already-shipped agent (aegis_one_agent-main.zip) connects to.
+// Package grpcserver implements the AgentControlPlane service (proto/aegisone/v1)
+// that the agent (aegis_one_agent) connects to.
 //
 // Each connection is identified by its mTLS client certificate fingerprint via
 // internal/identity (trust-on-first-use against the agent-reported device_id).
@@ -41,6 +41,8 @@ type Server struct {
 	// legitimate agent cert was issued (and recorded) at enrollment, so
 	// trust-on-first-use for unknown certificates is turned off.
 	enroll *enroll.Service
+	// content is nil until EnableContent (needs a database and content dir).
+	content *contentStore
 
 	mu      sync.Mutex
 	clients map[string]chan *aegisonev1.ServerMessage // device_id -> outbound queue
@@ -68,19 +70,30 @@ func (s *Server) Renew(ctx context.Context, req *aegisonev1.RenewRequest) (*aegi
 	if s.enroll == nil {
 		return &aegisonev1.RenewResponse{Error: "enrollment is not enabled on this server"}, nil
 	}
+	known, err := s.knownAgent(ctx, "renew")
+	if err != nil {
+		return nil, err
+	}
+	return s.enroll.Renew(ctx, known, req), nil
+}
+
+// knownAgent resolves the caller's client certificate to a recorded, unrevoked
+// agent - for the unary/server-streaming RPCs that, unlike Connect, never
+// bootstrap an identity.
+func (s *Server) knownAgent(ctx context.Context, rpc string) (*identity.Known, error) {
 	cert, err := peerCert(ctx)
 	if err != nil {
 		return nil, status.Error(codes.Unauthenticated, "client certificate required")
 	}
 	known, err := s.identity.Lookup(ctx, identity.Fingerprint(cert))
 	if err != nil {
-		s.log.Error("renew: identity lookup failed", "error", err.Error())
+		s.log.Error(rpc+": identity lookup failed", "error", err.Error())
 		return nil, status.Error(codes.Internal, "identity lookup failed")
 	}
 	if known == nil || known.Revoked {
 		return nil, status.Error(codes.PermissionDenied, "certificate not recognized or revoked")
 	}
-	return s.enroll.Renew(ctx, known, req), nil
+	return known, nil
 }
 
 // RequireClientCert enforces that every RPC except Enroll comes over a TLS
@@ -136,15 +149,25 @@ func (s *Server) Dispatch(deviceID string, msg *aegisonev1.ServerMessage) error 
 
 func (s *Server) register(deviceID string) chan *aegisonev1.ServerMessage {
 	ch := make(chan *aegisonev1.ServerMessage, 16)
+	// Tell a (re)connecting agent which scan cab is current; it fetches only if
+	// its own copy differs. The queue is new and empty, so this never blocks.
+	if m := s.cabManifestMessage(); m != nil {
+		ch <- m
+	}
 	s.mu.Lock()
 	s.clients[deviceID] = ch
 	s.mu.Unlock()
 	return ch
 }
 
-func (s *Server) unregister(deviceID string) {
+// unregister removes deviceID's queue only if it is still ch: when an agent
+// reconnects before its old stream is torn down, the old stream must not drop
+// the new one's registration.
+func (s *Server) unregister(deviceID string, ch chan *aegisonev1.ServerMessage) {
 	s.mu.Lock()
-	delete(s.clients, deviceID)
+	if s.clients[deviceID] == ch {
+		delete(s.clients, deviceID)
+	}
 	s.mu.Unlock()
 }
 
@@ -227,7 +250,7 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 		select {
 		case err := <-recvErrCh:
 			if deviceID != "" {
-				s.unregister(deviceID)
+				s.unregister(deviceID, outbound)
 				s.log.Info("agent disconnected", "device_id", deviceID)
 			} else {
 				s.log.Info("agent disconnected (never identified)")
@@ -243,7 +266,7 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 		case msg := <-outbound: // nil until registered; a nil channel is never selected
 			if err := stream.Send(msg); err != nil {
 				s.log.Warn("send failed, dropping connection", "device_id", deviceID, "error", err.Error())
-				s.unregister(deviceID)
+				s.unregister(deviceID, outbound)
 				return err
 			}
 		}

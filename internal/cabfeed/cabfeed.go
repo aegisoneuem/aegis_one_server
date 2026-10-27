@@ -257,3 +257,21 @@ func Current(ctx context.Context, pool *pgxpool.Pool) (*Catalog, error) {
 	}
 	return &c, nil
 }
+
+// ByHash returns the catalog with this SHA-256 if the server still keeps it
+// (the current one, or the previous one for agents told about it just before a
+// newer cab landed), or nil.
+func ByHash(ctx context.Context, pool *pgxpool.Pool, sha256Hex string) (*Catalog, error) {
+	var c Catalog
+	err := pool.QueryRow(ctx, `
+		SELECT sha256_hash, size_bytes, file_name, source_last_modified, downloaded_at
+		FROM scan_catalogs WHERE source = $1 AND sha256_hash = $2`, source, sha256Hex,
+	).Scan(&c.SHA256, &c.SizeBytes, &c.FileName, &c.SourceLastModified, &c.DownloadedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
