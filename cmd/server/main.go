@@ -36,9 +36,12 @@ import (
 	"aegis-one/internal/ingest"
 	"aegis-one/internal/kev"
 	"aegis-one/internal/logging"
+	"aegis-one/internal/patchcontent"
+	"aegis-one/internal/patchdeploy"
 	"aegis-one/internal/patchfeed"
 	"aegis-one/internal/pushapi"
 	"aegis-one/internal/signing"
+	"aegis-one/internal/wucatalog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
@@ -116,8 +119,10 @@ func main() {
 		os.Exit(1)
 	}
 	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool), cmdStore, enrollSvc)
+	var patches *patchcontent.Store
 	if pool != nil {
-		agentSrv.EnableContent(pool, cfg.ContentDir, cfg.ContentMaxStreams)
+		patches = patchcontent.New(pool, cfg.ContentDir, log)
+		agentSrv.EnableContent(pool, cfg.ContentDir, cfg.ContentMaxStreams, patches)
 	} else {
 		log.Warn("content delivery to agents disabled (no database)")
 	}
@@ -147,9 +152,18 @@ func main() {
 		}
 	}
 
+	// Patch push (download -> stage -> install) needs the DB, the content
+	// store and a registered signing key.
+	var deployer *patchdeploy.Deployer
+	if patches != nil && cmdStore != nil && signingKeyID != "" {
+		deployer = patchdeploy.New(pool, patches, cmdStore, agentSrv, signingKey, signingKeyID, log)
+	} else {
+		log.Warn("patch deployment disabled (needs a database and a command signing key)")
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, cfg.ContentDir, log),
+		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, deployer, cfg.ContentDir, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		// net/http logs TLS handshake errors etc. through the std logger; route
 		// them through slog so every server log line stays structured JSON.
@@ -198,6 +212,18 @@ func main() {
 			defer wg.Done()
 			agentSrv.WatchCab(ctx, time.Minute)
 		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			patches.Run(ctx, cfg.PatchDownloadWorkers)
+		}()
+	}
+	if deployer != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			deployer.Run(ctx)
+		}()
 	}
 
 	switch {
@@ -210,7 +236,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			log.Info("feed scheduler started", "check_every", feedsched.CheckEvery.String())
-			feedsched.New(pool, log, feedJobs(cfg.ContentDir)...).Run(ctx)
+			feedsched.New(pool, log, feedJobs(cfg.ContentDir, cfg.BSDTar)...).Run(ctx)
 		}()
 	}
 
@@ -231,7 +257,7 @@ func main() {
 // feedJobs lists the scheduled feeds. Names must match the content_feeds.name
 // each sync records under. MSRC runs first, but either order converges
 // (both call kev.Apply).
-func feedJobs(contentDir string) []feedsched.Job {
+func feedJobs(contentDir, bsdtar string) []feedsched.Job {
 	return []feedsched.Job{
 		{Name: "microsoft_cvrf", Run: func(ctx context.Context, pool *pgxpool.Pool) (string, error) {
 			s, err := patchfeed.RunLatest(ctx, pool)
@@ -254,12 +280,22 @@ func feedJobs(contentDir string) []feedsched.Job {
 			if res.Changed {
 				state = "downloaded"
 			}
-			return fmt.Sprintf("%s, sha256 %s, %d bytes", state, res.Catalog.SHA256, res.Catalog.SizeBytes), nil
+			// Map updates to their download URLs (no-op if this cab is already
+			// indexed, so an earlier failed index is retried on the next run).
+			idx, err := wucatalog.IndexCurrent(ctx, pool, contentDir, bsdtar)
+			if err != nil {
+				return fmt.Sprintf("%s, sha256 %s; index failed", state, res.Catalog.SHA256), fmt.Errorf("index scan cab: %w", err)
+			}
+			indexState := "already indexed"
+			if !idx.Skipped {
+				indexState = fmt.Sprintf("indexed %d updates / %d files", idx.Updates, idx.Rows)
+			}
+			return fmt.Sprintf("%s, sha256 %s, %d bytes, %s", state, res.Catalog.SHA256, res.Catalog.SizeBytes, indexState), nil
 		}},
 	}
 }
 
-func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, contentDir string, log *slog.Logger) http.Handler {
+func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, deployer *patchdeploy.Deployer, contentDir string, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -281,6 +317,9 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 	// depends on the command type).
 	auth := apiauth.New(pool, log)
 	mux.Handle("/internal/push", auth.Require("", pushapi.New(agentSrv, cmdStore, signingKey, signingKeyID, log)))
+	if deployer != nil {
+		mux.Handle("/internal/deploy", auth.Require(apiauth.PermPatchDeploy, patchdeploy.NewHandler(deployer, log)))
+	}
 	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool)))
 	// /content/* authorizes per request: agent mTLS cert or a content.download token.
 	mux.Handle("/content/", contentapi.New(pool, contentDir, identity.New(pool), auth, log))

@@ -63,11 +63,12 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 
 		if m.GetSuperseded() {
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO device_patch_state (device_id, patch_id, state, detection_source, last_evaluated_at)
-				VALUES ($1, $2, 'superseded', 'agent_wua', now())
+				INSERT INTO device_patch_state (device_id, patch_id, state, detection_source, last_evaluated_at, vendor_update_id)
+				VALUES ($1, $2, 'superseded', 'agent_wua', now(), $3)
 				ON CONFLICT (device_id, patch_id) DO UPDATE SET
-					state = 'superseded', detection_source = 'agent_wua', last_evaluated_at = now()`,
-				known.DeviceUUID, patchID); err != nil {
+					state = 'superseded', detection_source = 'agent_wua', last_evaluated_at = now(),
+					vendor_update_id = EXCLUDED.vendor_update_id`,
+				known.DeviceUUID, patchID, updateIDOf(m)); err != nil {
 				return summary, fmt.Errorf("upsert superseded patch %s: %w", patchID, err)
 			}
 			summary.Superseded++
@@ -75,11 +76,14 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 		}
 
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO device_patch_state (device_id, patch_id, state, detection_source, first_detected_missing_at, last_evaluated_at)
-			VALUES ($1, $2, 'missing', 'agent_wua', now(), now())
+			INSERT INTO device_patch_state (device_id, patch_id, state, detection_source, first_detected_missing_at, last_evaluated_at, vendor_update_id)
+			VALUES ($1, $2, 'missing', 'agent_wua', now(), now(), $3)
 			ON CONFLICT (device_id, patch_id) DO UPDATE SET
 				detection_source = 'agent_wua',
 				last_evaluated_at = now(),
+				-- The device's own UpdateID for this KB: the push flow downloads
+				-- that update's files (they differ per OS version/arch).
+				vendor_update_id = EXCLUDED.vendor_update_id,
 				-- A patch that was installed and is missing again (e.g. rolled back)
 				-- starts a fresh SLA clock rather than inheriting the old one.
 				first_detected_missing_at = CASE WHEN device_patch_state.state = 'installed' THEN now()
@@ -87,7 +91,7 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 				sla_due_at = CASE WHEN device_patch_state.state = 'installed' THEN NULL ELSE device_patch_state.sla_due_at END,
 				policy_id  = CASE WHEN device_patch_state.state = 'installed' THEN NULL ELSE device_patch_state.policy_id END,
 				state = 'missing'`,
-			known.DeviceUUID, patchID,
+			known.DeviceUUID, patchID, updateIDOf(m),
 		); err != nil {
 			return summary, fmt.Errorf("upsert device_patch_state for patch %s: %w", patchID, err)
 		}
@@ -203,6 +207,12 @@ func recordUnmatched(ctx context.Context, tx pgx.Tx, deviceUUID string, m *aegis
 			title = EXCLUDED.title`,
 		deviceUUID, reportKey, m.GetUpdateId(), nullIfEmpty(kb), m.GetTitle())
 	return err
+}
+
+// updateIDOf is the reported Windows UpdateID, lowercased to match
+// wu_update_files; NULL when the agent sent none.
+func updateIDOf(m *aegisonev1.MissingUpdate) *string {
+	return nullIfEmpty(strings.ToLower(strings.TrimSpace(m.GetUpdateId())))
 }
 
 func nullIfEmpty(s string) *string {

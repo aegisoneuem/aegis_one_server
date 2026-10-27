@@ -14,8 +14,10 @@ package grpcserver
 // server. The manifest itself is not Ed25519-signed: the agent's contract has no
 // signature field for it.
 //
-// kind "patch" and "package" (stage_patch / software_deploy installers) need a
-// content store that doesn't exist yet and are refused with Unimplemented.
+// kind "patch" (stage_patch) serves files the server downloaded on push
+// (internal/patchcontent), looked up by the SHA-256 from the signed command.
+// kind "package" (software_deploy installers) has no content store yet and is
+// refused with Unimplemented.
 
 import (
 	"context"
@@ -30,6 +32,8 @@ import (
 
 	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/cabfeed"
+	"aegis-one/internal/patchcontent"
+	"aegis-one/internal/wucatalog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
@@ -43,6 +47,8 @@ type contentStore struct {
 	pool  *pgxpool.Pool
 	dir   string
 	slots chan struct{} // one token per in-flight FetchContent
+	// patches is the downloaded patch store; nil means kind "patch" is off.
+	patches *patchcontent.Store
 
 	mu  sync.Mutex
 	cab *cabfeed.Catalog // current cab as of the last WatchCab check; nil if none
@@ -50,9 +56,10 @@ type contentStore struct {
 
 // EnableContent turns on FetchContent and CabManifest. dir is the server's
 // content directory (AEGIS_CONTENT_DIR); at most maxStreams downloads run at
-// once, the rest wait. Call before serving; then run WatchCab.
-func (s *Server) EnableContent(pool *pgxpool.Pool, dir string, maxStreams int) {
-	s.content = &contentStore{pool: pool, dir: dir, slots: make(chan struct{}, maxStreams)}
+// once, the rest wait. patches may be nil. Call before serving; then run
+// WatchCab.
+func (s *Server) EnableContent(pool *pgxpool.Pool, dir string, maxStreams int, patches *patchcontent.Store) {
+	s.content = &contentStore{pool: pool, dir: dir, slots: make(chan struct{}, maxStreams), patches: patches}
 }
 
 // WatchCab polls for the current scan cab every interval until ctx ends. When
@@ -140,28 +147,19 @@ func (s *Server) FetchContent(req *aegisonev1.ContentRequest, stream aegisonev1.
 	if err != nil {
 		return err
 	}
+	var f contentFile
 	switch req.GetKind() {
 	case "cab":
-	case "patch", "package":
-		return status.Errorf(codes.Unimplemented, "content kind %q is not served yet", req.GetKind())
+		f, err = s.cabFile(ctx, req)
+	case "patch":
+		f, err = s.patchFile(ctx, req)
+	case "package":
+		return status.Error(codes.Unimplemented, `content kind "package" is not served yet`)
 	default:
 		return status.Errorf(codes.InvalidArgument, "unknown content kind %q", req.GetKind())
 	}
-
-	version := strings.ToLower(strings.TrimSpace(req.GetId()))
-	if !isSHA256Hex(version) {
-		return status.Error(codes.InvalidArgument, "cab id must be the version from the cab manifest")
-	}
-	if want := strings.ToLower(strings.TrimSpace(req.GetSha256())); want != "" && want != version {
-		return status.Error(codes.InvalidArgument, "sha256 does not match the requested cab version")
-	}
-	cat, err := cabfeed.ByHash(ctx, s.content.pool, version)
 	if err != nil {
-		s.log.Error("fetch content: look up cab", "error", err.Error())
-		return status.Error(codes.Internal, "content lookup failed")
-	}
-	if cat == nil {
-		return status.Error(codes.NotFound, "cab version not available (superseded); wait for the next manifest")
+		return err
 	}
 
 	// Wait for a download slot rather than refusing: the agent only retries
@@ -172,30 +170,89 @@ func (s *Server) FetchContent(req *aegisonev1.ContentRequest, stream aegisonev1.
 		return status.FromContextError(ctx.Err()).Err()
 	}
 	defer func() { <-s.content.slots }()
+	return s.sendFile(stream, known.DeviceID, req.GetKind(), f)
+}
 
-	path := filepath.Join(s.content.dir, filepath.FromSlash(cat.FileName))
-	f, err := os.Open(path)
+// contentFile is a vetted file to stream: path on disk plus the size and hash
+// the catalog says it has.
+type contentFile struct {
+	path   string
+	name   string
+	sha256 string
+	size   int64
+}
+
+func (s *Server) cabFile(ctx context.Context, req *aegisonev1.ContentRequest) (contentFile, error) {
+	version := strings.ToLower(strings.TrimSpace(req.GetId()))
+	if !isSHA256Hex(version) {
+		return contentFile{}, status.Error(codes.InvalidArgument, "cab id must be the version from the cab manifest")
+	}
+	if want := strings.ToLower(strings.TrimSpace(req.GetSha256())); want != "" && want != version {
+		return contentFile{}, status.Error(codes.InvalidArgument, "sha256 does not match the requested cab version")
+	}
+	cat, err := cabfeed.ByHash(ctx, s.content.pool, version)
 	if err != nil {
-		s.log.Error("fetch content: cab file missing on disk", "file", cat.FileName, "error", err.Error())
+		s.log.Error("fetch content: look up cab", "error", err.Error())
+		return contentFile{}, status.Error(codes.Internal, "content lookup failed")
+	}
+	if cat == nil {
+		return contentFile{}, status.Error(codes.NotFound, "cab version not available (superseded); wait for the next manifest")
+	}
+	return contentFile{
+		path: filepath.Join(s.content.dir, filepath.FromSlash(cat.FileName)), name: cat.FileName,
+		sha256: cat.SHA256, size: cat.SizeBytes,
+	}, nil
+}
+
+// patchFile resolves a stage_patch fetch. The agent sends id = the spec's KB
+// (or its expected hash when there is no KB) and sha256 = expected_hash; the
+// file is looked up by SHA-256, so an agent only ever gets bytes the server
+// itself signed into a command.
+func (s *Server) patchFile(ctx context.Context, req *aegisonev1.ContentRequest) (contentFile, error) {
+	if s.content.patches == nil {
+		return contentFile{}, status.Error(codes.Unavailable, "patch content is not enabled on this server")
+	}
+	sum := strings.ToLower(strings.TrimSpace(req.GetSha256()))
+	if !isSHA256Hex(sum) {
+		return contentFile{}, status.Error(codes.InvalidArgument, "patch fetch needs the sha256 from the stage_patch command")
+	}
+	c, err := s.content.patches.BySHA256(ctx, sum)
+	if err != nil {
+		s.log.Error("fetch content: look up patch", "error", err.Error())
+		return contentFile{}, status.Error(codes.Internal, "content lookup failed")
+	}
+	if c == nil {
+		return contentFile{}, status.Error(codes.NotFound, "patch content not available on this server")
+	}
+	if id := strings.ToLower(strings.TrimSpace(req.GetId())); id != sum && strings.TrimPrefix(id, "kb") != wucatalog.KBOf(c.FileName) {
+		return contentFile{}, status.Error(codes.InvalidArgument, "requested KB does not match the file with that sha256")
+	}
+	return contentFile{path: s.content.patches.Path(c), name: c.FileName, sha256: c.SHA256, size: c.SizeBytes}, nil
+}
+
+func (s *Server) sendFile(stream aegisonev1.AgentControlPlane_FetchContentServer, deviceID, kind string, cf contentFile) error {
+	f, err := os.Open(cf.path)
+	if err != nil {
+		s.log.Error("fetch content: file missing on disk", "kind", kind, "file", cf.name, "error", err.Error())
 		return status.Error(codes.Internal, "content unavailable")
 	}
 	defer f.Close()
 	// Fail closed on a truncated/replaced file; the agent would reject it on
 	// the hash anyway, but only after the whole download.
-	if fi, err := f.Stat(); err != nil || fi.Size() != cat.SizeBytes {
-		s.log.Error("fetch content: cab file size does not match catalog", "file", cat.FileName, "want_bytes", cat.SizeBytes)
+	if fi, err := f.Stat(); err != nil || fi.Size() != cf.size {
+		s.log.Error("fetch content: file size does not match catalog", "kind", kind, "file", cf.name, "want_bytes", cf.size)
 		return status.Error(codes.Internal, "content unavailable")
 	}
 
 	start := time.Now()
-	s.log.Info("fetch content: sending cab", "device_id", known.DeviceID, "sha256", cat.SHA256, "size_bytes", cat.SizeBytes)
+	s.log.Info("fetch content: sending", "kind", kind, "device_id", deviceID, "file", cf.name, "sha256", cf.sha256, "size_bytes", cf.size)
 	buf := make([]byte, contentChunkSize)
 	var sent int64
 	for {
 		n, rerr := f.Read(buf)
 		if n > 0 {
 			if err := stream.Send(&aegisonev1.ContentChunk{Data: buf[:n]}); err != nil {
-				s.log.Warn("fetch content: send failed", "device_id", known.DeviceID, "sent_bytes", sent, "error", err.Error())
+				s.log.Warn("fetch content: send failed", "kind", kind, "device_id", deviceID, "sent_bytes", sent, "error", err.Error())
 				return err
 			}
 			sent += int64(n)
@@ -204,11 +261,11 @@ func (s *Server) FetchContent(req *aegisonev1.ContentRequest, stream aegisonev1.
 			break
 		}
 		if rerr != nil {
-			s.log.Error("fetch content: read cab file", "file", cat.FileName, "error", rerr.Error())
+			s.log.Error("fetch content: read file", "kind", kind, "file", cf.name, "error", rerr.Error())
 			return status.Error(codes.Internal, "content read failed")
 		}
 	}
-	s.log.Info("fetch content: cab sent", "device_id", known.DeviceID, "bytes", sent, "duration", time.Since(start).Round(time.Millisecond).String())
+	s.log.Info("fetch content: sent", "kind", kind, "device_id", deviceID, "bytes", sent, "duration", time.Since(start).Round(time.Millisecond).String())
 	return nil
 }
 

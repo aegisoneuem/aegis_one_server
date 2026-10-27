@@ -79,6 +79,11 @@ type Issue struct {
 
 	IssuedByAPIClientID string // the authenticated caller (api_clients.id)
 	IssuedByLabel       string // api_clients.name, for audit_log.actor_label
+
+	// SourceJobType/ID link a command to the job that issued it, e.g.
+	// ("patch_deployment", patch_deployments.id). Empty for direct pushes.
+	SourceJobType string
+	SourceJobID   string
 }
 
 // Existing describes the row already holding an idempotency key.
@@ -105,12 +110,14 @@ func (s *Store) Create(ctx context.Context, in Issue) (id string, existing *Exis
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO agent_commands
-			(id, agent_id, command_type, payload, idempotency_key, signature_ed25519, signing_key_id, expires_at, issued_by_api_client_id)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)
+			(id, agent_id, command_type, payload, idempotency_key, signature_ed25519, signing_key_id, expires_at, issued_by_api_client_id,
+			 source_job_type, source_job_id)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, NULLIF($10, ''), NULLIF($11, '')::uuid)
 		ON CONFLICT (idempotency_key) DO NOTHING
 		RETURNING id`,
 		in.ID, in.AgentUUID, in.Type, string(payloadJSON), in.IdempotencyKey,
 		base64.StdEncoding.EncodeToString(in.Signature), in.SigningKeyID, time.Now().Add(DefaultTTL), in.IssuedByAPIClientID,
+		in.SourceJobType, in.SourceJobID,
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var ex Existing

@@ -147,6 +147,14 @@ func (s *Server) Dispatch(deviceID string, msg *aegisonev1.ServerMessage) error 
 	}
 }
 
+// Connected reports whether deviceID has a live stream right now.
+func (s *Server) Connected(deviceID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.clients[deviceID]
+	return ok
+}
+
 func (s *Server) register(deviceID string) chan *aegisonev1.ServerMessage {
 	ch := make(chan *aegisonev1.ServerMessage, 16)
 	// Tell a (re)connecting agent which scan cab is current; it fetches only if
