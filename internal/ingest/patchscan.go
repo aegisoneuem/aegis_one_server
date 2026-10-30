@@ -13,7 +13,8 @@ import (
 
 type PatchScanSummary struct {
 	Matched            int // missing updates linked to a known patch_catalog row
-	Unmatched          int // missing updates with no matching KB in patch_catalog yet
+	Unmatched          int // missing updates without a KB number (can't be cataloged)
+	AgentCataloged     int // missing updates whose KB wasn't in the catalog; added from the report
 	Superseded         int // missing updates the agent flagged as superseded
 	InstalledReported  int // installed updates (agent's installed list) matched to the catalog
 	MarkedInstalled    int // fallback only: previously-open rows assumed installed
@@ -23,8 +24,10 @@ type PatchScanSummary struct {
 
 // PatchScan applies a PatchScanResult as a full, successful snapshot (the agent
 // only sends one after a scan that completed; a failed scan sends nothing):
-//   - Missing, not superseded -> 'missing' (SLA clock per assignSLA); no catalog
-//     match -> unmatched_patch_reports.
+//   - Missing, not superseded -> 'missing' (SLA clock per assignSLA). A KB not
+//     in the catalog gets a catalog row from the report itself
+//     (catalog_source 'agent_report'); only updates with no KB at all (e.g.
+//     drivers) go to unmatched_patch_reports.
 //   - Missing but superseded -> 'superseded': not counted as missing (its
 //     superseding update is reported missing itself), never gets an SLA.
 //   - Installed (the agent's authoritative WUA installed view) -> 'installed'.
@@ -46,16 +49,27 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
 
 	seen := make([]string, 0, len(psr.GetMissing())+len(psr.GetInstalled()))
+	unmatchedSeen := []string{} // report_keys of no-KB missing updates in this scan
 
 	for _, m := range psr.GetMissing() {
 		patchID, found, err := resolvePatchID(ctx, tx, m.GetKbArticleIds())
 		if err != nil {
 			return summary, fmt.Errorf("resolve patch for update %s: %w", m.GetUpdateId(), err)
 		}
+		if !found && firstKB(m) != "" {
+			// The agent's report is the source of truth: a KB the MSRC feed
+			// doesn't know still becomes a catalog row (and so a missing patch).
+			if patchID, err = upsertAgentReportedPatch(ctx, tx, psr, m); err != nil {
+				return summary, fmt.Errorf("catalog agent-reported update %s: %w", m.GetUpdateId(), err)
+			}
+			found = true
+			summary.AgentCataloged++
+		}
 		if !found {
 			if err := recordUnmatched(ctx, tx, known.DeviceUUID, m); err != nil {
 				return summary, fmt.Errorf("record unmatched update %s: %w", m.GetUpdateId(), err)
 			}
+			unmatchedSeen = append(unmatchedSeen, "wua:"+m.GetUpdateId())
 			summary.Unmatched++
 			continue
 		}
@@ -120,6 +134,15 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 			return summary, fmt.Errorf("upsert installed patch %s: %w", patchID, err)
 		}
 		summary.InstalledReported++
+	}
+
+	// The missing list is a full snapshot, so a no-KB update it no longer
+	// carries is no longer missing on this device.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM unmatched_patch_reports
+		WHERE device_id = $1 AND detection_source = 'agent_wua' AND reported_state = 'missing'
+		  AND NOT (report_key = ANY($2))`, known.DeviceUUID, unmatchedSeen); err != nil {
+		return summary, fmt.Errorf("remove stale unmatched reports: %w", err)
 	}
 
 	if len(psr.GetInstalled()) > 0 {
@@ -207,6 +230,82 @@ func recordUnmatched(ctx context.Context, tx pgx.Tx, deviceUUID string, m *aegis
 			title = EXCLUDED.title`,
 		deviceUUID, reportKey, m.GetUpdateId(), nullIfEmpty(kb), m.GetTitle())
 	return err
+}
+
+func firstKB(m *aegisonev1.MissingUpdate) string {
+	for _, kb := range m.GetKbArticleIds() {
+		if k := normalizeKB(kb); k != "" {
+			return k
+		}
+	}
+	return ""
+}
+
+// upsertAgentReportedPatch creates the catalog row for a KB only the agent
+// knows about, from its WUA metadata. If the MSRC feed later carries the KB it
+// overwrites these fields and sets catalog_source 'msrc'.
+func upsertAgentReportedPatch(ctx context.Context, tx pgx.Tx, psr *aegisonev1.PatchScanResult, m *aegisonev1.MissingUpdate) (string, error) {
+	product := psr.GetProductName()
+	if len(m.GetProducts()) > 0 && m.GetProducts()[0] != "" {
+		product = m.GetProducts()[0]
+	}
+	if product == "" {
+		product = "Windows"
+	}
+	title := m.GetTitle()
+	if title == "" {
+		title = firstKB(m)
+	}
+	var id string
+	err := tx.QueryRow(ctx, `
+		INSERT INTO patch_catalog
+			(vendor, product, kb_or_advisory_id, title, classification, severity, vendor_severity, os_family,
+			 kb_article_url, catalog_source)
+		VALUES ('microsoft', $1, $2, $3, $4, $5, NULLIF($6, ''), 'windows', NULLIF($7, ''), 'agent_report')
+		ON CONFLICT (vendor, kb_or_advisory_id) DO UPDATE SET kb_or_advisory_id = EXCLUDED.kb_or_advisory_id
+		RETURNING id`,
+		product, firstKB(m), title, classificationOf(m.GetClassification()), severityOf(m.GetMsrcSeverity()),
+		m.GetMsrcSeverity(), m.GetSupportUrl()).Scan(&id)
+	return id, err
+}
+
+// classificationOf maps WUA's update classification names onto
+// patch_catalog.classification.
+func classificationOf(c string) string {
+	switch strings.ToLower(strings.TrimSpace(c)) {
+	case "security updates":
+		return "security"
+	case "critical updates":
+		return "critical"
+	case "update rollups":
+		return "update_rollup"
+	case "service packs":
+		return "service_pack"
+	case "feature packs":
+		return "feature_pack"
+	case "drivers":
+		return "driver"
+	case "definition updates":
+		return "definition"
+	case "updates", "":
+		return "bugfix"
+	}
+	return "enhancement"
+}
+
+// severityOf maps the MSRC rating WUA carries onto patch_catalog.severity.
+func severityOf(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "critical":
+		return "critical"
+	case "important":
+		return "high"
+	case "moderate":
+		return "medium"
+	case "low":
+		return "low"
+	}
+	return "unrated"
 }
 
 // updateIDOf is the reported Windows UpdateID, lowercased to match

@@ -182,6 +182,8 @@ func upsertPatch(ctx context.Context, tx pgx.Tx, kb *KBRecord) (id string, inser
 		INSERT INTO patch_catalog (vendor, product, kb_or_advisory_id, title, severity, release_date, is_esu, source_url)
 		VALUES ('microsoft', $1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (vendor, kb_or_advisory_id) DO UPDATE SET
+			-- takes over a row first created from an agent's scan report (0014)
+			catalog_source = 'msrc',
 			product      = EXCLUDED.product,
 			title        = EXCLUDED.title,
 			severity     = EXCLUDED.severity,

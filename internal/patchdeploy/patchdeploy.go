@@ -131,8 +131,18 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 	if err != nil {
 		return nil, err
 	}
-	if state == "installed" {
+	// Only what the device's last scan says is missing ('failed' = an earlier
+	// install attempt failed, so it is still missing).
+	switch state {
+	case "missing", "failed":
+	case "installed":
 		return nil, userErr("%s is already installed on this device", kb)
+	case "pending_reboot":
+		return nil, userErr("%s is installed and waiting for a reboot on this device", kb)
+	case "superseded":
+		return nil, userErr("%s is superseded on this device; deploy the update that replaces it", kb)
+	default:
+		return nil, userErr("%s is not missing on this device (state %s)", kb, state)
 	}
 
 	files, err := d.updateFiles(ctx, *updateID)
@@ -254,6 +264,7 @@ type row struct {
 	stageStatus, installStatus                    *string
 	stageAt, installAt                            *time.Time
 	stageReason, installReason                    *string
+	patchState                                    *string // device_patch_state.state now; nil = row gone (no longer applicable)
 }
 
 func (d *Deployer) advanceAll(ctx context.Context) error {
@@ -263,7 +274,7 @@ func (d *Deployer) advanceAll(ctx context.Context) error {
 		       pc.state, pc.file_name, pc.sha256_hash, pc.last_error,
 		       r.stage_command_id::text, r.install_command_id::text,
 		       sc.status, ic.status, COALESCE(sc.dispatched_at, sc.issued_at), COALESCE(ic.dispatched_at, ic.issued_at),
-		       sc.result->>'reason', ic.result->>'reason'
+		       sc.result->>'reason', ic.result->>'reason', dps.state
 		FROM patch_deployment_results r
 		JOIN patch_deployments pd ON pd.id = r.deployment_id
 		JOIN devices dv ON dv.id = r.device_id
@@ -272,6 +283,7 @@ func (d *Deployer) advanceAll(ctx context.Context) error {
 		LEFT JOIN patch_content pc ON pc.file_digest = r.file_digest
 		LEFT JOIN agent_commands sc ON sc.id = r.stage_command_id
 		LEFT JOIN agent_commands ic ON ic.id = r.install_command_id
+		LEFT JOIN device_patch_state dps ON dps.device_id = r.device_id AND dps.patch_id = r.patch_id
 		WHERE r.status = 'in_progress' AND r.step IS NOT NULL
 		ORDER BY r.updated_at LIMIT 500`)
 	if err != nil {
@@ -282,7 +294,7 @@ func (d *Deployer) advanceAll(ctx context.Context) error {
 		var x row
 		if err := rows.Scan(&x.id, &x.deploymentID, &x.deviceID, &x.agentID, &x.kb, &x.step, &x.clientID,
 			&x.contentState, &x.fileName, &x.sha256, &x.contentErr, &x.stageID, &x.installID,
-			&x.stageStatus, &x.installStatus, &x.stageAt, &x.installAt, &x.stageReason, &x.installReason); err != nil {
+			&x.stageStatus, &x.installStatus, &x.stageAt, &x.installAt, &x.stageReason, &x.installReason, &x.patchState); err != nil {
 			rows.Close()
 			return err
 		}
@@ -303,6 +315,20 @@ func (d *Deployer) advanceAll(ctx context.Context) error {
 func (d *Deployer) advance(ctx context.Context, x row) error {
 	if x.agentID == "" {
 		return d.finish(ctx, x, false, "the device's agent was revoked")
+	}
+	// Before sending the next command, respect what the device's latest scan
+	// says: only a still-missing patch gets staged/installed. (While
+	// installing, the install command's own result decides.)
+	if x.step != "installing" {
+		switch st := deref(x.patchState); st {
+		case "missing", "failed":
+		case "installed", "pending_reboot":
+			return d.finish(ctx, x, true, "already "+st+" per the device's latest scan")
+		case "":
+			return d.finish(ctx, x, false, "no longer applicable per the device's latest scan")
+		default:
+			return d.finish(ctx, x, false, "no longer missing per the device's latest scan (state "+st+")")
+		}
 	}
 	switch x.step {
 	case "downloading":

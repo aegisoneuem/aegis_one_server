@@ -413,7 +413,7 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 				s.log.Error("persist patch scan failed", "device_id", known.DeviceID, "error", err.Error())
 			} else {
 				s.log.Info("patch scan persisted", "device_id", known.DeviceID,
-					"matched", summary.Matched, "unmatched", summary.Unmatched, "superseded", summary.Superseded,
+					"matched", summary.Matched, "agent_cataloged", summary.AgentCataloged, "unmatched", summary.Unmatched, "superseded", summary.Superseded,
 					"installed_reported", summary.InstalledReported, "no_longer_applicable", summary.NoLongerApplicable,
 					"marked_installed", summary.MarkedInstalled,
 					"sla_assigned", summary.SLAAssigned)

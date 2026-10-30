@@ -5,6 +5,7 @@ package complianceapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"aegis-one/internal/compliance"
@@ -23,6 +24,7 @@ func New(pool *pgxpool.Pool) *Handler {
 // GET /internal/compliance            -> fleet totals
 // GET /internal/compliance?view=patches -> per-patch breakdown (patch_compliance_by_patch)
 // GET /internal/compliance?view=devices -> per-device breakdown (device_patch_compliance_current)
+// GET /internal/compliance?view=missing&device_id=X -> that device's missing patches, each with "deployable"
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.pool == nil {
 		http.Error(w, "database not configured on this server", http.StatusServiceUnavailable)
@@ -38,6 +40,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, rows)
+
+	case "missing":
+		deviceID := r.URL.Query().Get("device_id")
+		if deviceID == "" {
+			http.Error(w, "view=missing needs device_id", http.StatusBadRequest)
+			return
+		}
+		report, err := compliance.MissingForDevice(ctx, h.pool, deviceID)
+		if errors.Is(err, compliance.ErrUnknownDevice) {
+			http.Error(w, "unknown device_id", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
 
 	case "devices":
 		rows, err := compliance.ListDevices(ctx, h.pool)
