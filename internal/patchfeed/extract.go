@@ -33,6 +33,7 @@ type KBRecord struct {
 	SourceURL   string
 	Supersedes  string // "KB5120418" or ""
 	Products    []string
+	FixedBuilds []FixedBuild // Windows OS products only, one per product
 	IsESU       bool
 	ReleaseDate time.Time
 }
@@ -141,6 +142,9 @@ func Extract(doc *msrc.Document) (cves map[string]*CVEDetail, kbs map[string]*KB
 				if strings.Contains(strings.ToUpper(name), "ESU") {
 					rec.IsESU = true
 				}
+				if fb, ok := parseFixedBuild(name, r.FixedBuild); ok {
+					rec.addFixedBuild(fb)
+				}
 			}
 			if rec.CVSSScore == nil && cve.CVSSScore != nil {
 				rec.CVSSScore = cve.CVSSScore
@@ -171,6 +175,20 @@ func buildTitle(rec *KBRecord, vulns []msrc.Vulnerability) string {
 		primary = rec.Products[0]
 	}
 	return fmt.Sprintf("%s security update (%s) - %d CVE(s) fixed", primary, rec.KB, len(rec.CVEIDs))
+}
+
+// addFixedBuild keeps one entry per product; the same KB is listed under
+// every CVE it fixes, normally with the same build.
+func (rec *KBRecord) addFixedBuild(fb FixedBuild) {
+	for i, have := range rec.FixedBuilds {
+		if have.Product == fb.Product {
+			if fb.OSBuild == have.OSBuild && fb.UBR > have.UBR {
+				rec.FixedBuilds[i] = fb
+			}
+			return
+		}
+	}
+	rec.FixedBuilds = append(rec.FixedBuilds, fb)
 }
 
 func containsStr(list []string, s string) bool {

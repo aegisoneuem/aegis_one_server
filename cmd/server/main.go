@@ -123,6 +123,7 @@ func main() {
 	if pool != nil {
 		patches = patchcontent.New(pool, cfg.ContentDir, log)
 		agentSrv.EnableContent(pool, cfg.ContentDir, cfg.ContentMaxStreams, patches)
+		agentSrv.EnableBaseline(pool)
 	} else {
 		log.Warn("content delivery to agents disabled (no database)")
 	}
@@ -211,6 +212,11 @@ func main() {
 		go func() {
 			defer wg.Done()
 			agentSrv.WatchCab(ctx, time.Minute)
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			agentSrv.WatchBaseline(ctx, time.Minute)
 		}()
 		wg.Add(1)
 		go func() {

@@ -25,6 +25,7 @@ type Summary struct {
 	PatchesAdded       int
 	PatchesUpdated     int
 	ApplicabilityRules int
+	FixedBuilds        int
 	SupersedenceLinks  int
 	KEVPatchesChanged  int
 	DeadlinesTightened int
@@ -116,6 +117,19 @@ func runSync(ctx context.Context, pool *pgxpool.Pool, cves map[string]*CVEDetail
 				return fmt.Errorf("insert applicability rule for %s: %w", kb.KB, err)
 			}
 			summary.ApplicabilityRules++
+		}
+
+		if _, err := tx.Exec(ctx, `DELETE FROM os_fixed_builds WHERE patch_id = $1`, id); err != nil {
+			return fmt.Errorf("clear fixed builds for %s: %w", kb.KB, err)
+		}
+		for _, fb := range kb.FixedBuilds {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO os_fixed_builds (patch_id, kb, product_name, os_kind, architecture, os_build, ubr)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				id, kb.KB, fb.Product, fb.OSKind, fb.Architecture, fb.OSBuild, fb.UBR); err != nil {
+				return fmt.Errorf("insert fixed build for %s: %w", kb.KB, err)
+			}
+			summary.FixedBuilds++
 		}
 	}
 

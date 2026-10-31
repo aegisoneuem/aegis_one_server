@@ -23,6 +23,7 @@ import (
 	"aegis-one/internal/enroll"
 	"aegis-one/internal/identity"
 	"aegis-one/internal/ingest"
+	"aegis-one/internal/patchbaseline"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -43,6 +44,8 @@ type Server struct {
 	enroll *enroll.Service
 	// content is nil until EnableContent (needs a database and content dir).
 	content *contentStore
+	// baseline is nil until EnableBaseline (needs a database).
+	baseline *baselineStore
 
 	mu      sync.Mutex
 	clients map[string]chan *aegisonev1.ServerMessage // device_id -> outbound queue
@@ -177,6 +180,7 @@ func (s *Server) unregister(deviceID string, ch chan *aegisonev1.ServerMessage) 
 		delete(s.clients, deviceID)
 	}
 	s.mu.Unlock()
+	s.baselineDisconnected(deviceID, ch)
 }
 
 type registration struct {
@@ -221,7 +225,9 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 		resolved := known
 		if resolved != nil {
 			deviceID = resolved.DeviceID
-			registeredCh <- registration{deviceID: deviceID, outbound: s.register(deviceID)}
+			ch := s.register(deviceID)
+			registeredCh <- registration{deviceID: deviceID, outbound: ch}
+			s.baselineConnected(ctx, resolved, ch)
 		}
 		for {
 			msg, err := stream.Recv()
@@ -241,7 +247,9 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 						resolved = k
 					}
 					deviceID = dev
-					registeredCh <- registration{deviceID: deviceID, outbound: s.register(deviceID)}
+					ch := s.register(deviceID)
+					registeredCh <- registration{deviceID: deviceID, outbound: ch}
+					s.baselineConnected(ctx, resolved, ch)
 					s.log.Info("agent identified", "device_id", deviceID, "bootstrapped", resolved != nil && known == nil)
 				}
 			} else if dev := deviceIDOf(msg); dev != "" && dev != deviceID {
@@ -390,6 +398,18 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			"build", ds.GetBuild(),
 			"reboot_pending", ds.GetRebootPending(),
 			"reboot_pending_kbs", ds.GetRebootPendingKbs())
+		if known != nil {
+			if err := s.ingest.DeviceState(ctx, known, ds); err != nil {
+				s.log.Error("persist device state failed", "device_id", known.DeviceID, "error", err.Error())
+			}
+			build, ubr := ingest.SplitBuild(ds.GetBuild())
+			var ubrPtr *int
+			if ubr >= 0 {
+				ubrPtr = &ubr
+			}
+			s.baselineDeviceState(known.DeviceID,
+				patchbaseline.DeviceFrom(ds.GetProductName(), build, ubrPtr, ingest.NormalizeArch(ds.GetArchitecture())))
+		}
 
 	case *aegisonev1.AgentMessage_CacheFull:
 		cf := payload.CacheFull
