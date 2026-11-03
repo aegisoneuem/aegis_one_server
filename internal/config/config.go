@@ -66,6 +66,9 @@ type Config struct {
 	// PatchDownloadWorkers is how many patch files the server downloads from
 	// Microsoft at once when patches are pushed.
 	PatchDownloadWorkers int
+	// SoftwareMaxUploadBytes caps one software package upload
+	// (POST /internal/software/packages).
+	SoftwareMaxUploadBytes int64
 
 	// FeedScheduler runs the MSRC/CISA KEV syncs in-process (needs a database and
 	// outbound internet). Set AEGIS_FEED_SCHEDULER=off on air-gapped deployments.
@@ -103,29 +106,34 @@ func Load() Config {
 	if err != nil || downloadWorkers < 1 {
 		downloadWorkers = 2
 	}
+	maxUpload, err := strconv.ParseInt(getenv("AEGIS_SOFTWARE_MAX_UPLOAD_BYTES", "4294967296"), 10, 64) // 4 GiB
+	if err != nil || maxUpload < 1 {
+		maxUpload = 4 << 30
+	}
 	return Config{
-		GRPCAddr:              getenv("AEGIS_GRPC_ADDR", ":50051"),
-		HTTPAddr:              getenv("AEGIS_HTTP_ADDR", ":8080"),
-		TLSCAFile:             tlsCA,
-		CACertFile:            getenv("AEGIS_CA_CERT", tlsCA),
-		CAKeyFile:             getenv("AEGIS_CA_KEY_FILE", "certs/ca.key.enc"),
-		AgentCertTTL:          certTTL,
-		LicenseMaxDevices:     licenseMax,
-		TLSCertFile:           tlsCert,
-		TLSKeyFile:            tlsKey,
-		HTTPTLS:               !strings.EqualFold(getenv("AEGIS_HTTP_TLS", "on"), "off"),
-		HTTPTLSCertFile:       getenv("AEGIS_HTTP_TLS_CERT", tlsCert),
-		HTTPTLSKeyFile:        getenv("AEGIS_HTTP_TLS_KEY", tlsKey),
-		DatabaseURL:           getenv("AEGIS_DATABASE_URL", ""),
-		CommandSigningKeyFile: getenv("AEGIS_COMMAND_SIGNING_KEY_FILE", "secrets/command_signing.key"),
-		AllowPrivilegedDB:     strings.EqualFold(getenv("AEGIS_ALLOW_PRIVILEGED_DB", "no"), "yes"),
-		ContentDir:            getenv("AEGIS_CONTENT_DIR", "content"),
-		ContentMaxStreams:     contentStreams,
-		BSDTar:                getenv("AEGIS_BSDTAR", "bsdtar"),
-		PatchDownloadWorkers:  downloadWorkers,
-		FeedScheduler:         !strings.EqualFold(getenv("AEGIS_FEED_SCHEDULER", "on"), "off"),
-		LogLevel:              getenv("AEGIS_LOG_LEVEL", "info"),
-		ShutdownTimeout:       10 * time.Second,
+		GRPCAddr:               getenv("AEGIS_GRPC_ADDR", ":50051"),
+		HTTPAddr:               getenv("AEGIS_HTTP_ADDR", ":8080"),
+		TLSCAFile:              tlsCA,
+		CACertFile:             getenv("AEGIS_CA_CERT", tlsCA),
+		CAKeyFile:              getenv("AEGIS_CA_KEY_FILE", "certs/ca.key.enc"),
+		AgentCertTTL:           certTTL,
+		LicenseMaxDevices:      licenseMax,
+		TLSCertFile:            tlsCert,
+		TLSKeyFile:             tlsKey,
+		HTTPTLS:                !strings.EqualFold(getenv("AEGIS_HTTP_TLS", "on"), "off"),
+		HTTPTLSCertFile:        getenv("AEGIS_HTTP_TLS_CERT", tlsCert),
+		HTTPTLSKeyFile:         getenv("AEGIS_HTTP_TLS_KEY", tlsKey),
+		DatabaseURL:            getenv("AEGIS_DATABASE_URL", ""),
+		CommandSigningKeyFile:  getenv("AEGIS_COMMAND_SIGNING_KEY_FILE", "secrets/command_signing.key"),
+		AllowPrivilegedDB:      strings.EqualFold(getenv("AEGIS_ALLOW_PRIVILEGED_DB", "no"), "yes"),
+		ContentDir:             getenv("AEGIS_CONTENT_DIR", "content"),
+		ContentMaxStreams:      contentStreams,
+		BSDTar:                 getenv("AEGIS_BSDTAR", "bsdtar"),
+		PatchDownloadWorkers:   downloadWorkers,
+		SoftwareMaxUploadBytes: maxUpload,
+		FeedScheduler:          !strings.EqualFold(getenv("AEGIS_FEED_SCHEDULER", "on"), "off"),
+		LogLevel:               getenv("AEGIS_LOG_LEVEL", "info"),
+		ShutdownTimeout:        10 * time.Second,
 	}
 }
 

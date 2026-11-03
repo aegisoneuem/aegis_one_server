@@ -16,8 +16,9 @@ package grpcserver
 //
 // kind "patch" (stage_patch) serves files the server downloaded on push
 // (internal/patchcontent), looked up by the SHA-256 from the signed command.
-// kind "package" (software_deploy installers) has no content store yet and is
-// refused with Unimplemented.
+// kind "package" (software_deploy installers) serves packages uploaded to
+// internal/softwaredist, only to a device with a deployment of that package in
+// progress.
 
 import (
 	"context"
@@ -33,6 +34,7 @@ import (
 	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/cabfeed"
 	"aegis-one/internal/patchcontent"
+	"aegis-one/internal/softwaredist"
 	"aegis-one/internal/wucatalog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -49,6 +51,8 @@ type contentStore struct {
 	slots chan struct{} // one token per in-flight FetchContent
 	// patches is the downloaded patch store; nil means kind "patch" is off.
 	patches *patchcontent.Store
+	// software is the uploaded package store; nil means kind "package" is off.
+	software *softwaredist.Store
 
 	mu  sync.Mutex
 	cab *cabfeed.Catalog // current cab as of the last WatchCab check; nil if none
@@ -60,6 +64,14 @@ type contentStore struct {
 // WatchCab.
 func (s *Server) EnableContent(pool *pgxpool.Pool, dir string, maxStreams int, patches *patchcontent.Store) {
 	s.content = &contentStore{pool: pool, dir: dir, slots: make(chan struct{}, maxStreams), patches: patches}
+}
+
+// EnableSoftwareContent turns on FetchContent kind "package". Call after
+// EnableContent, before serving.
+func (s *Server) EnableSoftwareContent(store *softwaredist.Store) {
+	if s.content != nil {
+		s.content.software = store
+	}
 }
 
 // WatchCab polls for the current scan cab every interval until ctx ends. When
@@ -154,7 +166,7 @@ func (s *Server) FetchContent(req *aegisonev1.ContentRequest, stream aegisonev1.
 	case "patch":
 		f, err = s.patchFile(ctx, req)
 	case "package":
-		return status.Error(codes.Unimplemented, `content kind "package" is not served yet`)
+		f, err = s.packageFile(ctx, known.DeviceUUID, req)
 	default:
 		return status.Errorf(codes.InvalidArgument, "unknown content kind %q", req.GetKind())
 	}
@@ -228,6 +240,28 @@ func (s *Server) patchFile(ctx context.Context, req *aegisonev1.ContentRequest) 
 		return contentFile{}, status.Error(codes.InvalidArgument, "requested KB does not match the file with that sha256")
 	}
 	return contentFile{path: s.content.patches.Path(c), name: c.FileName, sha256: c.SHA256, size: c.SizeBytes}, nil
+}
+
+// packageFile resolves a software_deploy fetch: id = the spec's content_id
+// (the package id), sha256 = its expected_hash. Only a device with a
+// deployment of that package in progress gets it.
+func (s *Server) packageFile(ctx context.Context, deviceUUID string, req *aegisonev1.ContentRequest) (contentFile, error) {
+	if s.content.software == nil {
+		return contentFile{}, status.Error(codes.Unavailable, "software content is not enabled on this server")
+	}
+	sum := strings.ToLower(strings.TrimSpace(req.GetSha256()))
+	if !isSHA256Hex(sum) {
+		return contentFile{}, status.Error(codes.InvalidArgument, "package fetch needs the sha256 from the software_deploy command")
+	}
+	p, err := s.content.software.ForFetch(ctx, strings.TrimSpace(req.GetId()), sum, deviceUUID)
+	if err != nil {
+		s.log.Error("fetch content: look up package", "error", err.Error())
+		return contentFile{}, status.Error(codes.Internal, "content lookup failed")
+	}
+	if p == nil {
+		return contentFile{}, status.Error(codes.NotFound, "package not available to this device (no deployment in progress, or wrong sha256)")
+	}
+	return contentFile{path: s.content.software.Path(p), name: p.FileName, sha256: p.SHA256, size: p.SizeBytes}, nil
 }
 
 func (s *Server) sendFile(stream aegisonev1.AgentControlPlane_FetchContentServer, deviceID, kind string, cf contentFile) error {

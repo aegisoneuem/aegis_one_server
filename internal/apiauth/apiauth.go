@@ -40,6 +40,13 @@ const (
 	// cert) fetch redistributable content such as the scan cab. Admin-only by
 	// default, like agent.command.
 	PermContentDownload = "content.download"
+	// PermSoftwareDeploy (seeded for operator) uploads and deploys installer
+	// packages (msi/exe).
+	PermSoftwareDeploy = "software.deploy"
+	// PermSoftwareScript is needed on top of software.deploy to upload or
+	// deploy a script package (ps1/bat/cmd/python/vbs): that runs arbitrary code
+	// as SYSTEM on the endpoint, so it is admin-only by default.
+	PermSoftwareScript = "software.script"
 )
 
 type Principal struct {

@@ -41,6 +41,7 @@ import (
 	"aegis-one/internal/patchfeed"
 	"aegis-one/internal/pushapi"
 	"aegis-one/internal/signing"
+	"aegis-one/internal/softwaredist"
 	"aegis-one/internal/wucatalog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -120,9 +121,12 @@ func main() {
 	}
 	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool), cmdStore, enrollSvc)
 	var patches *patchcontent.Store
+	var software *softwaredist.Store
 	if pool != nil {
 		patches = patchcontent.New(pool, cfg.ContentDir, log)
+		software = softwaredist.NewStore(pool, cfg.ContentDir, cfg.SoftwareMaxUploadBytes, log)
 		agentSrv.EnableContent(pool, cfg.ContentDir, cfg.ContentMaxStreams, patches)
+		agentSrv.EnableSoftwareContent(software)
 		agentSrv.EnableBaseline(pool)
 	} else {
 		log.Warn("content delivery to agents disabled (no database)")
@@ -161,10 +165,16 @@ func main() {
 	} else {
 		log.Warn("patch deployment disabled (needs a database and a command signing key)")
 	}
+	var swDeployer *softwaredist.Deployer
+	if software != nil && cmdStore != nil && signingKeyID != "" {
+		swDeployer = softwaredist.NewDeployer(pool, software, cmdStore, agentSrv, signingKey, signingKeyID, log)
+	} else {
+		log.Warn("software deployment disabled (needs a database and a command signing key)")
+	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, deployer, cfg.ContentDir, log),
+		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, deployer, software, swDeployer, cfg.ContentDir, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		// net/http logs TLS handshake errors etc. through the std logger; route
 		// them through slog so every server log line stays structured JSON.
@@ -229,6 +239,13 @@ func main() {
 		go func() {
 			defer wg.Done()
 			deployer.Run(ctx)
+		}()
+	}
+	if swDeployer != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			swDeployer.Run(ctx)
 		}()
 	}
 
@@ -301,7 +318,8 @@ func feedJobs(contentDir, bsdtar string) []feedsched.Job {
 	}
 }
 
-func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, deployer *patchdeploy.Deployer, contentDir string, log *slog.Logger) http.Handler {
+func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, deployer *patchdeploy.Deployer,
+	software *softwaredist.Store, swDeployer *softwaredist.Deployer, contentDir string, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -325,6 +343,12 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 	mux.Handle("/internal/push", auth.Require("", pushapi.New(agentSrv, cmdStore, signingKey, signingKeyID, log)))
 	if deployer != nil {
 		mux.Handle("/internal/deploy", auth.Require(apiauth.PermPatchDeploy, patchdeploy.NewHandler(deployer, log)))
+	}
+	if software != nil {
+		mux.Handle("/internal/software/packages", auth.Require(apiauth.PermSoftwareDeploy, softwaredist.NewPackagesHandler(software, log)))
+	}
+	if swDeployer != nil {
+		mux.Handle("/internal/software/deploy", auth.Require(apiauth.PermSoftwareDeploy, softwaredist.NewDeployHandler(swDeployer, log)))
 	}
 	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool)))
 	// /content/* authorizes per request: agent mTLS cert or a content.download token.
