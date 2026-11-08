@@ -6,7 +6,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// assignSLA fills policy_id + sla_due_at on this device's open
+// AssignSLA fills policy_id + sla_due_at on this device's open
 // device_patch_state rows that don't have an SLA yet, per 0005's rule: the SLA is
 // fixed when a patch is first detected missing, from the device's WINNING
 // patch_policy - so a later policy edit doesn't move existing deadlines.
@@ -23,7 +23,7 @@ import (
 //   - no enabled policy matches the device at all
 //
 // Rows left NULL are simply retried on the next scan (cheap - one statement).
-func assignSLA(ctx context.Context, tx pgx.Tx, deviceUUID string) (int, error) {
+func AssignSLA(ctx context.Context, tx pgx.Tx, deviceUUID string) (int, error) {
 	tag, err := tx.Exec(ctx, `
 		WITH pol AS (
 			SELECT p.*

@@ -65,3 +65,28 @@ func TestKeyIgnoresIssuedAt(t *testing.T) {
 		t.Fatalf("Key same for different builds: %q", Key(a))
 	}
 }
+
+func TestLatestForAndFingerprint(t *testing.T) {
+	ix := Index{}
+	ix.Set("client", "x64", 26100, Latest{KB: "KB5127648", UBR: 9711, PatchID: "p1"})
+	ix.Set("server", "x64", 26100, Latest{KB: "KB5127650", UBR: 9700, PatchID: "p2"})
+
+	if l, ok := ix.LatestFor(Device{Kind: "server", Arch: "x64", Build: 26100, UBR: 1}); !ok || l.KB != "KB5127650" || l.PatchID != "p2" {
+		t.Fatalf("server family: %+v %v", l, ok)
+	}
+	if _, ok := ix.LatestFor(Device{Kind: "client", Arch: "x64", Build: 26100, UBR: -1}); ok {
+		t.Fatal("unknown UBR must not resolve")
+	}
+	if _, ok := ix.LatestFor(Device{Kind: "client", Arch: "arm64", Build: 26100, UBR: 5}); ok {
+		t.Fatal("other architecture must not resolve")
+	}
+
+	before := ix.Fingerprint()
+	if before != ix.Fingerprint() || len(before) != 12 {
+		t.Fatalf("fingerprint not stable / wrong length: %q", before)
+	}
+	ix.Set("client", "x64", 26100, Latest{KB: "KB5130000", UBR: 9800, PatchID: "p3"})
+	if ix.Fingerprint() == before {
+		t.Fatal("a newer KB must change the fingerprint")
+	}
+}

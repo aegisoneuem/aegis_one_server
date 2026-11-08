@@ -3,8 +3,9 @@
 // and, between scans (or offline), compares it with its installed KBs for a
 // "likely missing" hint. It applies the baseline only while its own build
 // string ("26100.4652") equals the baseline's, so each device gets one for its
-// own build, and a new one whenever its build changes. The scan report stays
-// the source of truth for what is missing.
+// own build, and a new one whenever its build changes. The same Index drives
+// the server-side diff (internal/patchdiff), which is the source of truth for
+// the cumulative update a device is missing.
 //
 // The data is MSRC's FixedBuild per Windows product (os_fixed_builds): the
 // newest KB for (client|server, architecture, build) whose UBR is above the
@@ -14,8 +15,11 @@ package patchbaseline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -84,8 +88,9 @@ type family struct {
 
 // Latest is the newest KB known for one build family.
 type Latest struct {
-	KB  string
-	UBR int
+	KB      string
+	UBR     int
+	PatchID string // patch_catalog.id
 }
 
 // Index is the newest KB per (kind, architecture, build). It is small (one row
@@ -95,7 +100,7 @@ type Index map[family]Latest
 // Load reads the newest fixed build per family from os_fixed_builds.
 func Load(ctx context.Context, pool *pgxpool.Pool) (Index, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT DISTINCT ON (os_kind, architecture, os_build) os_kind, architecture, os_build, ubr, kb
+		SELECT DISTINCT ON (os_kind, architecture, os_build) os_kind, architecture, os_build, ubr, kb, patch_id::text
 		FROM os_fixed_builds
 		ORDER BY os_kind, architecture, os_build, ubr DESC, kb DESC`)
 	if err != nil {
@@ -106,7 +111,7 @@ func Load(ctx context.Context, pool *pgxpool.Pool) (Index, error) {
 	for rows.Next() {
 		var f family
 		var l Latest
-		if err := rows.Scan(&f.kind, &f.arch, &f.build, &l.UBR, &l.KB); err != nil {
+		if err := rows.Scan(&f.kind, &f.arch, &f.build, &l.UBR, &l.KB, &l.PatchID); err != nil {
 			return nil, err
 		}
 		ix[f] = l
@@ -124,10 +129,7 @@ func (ix Index) Set(kind, arch string, build int, l Latest) {
 // known yet or the feed has nothing for its build (an unknown release: better
 // to send nothing than to tell the agent it is current).
 func (ix Index) For(d Device) (*aegisonev1.PatchBaseline, bool) {
-	if !d.known() {
-		return nil, false
-	}
-	l, ok := ix[family{d.Kind, d.Arch, d.Build}]
+	l, ok := ix.LatestFor(d)
 	if !ok {
 		return nil, false
 	}
@@ -136,6 +138,28 @@ func (ix Index) For(d Device) (*aegisonev1.PatchBaseline, bool) {
 		bl.LatestKbs = append(bl.LatestKbs, l.KB)
 	}
 	return bl, true
+}
+
+// LatestFor returns the newest KB for d's build family, or false when d's
+// build isn't known yet or the feed has nothing for it.
+func (ix Index) LatestFor(d Device) (Latest, bool) {
+	if !d.known() {
+		return Latest{}, false
+	}
+	l, ok := ix[family{d.Kind, d.Arch, d.Build}]
+	return l, ok
+}
+
+// Fingerprint is a short, stable id for the index content: it changes when
+// any family gets a newer KB. Used as the "catalog version" of a diff.
+func (ix Index) Fingerprint() string {
+	lines := make([]string, 0, len(ix))
+	for f, l := range ix {
+		lines = append(lines, fmt.Sprintf("%s|%s|%d|%s|%d", f.kind, f.arch, f.build, l.KB, l.UBR))
+	}
+	sort.Strings(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, ";")))
+	return hex.EncodeToString(sum[:6])
 }
 
 // Key identifies a baseline's content (issued_at aside), to skip re-sending

@@ -3,7 +3,8 @@
 //
 // Each connection is identified by its mTLS client certificate fingerprint via
 // internal/identity (trust-on-first-use against the agent-reported device_id).
-// Once identified, agent messages are persisted via internal/ingest.
+// Once identified, agent messages are persisted via internal/ingest, and each
+// DeviceStateReport runs the server-side patch diff (internal/patchdiff).
 // Dispatch (Dispatch) sends a signed command to a connected
 // agent by device_id. Both identity tracking and ingestion no-op (old
 // trust-the-message-field, log-only behavior) when no database is configured.
@@ -24,6 +25,7 @@ import (
 	"aegis-one/internal/identity"
 	"aegis-one/internal/ingest"
 	"aegis-one/internal/patchbaseline"
+	"aegis-one/internal/patchdiff"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -46,6 +48,8 @@ type Server struct {
 	content *contentStore
 	// baseline is nil until EnableBaseline (needs a database).
 	baseline *baselineStore
+	// diff is nil until EnablePatchDiff (needs a database).
+	diff *patchdiff.Differ
 
 	mu      sync.Mutex
 	clients map[string]chan *aegisonev1.ServerMessage // device_id -> outbound queue
@@ -53,6 +57,13 @@ type Server struct {
 
 func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store, cmds *commands.Store, enr *enroll.Service) *Server {
 	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, enroll: enr, clients: make(map[string]chan *aegisonev1.ServerMessage)}
+}
+
+// EnablePatchDiff turns on the server-side patch diff after each
+// DeviceStateReport and the NOT_APPLICABLE feedback. Call before serving; run
+// the Differ's Watch alongside.
+func (s *Server) EnablePatchDiff(d *patchdiff.Differ) {
+	s.diff = d
 }
 
 // EnrollMethod is the one RPC callable without a client certificate.
@@ -390,6 +401,8 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 				s.log.Error("record action status failed", "action_id", st.GetActionId(), "error", err.Error())
 			} else if !applied {
 				s.log.Warn("action status matched no open command for this agent", "action_id", st.GetActionId())
+			} else {
+				s.patchNotApplicable(ctx, known, st)
 			}
 		}
 
@@ -405,9 +418,12 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 		if known != nil {
 			if sum, err := s.ingest.DeviceState(ctx, known, ds); err != nil {
 				s.log.Error("persist device state failed", "device_id", known.DeviceID, "error", err.Error())
-			} else if sum.AppsAdded > 0 || sum.AppsRemoved > 0 {
-				s.log.Info("software inventory changed", "device_id", known.DeviceID,
-					"apps", sum.Apps, "added", sum.AppsAdded, "removed", sum.AppsRemoved)
+			} else {
+				if sum.AppsAdded > 0 || sum.AppsRemoved > 0 {
+					s.log.Info("software inventory changed", "device_id", known.DeviceID,
+						"apps", sum.Apps, "added", sum.AppsAdded, "removed", sum.AppsRemoved)
+				}
+				s.patchDiff(ctx, known)
 			}
 			build, ubr := ingest.SplitBuild(ds.GetBuild())
 			var ubrPtr *int
@@ -484,5 +500,41 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 
 	default:
 		s.log.Warn("received message with no recognized payload")
+	}
+}
+
+// patchDiff re-evaluates what the device is missing after it reported its
+// state. A failure is logged; the next report or catalog change retries.
+func (s *Server) patchDiff(ctx context.Context, known *identity.Known) {
+	if s.diff == nil {
+		return
+	}
+	res, err := s.diff.Device(ctx, known.DeviceUUID, true)
+	switch {
+	case errors.Is(err, patchdiff.ErrNotLoaded):
+		s.log.Info("patch diff skipped: catalog not loaded yet", "device_id", known.DeviceID)
+	case err != nil:
+		s.log.Error("patch diff failed", "device_id", known.DeviceID, "error", err.Error())
+	case res.KB == "":
+		s.log.Info("patch diff: no catalog data for this device's build yet", "device_id", known.DeviceID, "catalog", res.Catalog)
+	default:
+		s.log.Info("patch diff", "device_id", known.DeviceID, "kb", res.KB, "state", res.State, "catalog", res.Catalog)
+	}
+}
+
+// patchNotApplicable feeds an install_patch the agent skipped as
+// NOT_APPLICABLE back into the diff, so it isn't offered again on this build.
+func (s *Server) patchNotApplicable(ctx context.Context, known *identity.Known, st *aegisonev1.ActionStatus) {
+	if s.diff == nil || st.GetPhase() != aegisonev1.ActionPhase_ACTION_PHASE_NOT_APPLICABLE ||
+		st.GetActionType() != "install_patch" || st.GetKb() == "" {
+		return
+	}
+	ok, err := s.diff.NotApplicable(ctx, known.DeviceUUID, known.AgentUUID, st.GetKb(), st.GetActionId(), st.GetReason())
+	if err != nil {
+		s.log.Error("record patch not-applicable failed", "device_id", known.DeviceID, "kb", st.GetKb(), "error", err.Error())
+		return
+	}
+	if ok {
+		s.log.Info("patch marked not applicable for this build", "device_id", known.DeviceID, "kb", st.GetKb(), "reason", st.GetReason())
 	}
 }

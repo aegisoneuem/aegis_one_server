@@ -1,8 +1,10 @@
 // Package patchdeploy pushes a Windows patch to a device end to end:
 //
-//	Create: resolve the device's own UpdateID for the KB (device_patch_state,
-//	        from its scan) -> the update's files (wu_update_files, from the scan
-//	        cab) -> queue the download (patchcontent)
+//	Create: the patch must be missing on the device (device_patch_state) ->
+//	        its files from the server's scan cab index (wu_update_files): by
+//	        the device's own UpdateID when an agent scan reported one, else
+//	        (server-side diff) by the KB and the device's architecture in the
+//	        file name -> queue the download (patchcontent)
 //	Run:    downloading -> file ready on the server  -> send stage_patch
 //	        staging     -> agent cached it (SUCCESS)  -> send install_patch
 //	        installing  -> SUCCESS / NOT_APPLICABLE   -> succeeded
@@ -104,9 +106,10 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, userErr("kb is required")
 	}
 	var deviceUUID string
+	var arch *string
 	err := d.pool.QueryRow(ctx, `
-		SELECT d.id FROM devices d JOIN agents a ON a.device_id = d.id AND a.revoked_at IS NULL
-		WHERE d.agent_reported_id = $1`, req.DeviceID).Scan(&deviceUUID)
+		SELECT d.id, d.architecture FROM devices d JOIN agents a ON a.device_id = d.id AND a.revoked_at IS NULL
+		WHERE d.agent_reported_id = $1`, req.DeviceID).Scan(&deviceUUID, &arch)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, userErr("unknown device_id %q (never connected, or its agent is revoked)", req.DeviceID)
 	}
@@ -125,14 +128,14 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 	var state string
 	err = d.pool.QueryRow(ctx, `SELECT vendor_update_id, state FROM device_patch_state WHERE device_id = $1 AND patch_id = $2`,
 		deviceUUID, patchID).Scan(&updateID, &state)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (updateID == nil || *updateID == "")) {
-		return nil, userErr("device has not reported %s as missing in a patch scan (scan it first)", kb)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, userErr("%s is not missing on this device (no patch state for it; has the device reported its state?)", kb)
 	}
 	if err != nil {
 		return nil, err
 	}
-	// Only what the device's last scan says is missing ('failed' = an earlier
-	// install attempt failed, so it is still missing).
+	// Only what is missing on the device ('failed' = an earlier install
+	// attempt failed, so it is still missing).
 	switch state {
 	case "missing", "failed":
 	case "installed":
@@ -145,12 +148,24 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, userErr("%s is not missing on this device (state %s)", kb, state)
 	}
 
-	files, err := d.updateFiles(ctx, *updateID)
-	if err != nil {
-		return nil, err
-	}
-	if len(files) == 0 {
-		return nil, userErr("no download information for update %s in the current scan cab (not indexed yet, or not in the catalog)", *updateID)
+	var files []wucatalog.File
+	if updateID != nil && *updateID != "" {
+		if files, err = d.updateFiles(ctx, *updateID); err != nil {
+			return nil, err
+		}
+		if len(files) == 0 {
+			return nil, userErr("no download information for update %s in the current scan cab (not indexed yet, or not in the catalog)", *updateID)
+		}
+	} else {
+		if deref(arch) == "" {
+			return nil, userErr("the device has not reported its architecture yet")
+		}
+		if files, err = d.filesForKB(ctx, kb, deref(arch)); err != nil {
+			return nil, err
+		}
+		if len(files) == 0 {
+			return nil, userErr("no %s file for %s in the current scan cab (not indexed yet, or no package for this architecture)", deref(arch), kb)
+		}
 	}
 	var main *wucatalog.File
 	skipped := []string{} // non-nil: the column is NOT NULL
@@ -162,7 +177,7 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		skipped = append(skipped, files[i].Name)
 	}
 	if main == nil {
-		return nil, userErr("update %s has no file named for %s (files: %s)", *updateID, kb, strings.Join(skipped, ", "))
+		return nil, userErr("no file named for %s (files: %s)", kb, strings.Join(skipped, ", "))
 	}
 
 	notReady, err := d.content.Request(ctx, []wucatalog.File{*main})
@@ -170,7 +185,7 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, err
 	}
 
-	out := &Created{KB: kb, UpdateID: *updateID, File: main.Name, SkippedFiles: skipped, Downloaded: notReady == 0}
+	out := &Created{KB: kb, UpdateID: deref(updateID), File: main.Name, SkippedFiles: skipped, Downloaded: notReady == 0}
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -186,7 +201,7 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		INSERT INTO patch_deployment_results
 			(deployment_id, device_id, patch_id, status, step, vendor_update_id, file_digest, skipped_files, started_at)
 		VALUES ($1, $2, $3, 'in_progress', 'downloading', $4, $5, $6, now())
-		RETURNING id`, out.DeploymentID, deviceUUID, patchID, *updateID, main.Digest, skipped).Scan(&out.ResultID)
+		RETURNING id`, out.DeploymentID, deviceUUID, patchID, updateID, main.Digest, skipped).Scan(&out.ResultID)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.ConstraintName == "uq_pdr_active_device_patch" {
 		return nil, userErr("%s is already being pushed to this device", kb)
@@ -196,7 +211,7 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 	}
 	details, _ := json.Marshal(map[string]any{
 		"deployment_id": out.DeploymentID, "device_id": req.DeviceID, "kb": kb,
-		"update_id": *updateID, "file": main.Name, "skipped_files": skipped,
+		"update_id": deref(updateID), "file": main.Name, "skipped_files": skipped,
 	})
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_log (actor_type, actor_api_client_id, actor_label, action, target_type, target_id, details)
@@ -211,6 +226,51 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		"file", main.Name, "skipped_files", len(skipped), "already_downloaded", out.Downloaded)
 	d.kick()
 	return out, nil
+}
+
+// filesForKB finds kb's files for one architecture in the current cab index
+// by file name ("windows11.0-kb5066835-x64_<sha1>.msu"). The server-side diff
+// has no UpdateID, and the same KB is one package per architecture. Files
+// named for another KB (e.g. a checkpoint update) are not included; a KB with
+// two different files for the same architecture is refused rather than
+// guessed.
+func (d *Deployer) filesForKB(ctx context.Context, kb, arch string) ([]wucatalog.File, error) {
+	rows, err := d.pool.Query(ctx, `
+		SELECT DISTINCT file_digest, file_name, url FROM wu_update_files
+		WHERE position($1 IN lower(file_name)) > 0 ORDER BY file_name`, strings.ToLower(kb))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []wucatalog.File
+	for rows.Next() {
+		var f wucatalog.File
+		if err := rows.Scan(&f.Digest, &f.Name, &f.URL); err != nil {
+			return nil, err
+		}
+		if "KB"+wucatalog.KBOf(f.Name) == kb && ArchMatches(f.Name, arch) {
+			out = append(out, f)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) > 1 {
+		names := make([]string, 0, len(out))
+		for _, f := range out {
+			names = append(names, f.Name)
+		}
+		return nil, userErr("%s has %d different %s files in the scan cab (%s); can't tell which this device needs",
+			kb, len(out), arch, strings.Join(names, ", "))
+	}
+	return out, nil
+}
+
+// ArchMatches reports whether a Windows update file name is for arch (x64,
+// x86, arm64): Microsoft names them "...-kb5066835-x64_<sha1>.msu".
+func ArchMatches(fileName, arch string) bool {
+	n, a := strings.ToLower(fileName), strings.ToLower(arch)
+	return a != "" && (strings.Contains(n, "-"+a+"_") || strings.Contains(n, "-"+a+"."))
 }
 
 func (d *Deployer) updateFiles(ctx context.Context, updateID string) ([]wucatalog.File, error) {

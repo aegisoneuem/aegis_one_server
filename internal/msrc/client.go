@@ -49,16 +49,22 @@ func (c *Client) ListUpdates(ctx context.Context) ([]UpdateSummary, error) {
 }
 
 // LatestUpdateID returns the ID (e.g. "2026-Sep") of the most recently released
-// monthly document.
+// monthly document. It goes by InitialReleaseDate: MSRC revises old documents
+// (CurrentReleaseDate moves), so the newest revision can be a months-old
+// release.
 func (c *Client) LatestUpdateID(ctx context.Context) (string, error) {
 	updates, err := c.ListUpdates(ctx)
 	if err != nil {
 		return "", err
 	}
+	return latestID(updates)
+}
+
+func latestID(updates []UpdateSummary) (string, error) {
 	var latestID, latestDate string
 	for _, u := range updates {
-		if u.CurrentReleaseDate > latestDate {
-			latestDate, latestID = u.CurrentReleaseDate, u.ID
+		if u.InitialReleaseDate > latestDate {
+			latestDate, latestID = u.InitialReleaseDate, u.ID
 		}
 	}
 	if latestID == "" {

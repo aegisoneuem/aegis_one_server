@@ -38,6 +38,7 @@ import (
 	"aegis-one/internal/logging"
 	"aegis-one/internal/patchcontent"
 	"aegis-one/internal/patchdeploy"
+	"aegis-one/internal/patchdiff"
 	"aegis-one/internal/patchfeed"
 	"aegis-one/internal/pushapi"
 	"aegis-one/internal/signing"
@@ -122,12 +123,15 @@ func main() {
 	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool), cmdStore, enrollSvc)
 	var patches *patchcontent.Store
 	var software *softwaredist.Store
+	var differ *patchdiff.Differ
 	if pool != nil {
 		patches = patchcontent.New(pool, cfg.ContentDir, log)
 		software = softwaredist.NewStore(pool, cfg.ContentDir, cfg.SoftwareMaxUploadBytes, log)
 		agentSrv.EnableContent(pool, cfg.ContentDir, cfg.ContentMaxStreams, patches)
 		agentSrv.EnableSoftwareContent(software)
 		agentSrv.EnableBaseline(pool)
+		differ = patchdiff.New(pool, log)
+		agentSrv.EnablePatchDiff(differ)
 	} else {
 		log.Warn("content delivery to agents disabled (no database)")
 	}
@@ -227,6 +231,11 @@ func main() {
 		go func() {
 			defer wg.Done()
 			agentSrv.WatchBaseline(ctx, time.Minute)
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			differ.Watch(ctx, time.Minute)
 		}()
 		wg.Add(1)
 		go func() {

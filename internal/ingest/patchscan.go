@@ -23,8 +23,12 @@ type PatchScanSummary struct {
 }
 
 // PatchScan applies a PatchScanResult as a full, successful snapshot (the agent
-// only sends one after a scan that completed; a failed scan sends nothing):
-//   - Missing, not superseded -> 'missing' (SLA clock per assignSLA). A KB not
+// only sends one after a scan that completed; a failed scan sends nothing).
+// Since the server-side diff (internal/patchdiff) became the source of truth,
+// this endpoint cab scan is optional (air-gapped / on-demand): it adds what the
+// diff can't decide (standalone, .NET, non-security updates), and its cleanup
+// below only touches its own 'agent_wua' rows, never the diff's.
+//   - Missing, not superseded -> 'missing' (SLA clock per AssignSLA). A KB not
 //     in the catalog gets a catalog row from the report itself
 //     (catalog_source 'agent_report'); only updates with no KB at all (e.g.
 //     drivers) go to unmatched_patch_reports.
@@ -148,7 +152,7 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 	if len(psr.GetInstalled()) > 0 {
 		tag, err := tx.Exec(ctx, `
 			DELETE FROM device_patch_state
-			WHERE device_id = $1 AND state IN ('missing', 'pending_reboot', 'failed', 'superseded')
+			WHERE device_id = $1 AND detection_source = 'agent_wua' AND state IN ('missing', 'pending_reboot', 'failed', 'superseded')
 			  AND NOT (patch_id = ANY($2))`, known.DeviceUUID, seen)
 		if err != nil {
 			return summary, fmt.Errorf("remove no-longer-applicable rows: %w", err)
@@ -158,7 +162,8 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 		tag, err := tx.Exec(ctx, `
 			UPDATE device_patch_state
 			SET state = 'installed', installed_at = now(), last_evaluated_at = now()
-			WHERE device_id = $1 AND state IN ('missing', 'pending_reboot', 'failed') AND NOT (patch_id = ANY($2))`,
+			WHERE device_id = $1 AND detection_source = 'agent_wua' AND state IN ('missing', 'pending_reboot', 'failed')
+			  AND NOT (patch_id = ANY($2))`,
 			known.DeviceUUID, seen)
 		if err != nil {
 			return summary, fmt.Errorf("mark resolved device_patch_state rows: %w", err)
@@ -166,7 +171,7 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 		summary.MarkedInstalled = int(tag.RowsAffected())
 	}
 
-	if summary.SLAAssigned, err = assignSLA(ctx, tx, known.DeviceUUID); err != nil {
+	if summary.SLAAssigned, err = AssignSLA(ctx, tx, known.DeviceUUID); err != nil {
 		return summary, fmt.Errorf("assign SLA: %w", err)
 	}
 
