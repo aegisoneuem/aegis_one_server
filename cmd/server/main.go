@@ -19,6 +19,7 @@ import (
 	"crypto/ed25519"
 	"log/slog"
 
+	schema "aegis-one/db"
 	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/apiauth"
 	"aegis-one/internal/ca"
@@ -29,6 +30,7 @@ import (
 	"aegis-one/internal/contentapi"
 	"aegis-one/internal/crypto"
 	"aegis-one/internal/db"
+	"aegis-one/internal/dbmigrate"
 	"aegis-one/internal/enroll"
 	"aegis-one/internal/feedsched"
 	"aegis-one/internal/grpcserver"
@@ -67,6 +69,16 @@ func main() {
 		pool = p
 		defer pool.Close()
 		log.Info("database connected")
+
+		// Refuse to run this build against a schema that is behind it.
+		migrations, err := dbmigrate.Load(schema.Migrations)
+		if err == nil {
+			err = dbmigrate.CheckCurrent(ctx, pool, migrations)
+		}
+		if err != nil {
+			log.Error("database schema is not current", "error", err.Error())
+			os.Exit(1)
+		}
 
 		rep, err := db.CheckPrivileges(ctx, pool)
 		if err != nil {

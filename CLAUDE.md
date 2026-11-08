@@ -30,7 +30,7 @@ agent<->server contract.
 buf.yaml, buf.gen.yaml        # buf v2 config (module path: proto)
 proto/aegis/agent/v1/*.proto  # the contract - source of truth for agent<->server messages
 gen/                          # generated Go code (buf generate) - do not hand-edit
-db/migrations/0001..0007.sql  # PostgreSQL schema, apply in order
+db/migrations/NNNN_*.sql      # PostgreSQL schema, applied in order by cmd/migrate
 go.mod                        # module "aegis-one" (matches go_package in the protos)
 ```
 
@@ -46,8 +46,10 @@ go.mod                        # module "aegis-one" (matches go_package in the pr
 | 0007_ingestion_support | system_settings, agent_config_profiles, **agent_stream_offsets** (dedup), content_feeds, unmatched_patch_reports, agent_releases, alerts |
 
 Rules:
-- Migrations run **once** each (use golang-migrate or similar to track). Never edit an
-  applied migration - add a new numbered file.
+- Migrations run **once** each, via `cmd/migrate up` (tracked in schema_migrations, run as
+  the schema owner, re-applies 0004 afterwards; see docs/database-migrations.md). The
+  server refuses to start if a migration is pending. Never edit an applied migration -
+  add a new numbered file.
 - The app connects as a login role in `aegis_app`, **never** as postgres/owner.
 - audit_log is append-only (triggers block UPDATE/DELETE/TRUNCATE).
 
