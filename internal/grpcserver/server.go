@@ -26,6 +26,7 @@ import (
 	"aegis-one/internal/ingest"
 	"aegis-one/internal/patchbaseline"
 	"aegis-one/internal/patchdiff"
+	"aegis-one/internal/remoteops"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -50,6 +51,10 @@ type Server struct {
 	baseline *baselineStore
 	// diff is nil until EnablePatchDiff (needs a database).
 	diff *patchdiff.Differ
+	// remote operations; nil until EnableRemoteOps (needs a database).
+	uploads   *remoteops.Uploads
+	transfers *remoteops.Transfers
+	shells    *remoteops.Shells
 
 	mu      sync.Mutex
 	clients map[string]chan *aegisonev1.ServerMessage // device_id -> outbound queue
@@ -64,6 +69,39 @@ func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store, cmds *comm
 // the Differ's Watch alongside.
 func (s *Server) EnablePatchDiff(d *patchdiff.Differ) {
 	s.diff = d
+}
+
+// EnableRemoteOps turns on UploadContent, ShellSession and FetchContent kind
+// "nsh-file". Call before serving.
+func (s *Server) EnableRemoteOps(u *remoteops.Uploads, t *remoteops.Transfers, sh *remoteops.Shells) {
+	s.uploads, s.transfers, s.shells = u, t, sh
+}
+
+// UploadContent receives a file an agent sends for one of its open commands
+// (collect_file, run_command upload_as, file_operation pack).
+func (s *Server) UploadContent(stream aegisonev1.AgentControlPlane_UploadContentServer) error {
+	if s.uploads == nil {
+		return status.Error(codes.Unavailable, "uploads are not enabled on this server")
+	}
+	known, err := s.knownAgent(stream.Context(), "upload content")
+	if err != nil {
+		return err
+	}
+	ack := s.uploads.Receive(stream.Context(), stream.Recv, known.DeviceUUID, known.AgentUUID)
+	return stream.SendAndClose(ack)
+}
+
+// ShellSession carries one interactive shell the server asked for with
+// open_shell (see remoteops.Shells).
+func (s *Server) ShellSession(stream aegisonev1.AgentControlPlane_ShellSessionServer) error {
+	if s.shells == nil {
+		return status.Error(codes.Unavailable, "shell sessions are not enabled on this server")
+	}
+	known, err := s.knownAgent(stream.Context(), "shell session")
+	if err != nil {
+		return err
+	}
+	return s.shells.Attach(stream, known.AgentUUID)
 }
 
 // EnrollMethod is the one RPC callable without a client certificate.

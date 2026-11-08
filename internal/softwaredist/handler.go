@@ -18,9 +18,13 @@ import (
 // apiauth.Require(PermSoftwareDeploy)):
 //
 //	POST multipart/form-data: fields name, version, installer_type
-//	     (msi|exe|ps1|bat|cmd|python|vbs), optional silent_args, product_code,
-//	     uninstall_key, display_name, success_exit_codes ("0,1"),
-//	     timeout_seconds, require_signature ("true"); and the installer as "file"
+//	     (msi|exe|ps1|bat|cmd|python|vbs|inf|msix|command), optional silent_args,
+//	     product_code, uninstall_key, display_name, success_exit_codes ("0,1"),
+//	     timeout_seconds, require_signature ("true"); and the installer as "file".
+//	     v2: a .zip "file" is a bundle with bundle_entry_point or
+//	     bundle_command, optional bundle_destination, bundle_cleanup
+//	     (always|retain); steps, detection and parameters as JSON; requires
+//	     ("<package_id>,<package_id>"); require_ac_power, capture_script_content.
 //	GET  -> all packages; GET ?id=<package_id> -> one
 type PackagesHandler struct {
 	store *Store
@@ -31,8 +35,13 @@ func NewPackagesHandler(store *Store, log *slog.Logger) *PackagesHandler {
 	return &PackagesHandler{store: store, log: log}
 }
 
-// maxFieldBytes caps one non-file form field.
-const maxFieldBytes = 4 << 10
+// maxFieldBytes caps one non-file form field; the JSON fields get more.
+const (
+	maxFieldBytes     = 4 << 10
+	maxJSONFieldBytes = 64 << 10
+)
+
+var jsonFields = map[string]bool{"steps": true, "detection": true, "parameters": true}
 
 func (h *PackagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -108,12 +117,16 @@ func (h *PackagesHandler) upload(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		b, err := io.ReadAll(io.LimitReader(part, maxFieldBytes+1))
+		limit := int64(maxFieldBytes)
+		if jsonFields[name] {
+			limit = maxJSONFieldBytes
+		}
+		b, err := io.ReadAll(io.LimitReader(part, limit+1))
 		if err != nil {
 			h.uploadError(w, err)
 			return
 		}
-		if len(b) > maxFieldBytes {
+		if int64(len(b)) > limit {
 			http.Error(w, "form field "+name+" is too long", http.StatusBadRequest)
 			return
 		}
@@ -129,8 +142,12 @@ func (h *PackagesHandler) upload(w http.ResponseWriter, r *http.Request) {
 		h.uploadError(w, err)
 		return
 	}
-	if IsScript(strings.ToLower(strings.TrimSpace(meta.InstallerType))) && !caller.Can(apiauth.PermSoftwareScript) {
-		http.Error(w, "uploading a script package needs the software.script permission", http.StatusForbidden)
+	probe := Package{InstallerType: strings.ToLower(strings.TrimSpace(meta.InstallerType)), Steps: meta.Steps}
+	if meta.BundleCommand != "" {
+		probe.InstallerType = "command"
+	}
+	if probe.NeedsScriptPerm() && !caller.Can(apiauth.PermSoftwareScript) {
+		http.Error(w, "a script package, bundle command or deployment steps need the software.script permission", http.StatusForbidden)
 		return
 	}
 	st := staged
@@ -161,6 +178,37 @@ func metaFromFields(f map[string]string) (Meta, error) {
 	m := Meta{
 		Name: f["name"], Version: f["version"], InstallerType: f["installer_type"], SilentArgs: f["silent_args"],
 		ProductCode: f["product_code"], UninstallKey: f["uninstall_key"], DisplayName: f["display_name"],
+		BundleEntryPoint: f["bundle_entry_point"], BundleCommand: f["bundle_command"],
+		BundleDestination: f["bundle_destination"], BundleCleanup: f["bundle_cleanup"],
+	}
+	if v := strings.TrimSpace(f["steps"]); v != "" {
+		if err := strictJSON(v, &m.Steps); err != nil {
+			return m, userErr("steps must be JSON {\"before\":[...],\"after\":[...],\"rollback\":[...]}: %v", err)
+		}
+	}
+	if v := strings.TrimSpace(f["detection"]); v != "" {
+		if err := strictJSON(v, &m.Detection); err != nil {
+			return m, userErr("detection must be JSON {\"mode\":\"all|any\",\"rules\":[...]}: %v", err)
+		}
+	}
+	if v := strings.TrimSpace(f["parameters"]); v != "" {
+		if err := strictJSON(v, &m.Parameters); err != nil {
+			return m, userErr("parameters must be a JSON object of strings: %v", err)
+		}
+	}
+	for _, id := range strings.Split(f["requires"], ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			m.Requires = append(m.Requires, id)
+		}
+	}
+	for field, dst := range map[string]*bool{"require_ac_power": &m.RequireACPower, "capture_script_content": &m.CaptureScriptContent} {
+		if v := strings.TrimSpace(f[field]); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return m, userErr("%s must be true or false", field)
+			}
+			*dst = b
+		}
 	}
 	if v := strings.TrimSpace(f["timeout_seconds"]); v != "" {
 		n, err := strconv.ParseInt(v, 10, 32)
@@ -192,9 +240,14 @@ func metaFromFields(f map[string]string) (Meta, error) {
 // DeployHandler serves /internal/software/deploy (mount behind
 // apiauth.Require(PermSoftwareDeploy)):
 //
-//	POST {"package_id": "...", "action": "install|uninstall", "device_ids": ["..."]}
-//	     -> 202 + deployment id
-//	GET  ?id=<deployment_id> -> per-device progress
+//	POST {"package_id": "...", "action": "install|uninstall", "device_ids": ["..."],
+//	      optional "execution": {"mode": "system|logged_in_user|specified_account",
+//	        "session_id", "username", "domain", "password", "detection_scope"},
+//	      "secure_parameters": {"NAME": "value"}, "max_fetch_bytes_per_second": N}
+//	     -> 202 + deployment id and the install plan (dependencies first).
+//	     execution other than system, or secure_parameters, need software.runas;
+//	     the password and secret values are never stored or logged.
+//	GET  ?id=<deployment_id> -> per-device, per-package progress
 type DeployHandler struct {
 	d   *Deployer
 	log *slog.Logger
@@ -222,9 +275,12 @@ func (h *DeployHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		PackageID string   `json:"package_id"`
-		Action    string   `json:"action"`
-		DeviceIDs []string `json:"device_ids"`
+		PackageID              string            `json:"package_id"`
+		Action                 string            `json:"action"`
+		DeviceIDs              []string          `json:"device_ids"`
+		Execution              *Execution        `json:"execution"`
+		SecureParameters       map[string]string `json:"secure_parameters"`
+		MaxFetchBytesPerSecond int64             `json:"max_fetch_bytes_per_second"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
@@ -235,6 +291,8 @@ func (h *DeployHandler) create(w http.ResponseWriter, r *http.Request) {
 	out, err := h.d.Create(r.Context(), DeployRequest{
 		PackageID: body.PackageID, Action: body.Action, DeviceIDs: body.DeviceIDs,
 		ClientID: caller.ClientID, ClientName: caller.ClientName, CanScript: caller.Can(apiauth.PermSoftwareScript),
+		CanRunAs: caller.Can(apiauth.PermSoftwareRunAs), Execution: body.Execution,
+		SecureParameters: body.SecureParameters, MaxFetchBytesPerSecond: body.MaxFetchBytesPerSecond,
 	})
 	var ue *UserError
 	var pe *PermissionError
@@ -253,6 +311,9 @@ func (h *DeployHandler) create(w http.ResponseWriter, r *http.Request) {
 
 type resultView struct {
 	DeviceID       string     `json:"device_id"`
+	Package        string     `json:"package"`
+	PlanOrder      int        `json:"plan_order"` // dependencies first; the deployed package is last
+	CommandType    *string    `json:"command_type,omitempty"`
 	Status         string     `json:"status"`
 	Outcome        *string    `json:"outcome,omitempty"` // SUCCESS | NOT_APPLICABLE | FAILED (agent's final phase)
 	ExitCode       *int32     `json:"exit_code,omitempty"`
@@ -260,7 +321,9 @@ type resultView struct {
 	Error          *string    `json:"error,omitempty"`
 	AgentReason    *string    `json:"agent_reason,omitempty"` // what the agent said, e.g. "not installed (nothing to uninstall)"
 	CommandID      *string    `json:"command_id,omitempty"`
-	AgentPhase     *string    `json:"agent_phase,omitempty"` // latest ActionStatus while running
+	AgentPhase     *string    `json:"agent_phase,omitempty"`       // latest ActionStatus while running
+	PackageDir     *string    `json:"package_directory,omitempty"` // bundle extraction folder
+	PackageCleanup *string    `json:"package_cleanup,omitempty"`   // removed | retained | failed
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 }
@@ -272,21 +335,27 @@ func (h *DeployHandler) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var dep struct {
-		Status, Action, Name, PackageID string
+		Status, Action, Name, PackageID, ExecMode string
+		HasSecrets                                bool
 	}
-	err := h.d.pool.QueryRow(r.Context(), `SELECT status, action, coalesce(name, ''), package_id::text FROM software_deployments WHERE id = $1`, id).
-		Scan(&dep.Status, &dep.Action, &dep.Name, &dep.PackageID)
+	err := h.d.pool.QueryRow(r.Context(), `
+		SELECT status, action, coalesce(name, ''), package_id::text, execution_mode, has_secrets
+		FROM software_deployments WHERE id = $1`, id).
+		Scan(&dep.Status, &dep.Action, &dep.Name, &dep.PackageID, &dep.ExecMode, &dep.HasSecrets)
 	if err != nil {
 		http.Error(w, "deployment not found", http.StatusNotFound)
 		return
 	}
 	rows, err := h.d.pool.Query(r.Context(), `
-		SELECT dv.agent_reported_id, r.status, r.outcome, r.exit_code, r.reboot_required, r.error_message,
-		       NULLIF(c.result->>'reason', ''), r.command_id::text, c.result->>'phase', r.started_at, r.completed_at
+		SELECT dv.agent_reported_id, p.name || ' ' || p.version, r.plan_order, r.command_type, r.status, r.outcome,
+		       r.exit_code, r.reboot_required, r.error_message,
+		       NULLIF(c.result->>'reason', ''), r.command_id::text, c.result->>'phase', r.package_directory, r.package_cleanup,
+		       r.started_at, r.completed_at
 		FROM software_deployment_results r
 		JOIN devices dv ON dv.id = r.device_id
+		JOIN software_packages p ON p.id = r.package_id
 		LEFT JOIN agent_commands c ON c.id = r.command_id
-		WHERE r.deployment_id = $1 ORDER BY dv.agent_reported_id`, id)
+		WHERE r.deployment_id = $1 ORDER BY dv.agent_reported_id, r.plan_order`, id)
 	if err != nil {
 		h.log.Error("software deploy: status", "error", err.Error())
 		http.Error(w, "query failed", http.StatusInternalServerError)
@@ -297,8 +366,9 @@ func (h *DeployHandler) status(w http.ResponseWriter, r *http.Request) {
 	counts := map[string]int{}
 	for rows.Next() {
 		var v resultView
-		if err := rows.Scan(&v.DeviceID, &v.Status, &v.Outcome, &v.ExitCode, &v.RebootRequired, &v.Error,
-			&v.AgentReason, &v.CommandID, &v.AgentPhase, &v.StartedAt, &v.CompletedAt); err != nil {
+		if err := rows.Scan(&v.DeviceID, &v.Package, &v.PlanOrder, &v.CommandType, &v.Status, &v.Outcome,
+			&v.ExitCode, &v.RebootRequired, &v.Error,
+			&v.AgentReason, &v.CommandID, &v.AgentPhase, &v.PackageDir, &v.PackageCleanup, &v.StartedAt, &v.CompletedAt); err != nil {
 			h.log.Error("software deploy: status scan", "error", err.Error())
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
@@ -312,8 +382,22 @@ func (h *DeployHandler) status(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"deployment_id": id, "name": dep.Name, "package_id": dep.PackageID, "action": action,
+		"execution_mode": dep.ExecMode, "private": dep.HasSecrets,
 		"status": dep.Status, "counts": counts, "results": results,
 	})
+}
+
+// strictJSON decodes s into v, refusing unknown fields and trailing data.
+func strictJSON(s string, v any) error {
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("trailing data")
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

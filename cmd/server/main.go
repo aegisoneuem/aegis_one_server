@@ -21,6 +21,7 @@ import (
 
 	schema "aegis-one/db"
 	aegisonev1 "aegis-one/gen/aegisone/v1"
+	"aegis-one/internal/agentactions"
 	"aegis-one/internal/apiauth"
 	"aegis-one/internal/ca"
 	"aegis-one/internal/cabfeed"
@@ -43,6 +44,7 @@ import (
 	"aegis-one/internal/patchdiff"
 	"aegis-one/internal/patchfeed"
 	"aegis-one/internal/pushapi"
+	"aegis-one/internal/remoteops"
 	"aegis-one/internal/signing"
 	"aegis-one/internal/softwaredist"
 	"aegis-one/internal/wucatalog"
@@ -184,13 +186,24 @@ func main() {
 	var swDeployer *softwaredist.Deployer
 	if software != nil && cmdStore != nil && signingKeyID != "" {
 		swDeployer = softwaredist.NewDeployer(pool, software, cmdStore, agentSrv, signingKey, signingKeyID, log)
+	}
+	// Remote operations (collect_file, run_command, file_operation, transfers,
+	// shells) share one sender: signed, recorded, online devices only.
+	var remote *remoteOps
+	if pool != nil && cmdStore != nil && signingKeyID != "" {
+		sender := &commands.Sender{Store: cmdStore, Disp: agentSrv, Key: signingKey, KeyID: signingKeyID}
+		uploads := remoteops.NewUploads(pool, cfg.ContentDir, log)
+		remote = &remoteOps{sender: sender, uploads: uploads,
+			transfers: remoteops.NewTransfers(pool, uploads, sender, log),
+			shells:    remoteops.NewShells(pool, cfg.ContentDir, sender, log)}
+		agentSrv.EnableRemoteOps(remote.uploads, remote.transfers, remote.shells)
 	} else {
 		log.Warn("software deployment disabled (needs a database and a command signing key)")
 	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, deployer, software, swDeployer, cfg.ContentDir, log),
+		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, deployer, software, swDeployer, remote, cfg.ContentDir, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		// net/http logs TLS handshake errors etc. through the std logger; route
 		// them through slog so every server log line stays structured JSON.
@@ -260,6 +273,17 @@ func main() {
 		go func() {
 			defer wg.Done()
 			deployer.Run(ctx)
+		}()
+	}
+	if remote != nil {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			remote.transfers.Run(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			remote.shells.Run(ctx)
 		}()
 	}
 	if swDeployer != nil {
@@ -340,7 +364,7 @@ func feedJobs(contentDir, bsdtar string) []feedsched.Job {
 }
 
 func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, deployer *patchdeploy.Deployer,
-	software *softwaredist.Store, swDeployer *softwaredist.Deployer, contentDir string, log *slog.Logger) http.Handler {
+	software *softwaredist.Store, swDeployer *softwaredist.Deployer, remote *remoteOps, contentDir string, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -370,6 +394,11 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 	}
 	if swDeployer != nil {
 		mux.Handle("/internal/software/deploy", auth.Require(apiauth.PermSoftwareDeploy, softwaredist.NewDeployHandler(swDeployer, log)))
+	}
+	if remote != nil {
+		// Each of these checks its own permission per action / route.
+		mux.Handle("/internal/actions", auth.Require("", agentactions.New(pool, remote.sender, log)))
+		mux.Handle("/internal/remote/", auth.Require("", remoteops.NewHandler(pool, remote.sender, remote.uploads, remote.transfers, remote.shells, log)))
 	}
 	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool)))
 	// /content/* authorizes per request: agent mTLS cert or a content.download token.
@@ -405,4 +434,12 @@ func setupEnrollment(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger) (*
 	log.Info("enrollment enabled", "ca", authority.Cert.Subject.CommonName, "ca_not_after", authority.Cert.NotAfter,
 		"agent_cert_ttl", cfg.AgentCertTTL.String(), "license_max_devices", cfg.LicenseMaxDevices)
 	return enroll.New(pool, authority, cfg.AgentCertTTL, cfg.LicenseMaxDevices, log), nil
+}
+
+// remoteOps groups the remote-operation services shared by the gRPC and HTTP sides.
+type remoteOps struct {
+	sender    *commands.Sender
+	uploads   *remoteops.Uploads
+	transfers *remoteops.Transfers
+	shells    *remoteops.Shells
 }

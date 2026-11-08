@@ -21,7 +21,8 @@ package grpcserver
 // (internal/patchcontent), looked up by the SHA-256 from the signed command.
 // kind "package" (software_deploy installers) serves packages uploaded to
 // internal/softwaredist, only to a device with a deployment of that package in
-// progress.
+// progress. kind "nsh-file" serves a file transfer's archive to the one
+// destination its content id was minted for (internal/remoteops).
 
 import (
 	"context"
@@ -170,6 +171,8 @@ func (s *Server) FetchContent(req *aegisonev1.ContentRequest, stream aegisonev1.
 		f, err = s.patchFile(ctx, req)
 	case "package":
 		f, err = s.packageFile(ctx, known.DeviceUUID, req)
+	case "nsh-file":
+		f, err = s.transferFile(ctx, known.DeviceUUID, req)
 	default:
 		return status.Errorf(codes.InvalidArgument, "unknown content kind %q", req.GetKind())
 	}
@@ -265,6 +268,27 @@ func (s *Server) packageFile(ctx context.Context, deviceUUID string, req *aegiso
 		return contentFile{}, status.Error(codes.NotFound, "package not available to this device (no deployment in progress, or wrong sha256)")
 	}
 	return contentFile{path: s.content.software.Path(p), name: p.FileName, sha256: p.SHA256, size: p.SizeBytes}, nil
+}
+
+// transferFile resolves a file_operation unpack fetch: id = the random
+// content id minted for this destination, sha256 = the archive digest.
+func (s *Server) transferFile(ctx context.Context, deviceUUID string, req *aegisonev1.ContentRequest) (contentFile, error) {
+	if s.transfers == nil {
+		return contentFile{}, status.Error(codes.Unavailable, "file transfers are not enabled on this server")
+	}
+	sum := strings.ToLower(strings.TrimSpace(req.GetSha256()))
+	if !isSHA256Hex(sum) || strings.TrimSpace(req.GetId()) == "" {
+		return contentFile{}, status.Error(codes.InvalidArgument, "nsh-file fetch needs the content_id and sha256 from the file_operation")
+	}
+	path, size, err := s.transfers.Content(ctx, strings.TrimSpace(req.GetId()), sum, deviceUUID)
+	if err != nil {
+		s.log.Error("fetch content: look up transfer", "error", err.Error())
+		return contentFile{}, status.Error(codes.Internal, "content lookup failed")
+	}
+	if path == "" {
+		return contentFile{}, status.Error(codes.PermissionDenied, "content not available to this device")
+	}
+	return contentFile{path: path, name: "transfer.zip", sha256: sum, size: size}, nil
 }
 
 func (s *Server) sendFile(stream aegisonev1.AgentControlPlane_FetchContentServer, deviceID, kind string, cf contentFile, offset int64) error {

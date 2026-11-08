@@ -187,6 +187,10 @@ func (s *Store) ApplyCommandResult(ctx context.Context, agentUUID string, cr *ae
 	switch cr.GetStatus() {
 	case "success":
 		status = "succeeded"
+	case "accepted":
+		// scan_now / report_device_state: the agent took the trigger; what it
+		// produces arrives as its own report, so this is the command's end.
+		status = "succeeded"
 	case "rejected": // the agent only sends this when signature verification fails
 		status = "rejected_signature"
 	}
@@ -261,6 +265,9 @@ func (s *Store) ApplyActionStatus(ctx context.Context, agentUUID string, st *aeg
 		"reason":          st.GetReason(),
 		"detail":          st.GetDetail(),
 		"progress_pct":    st.GetProgressPct(),
+		// software_deploy bundles: the extraction folder and what happened to it
+		"package_directory": st.GetPackageDirectory(),
+		"package_cleanup":   st.GetPackageCleanup(),
 	})
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE agent_commands

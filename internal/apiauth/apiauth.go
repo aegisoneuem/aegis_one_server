@@ -47,6 +47,25 @@ const (
 	// deploy a script package (ps1/bat/cmd/python/vbs): that runs arbitrary code
 	// as SYSTEM on the endpoint, so it is admin-only by default.
 	PermSoftwareScript = "software.script"
+	// PermSoftwareRunAs deploys as a logged-in user or a specified account, or
+	// with secure parameters (credentials reach the endpoint). Admin-only by
+	// default.
+	PermSoftwareRunAs = "software.runas"
+	// PermDeviceReboot schedules or cancels an endpoint reboot. Admin-only by
+	// default: a reboot interrupts the user and production services.
+	PermDeviceReboot = "device.reboot"
+	// PermFilesCollect pulls files from endpoints (collect_file) and downloads
+	// uploads. Admin-only by default: it can read any file on the device.
+	PermFilesCollect = "files.collect"
+	// PermFilesManage creates, writes, deletes, lists and copies files on
+	// endpoints (file_operation, transfers). Admin-only by default.
+	PermFilesManage = "files.manage"
+	// PermAgentShell opens an interactive SYSTEM shell on an endpoint.
+	// Admin-only by default; sessions are recorded.
+	PermAgentShell = "agent.shell"
+	// PermDevicesView (seeded for operator) also allows the harmless refresh
+	// triggers scan_now and report_device_state.
+	PermDevicesView = "devices.view"
 )
 
 type Principal struct {

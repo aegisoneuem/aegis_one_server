@@ -76,7 +76,7 @@ func TestIsScript(t *testing.T) {
 		if IsScript(typ) != want {
 			t.Errorf("IsScript(%q) = %v", typ, !want)
 		}
-		if got := packageFormat(typ); (got == "script") != want {
+		if got := packageFormat(typ, false); (got == "script") != want {
 			t.Errorf("packageFormat(%q) = %q", typ, got)
 		}
 	}
@@ -88,7 +88,7 @@ func TestSpec(t *testing.T) {
 		SHA256: strings.Repeat("ab", 32), SilentArgs: "/qn", ProductCode: "{23170F69-40C1-2702-2408-000001000000}",
 		SuccessExitCodes: []int32{1}, TimeoutSeconds: 600, RequireSignature: true, storageName: "software/x.msi",
 	}
-	s := Spec(p, "uninstall")
+	s := Spec(p, "uninstall", SpecOptions{})
 	if s.GetContentId() != p.ID || s.GetPackageId() != p.ID || s.GetAction() != "uninstall" {
 		t.Errorf("ids/action wrong: %+v", s)
 	}
