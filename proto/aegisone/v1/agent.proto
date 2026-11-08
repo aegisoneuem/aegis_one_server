@@ -11,6 +11,10 @@
 // Replace it with the agent team's real file as soon as that is available, and
 // regenerate.
 //
+// Last re-verified 2026-11-08 against agent zip 4 (proto commits 88b3709,
+// 2240a16, e1d3d6b): inventory, audit events, resume offset, command
+// attribution, software deploy v2 fields. Normalized descriptors are identical.
+//
 // Command signatures (Command.signature) are not described by this file: they
 // are Ed25519 over commandsign.CanonicalBytes - see internal/signing.
 // =====================================================================================
@@ -46,6 +50,9 @@ message Heartbeat {
   string os = 3;
   string hostname = 4;
   int64 timestamp = 5;
+  string schema_version = 6;
+  repeated string agent_capabilities = 7;
+  string device_type = 8;
 }
 
 message CommandResult {
@@ -59,6 +66,9 @@ message Command {
   string type = 2;
   bytes payload = 3;
   bytes signature = 4;
+  string actor = 5;
+  string source = 6;
+  int64 issued_at = 7;
 }
 
 message MissingUpdate {
@@ -119,11 +129,67 @@ message SoftwareDeploySpec {
   repeated int32 success_exit_codes = 10;
   int32 timeout_seconds = 11;
   string content_id = 12;
+  bool require_ac_power = 25;
   bool require_signature = 13;
   string product_code = 14;
   string uninstall_key = 15;
   string display_name = 16;
   map<string, string> parameters = 17;
+  SoftwareExecution execution = 18;
+  map<string, string> secure_parameters = 19;
+  SoftwareBundle bundle = 20;
+  SoftwareDeploymentSteps steps = 21;
+  SoftwareDetection detection = 22;
+  int64 max_fetch_bytes_per_second = 23;
+  bool capture_script_content = 24;
+}
+
+message SoftwareBundle {
+  string entry_point = 1;
+  string command = 2;
+  string destination = 3;
+  string cleanup = 4;
+}
+
+message SoftwareDeploymentSteps {
+  repeated SoftwareCommandStep before = 1;
+  repeated SoftwareCommandStep after = 2;
+  repeated SoftwareCommandStep rollback = 3;
+}
+
+message SoftwareCommandStep {
+  string name = 1;
+  string command = 2;
+  string arguments = 3;
+  int32 timeout_seconds = 4;
+  repeated int32 success_exit_codes = 5;
+  bool use_secure_parameters = 6;
+}
+
+message SoftwareDetection {
+  string mode = 1;
+  repeated SoftwareDetectionRule rules = 2;
+}
+
+message SoftwareDetectionRule {
+  string kind = 1;
+  string path = 2;
+  string minimum_version = 3;
+  string hive = 4;
+  string key = 5;
+  string view = 6;
+  string value_name = 7;
+  string value_type = 8;
+  string expected_value = 9;
+}
+
+message SoftwareExecution {
+  string mode = 1;
+  optional uint32 session_id = 2;
+  string username = 3;
+  string domain = 4;
+  bytes password_utf8 = 5;
+  string detection_scope = 6;
 }
 
 message ActionStatus {
@@ -139,6 +205,8 @@ message ActionStatus {
   int64 started_at = 10;
   int64 finished_at = 11;
   string kb = 12;
+  string package_directory = 13;
+  string package_cleanup = 14;
 }
 
 message DeviceStateReport {
@@ -152,6 +220,19 @@ message DeviceStateReport {
   bool reboot_pending = 8;
   repeated string reboot_pending_kbs = 9;
   repeated string reboot_pending_sources = 10;
+  repeated InstalledApp installed_apps = 11;
+  repeated string installed_kbs = 12;
+}
+
+message InstalledApp {
+  string display_name = 1;
+  string display_version = 2;
+  string publisher = 3;
+  string install_date = 4;
+  string uninstall_key = 5;
+  string hive = 6;
+  int64 estimated_size_kb = 7;
+  string uninstall_string = 8;
 }
 
 message CacheFullReport {
@@ -163,6 +244,100 @@ message CacheFullReport {
   string message = 6;
 }
 
+message FullInventoryReport {
+  string device_id = 1;
+  int64 collected_at = 2;
+  string trigger = 3;
+  HardwareInventory hardware = 4;
+  repeated InstalledApp installed_apps = 5;
+  repeated DriverInventory drivers = 6;
+  repeated InstalledAppx installed_appx = 7;
+}
+
+message InstalledAppx {
+  string display_name = 1;
+  string package_full_name = 2;
+  string package_family_name = 3;
+  string name = 4;
+  string version = 5;
+  string architecture = 6;
+  string publisher_id = 7;
+  string install_location = 8;
+  string origin = 9;
+}
+
+message DriverInventory {
+  string device_name = 1;
+  string device_class = 2;
+  string driver_version = 3;
+  string driver_date = 4;
+  string provider_name = 5;
+  string hardware_id = 6;
+  string inf_name = 7;
+  string manufacturer = 8;
+  bool is_signed = 9;
+}
+
+message HardwareInventory {
+  string cpu_vendor = 1;
+  string cpu_model = 2;
+  int32 cpu_physical_cores = 3;
+  int32 cpu_logical_cores = 4;
+  int64 memory_total_bytes = 5;
+  repeated DiskInventory disks = 6;
+  repeated NetworkInterface nics = 7;
+  string bios_vendor = 8;
+  string bios_version = 9;
+  string bios_release_date = 10;
+  string system_vendor = 11;
+  string system_product = 12;
+  string system_serial_number = 13;
+  string chassis_type = 14;
+  int32 cpu_mhz = 15;
+  int32 cpu_threads_per_core = 16;
+  string cpu_architecture = 17;
+  string os_product_name = 18;
+  string os_display_version = 19;
+  string os_build = 20;
+  string os_service_pack = 21;
+  string system_uuid = 22;
+  string virtualization = 23;
+}
+
+message DiskInventory {
+  string mount_point = 1;
+  string volume_label = 2;
+  string file_system = 3;
+  int64 total_bytes = 4;
+  int64 free_bytes = 5;
+  string drive_type = 6;
+}
+
+message NetworkInterface {
+  string name = 1;
+  string mac_address = 2;
+  repeated string ipv4_addresses = 3;
+  repeated string ipv6_addresses = 4;
+  int64 link_speed_bps = 5;
+  string status = 6;
+}
+
+message AuditEvent {
+  reserved 12, 13;
+  string device_id = 1;
+  int64 ts = 2;
+  string event_type = 3;
+  string command_id = 4;
+  string command_type = 5;
+  string actor = 6;
+  string source = 7;
+  int64 issued_at = 8;
+  bool signature_ok = 9;
+  string decision = 10;
+  string reason = 11;
+  string details = 14;
+}
+
 message AgentMessage {
   reserved 4, 5;
   oneof payload {
@@ -172,6 +347,8 @@ message AgentMessage {
     DeviceStateReport device_state = 6;
     CacheFullReport cache_full = 7;
     ActionStatus action_status = 8;
+    FullInventoryReport full_inventory = 9;
+    AuditEvent audit_event = 10;
   }
 }
 
@@ -198,6 +375,7 @@ message ContentRequest {
   string kind = 1;
   string id = 2;
   string sha256 = 3;
+  int64 offset = 4;
 }
 
 message ContentChunk {
@@ -214,6 +392,9 @@ message EnrollRequest {
   string os = 7;
   string agent_version = 8;
   string tpm_ek = 9;
+  string schema_version = 10;
+  repeated string agent_capabilities = 11;
+  string device_type = 12;
 }
 
 message EnrollResponse {
@@ -229,6 +410,7 @@ message CollectFileSpec {
   int64 max_bytes_each = 2;
   int64 tail_bytes = 3;
   int64 max_total_bytes = 4;
+  int64 max_upload_bytes_per_second = 5;
 }
 
 message UploadChunk {

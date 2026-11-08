@@ -11,6 +11,10 @@
 // Replace it with the agent team's real file as soon as that is available, and
 // regenerate.
 //
+// Last re-verified 2026-11-08 against agent zip 4 (proto commits 88b3709,
+// 2240a16, e1d3d6b): inventory, audit events, resume offset, command
+// attribution, software deploy v2 fields. Normalized descriptors are identical.
+//
 // Command signatures (Command.signature) are not described by this file: they
 // are Ed25519 over commandsign.CanonicalBytes - see internal/signing.
 // =====================================================================================

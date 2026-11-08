@@ -21,9 +21,11 @@ func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-// Heartbeat records one agent_heartbeats row and bumps agents.last_heartbeat_at /
-// devices.last_seen_at. No CPU/RAM/disk telemetry is in this contract's Heartbeat,
-// so those columns stay NULL.
+// Heartbeat records one agent_heartbeats row, bumps agents.last_heartbeat_at /
+// devices.last_seen_at, and keeps the device's hostname and the agent's
+// version, schema version, capabilities and device type current. No
+// CPU/RAM/disk telemetry is in this contract's Heartbeat, so those columns
+// stay NULL.
 func (s *Store) Heartbeat(ctx context.Context, known *identity.Known, hb *aegisonev1.Heartbeat) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -38,10 +40,28 @@ func (s *Store) Heartbeat(ctx context.Context, known *identity.Known, hb *aegiso
 	); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE agents SET last_heartbeat_at = now() WHERE id = $1`, known.AgentUUID); err != nil {
+	caps := make([]string, 0, len(hb.GetAgentCapabilities()))
+	for _, c := range hb.GetAgentCapabilities() {
+		if c = clipN(c, 100); c != "" && len(caps) < 100 {
+			caps = append(caps, c)
+		}
+	}
+	// Older agents send no schema_version / capabilities / device_type; keep
+	// what is stored rather than blanking it.
+	if _, err := tx.Exec(ctx, `
+		UPDATE agents SET last_heartbeat_at = now(),
+		    agent_version      = coalesce($2, agent_version),
+		    schema_version     = coalesce($3, schema_version),
+		    agent_capabilities = CASE WHEN cardinality($4::text[]) > 0 THEN $4 ELSE agent_capabilities END,
+		    device_type        = coalesce($5, device_type)
+		WHERE id = $1`,
+		known.AgentUUID, nullableN(hb.GetAgentVersion(), 100), nullableN(hb.GetSchemaVersion(), 100), caps,
+		nullableN(hb.GetDeviceType(), 100)); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE devices SET last_seen_at = now() WHERE id = $1`, known.DeviceUUID); err != nil {
+	// Hostname is a mutable attribute (renames happen), never an identity key.
+	if _, err := tx.Exec(ctx, `UPDATE devices SET last_seen_at = now(), hostname = coalesce($2, hostname) WHERE id = $1`,
+		known.DeviceUUID, nullableN(hb.GetHostname(), 255)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

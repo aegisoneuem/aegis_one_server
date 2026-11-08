@@ -11,6 +11,10 @@
 // Replace it with the agent team's real file as soon as that is available, and
 // regenerate.
 //
+// Last re-verified 2026-11-08 against agent zip 4 (proto commits 88b3709,
+// 2240a16, e1d3d6b): inventory, audit events, resume offset, command
+// attribution, software deploy v2 fields. Normalized descriptors are identical.
+//
 // Command signatures (Command.signature) are not described by this file: they
 // are Ed25519 over commandsign.CanonicalBytes - see internal/signing.
 // =====================================================================================
@@ -103,14 +107,17 @@ func (ActionPhase) EnumDescriptor() ([]byte, []int) {
 }
 
 type Heartbeat struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DeviceId      string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	AgentVersion  string                 `protobuf:"bytes,2,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	Os            string                 `protobuf:"bytes,3,opt,name=os,proto3" json:"os,omitempty"`
-	Hostname      string                 `protobuf:"bytes,4,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	Timestamp     int64                  `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	DeviceId          string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	AgentVersion      string                 `protobuf:"bytes,2,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	Os                string                 `protobuf:"bytes,3,opt,name=os,proto3" json:"os,omitempty"`
+	Hostname          string                 `protobuf:"bytes,4,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	Timestamp         int64                  `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	SchemaVersion     string                 `protobuf:"bytes,6,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	AgentCapabilities []string               `protobuf:"bytes,7,rep,name=agent_capabilities,json=agentCapabilities,proto3" json:"agent_capabilities,omitempty"`
+	DeviceType        string                 `protobuf:"bytes,8,opt,name=device_type,json=deviceType,proto3" json:"device_type,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -176,6 +183,27 @@ func (x *Heartbeat) GetTimestamp() int64 {
 		return x.Timestamp
 	}
 	return 0
+}
+
+func (x *Heartbeat) GetSchemaVersion() string {
+	if x != nil {
+		return x.SchemaVersion
+	}
+	return ""
+}
+
+func (x *Heartbeat) GetAgentCapabilities() []string {
+	if x != nil {
+		return x.AgentCapabilities
+	}
+	return nil
+}
+
+func (x *Heartbeat) GetDeviceType() string {
+	if x != nil {
+		return x.DeviceType
+	}
+	return ""
 }
 
 type CommandResult struct {
@@ -244,6 +272,9 @@ type Command struct {
 	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
 	Payload       []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
 	Signature     []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
+	Actor         string                 `protobuf:"bytes,5,opt,name=actor,proto3" json:"actor,omitempty"`
+	Source        string                 `protobuf:"bytes,6,opt,name=source,proto3" json:"source,omitempty"`
+	IssuedAt      int64                  `protobuf:"varint,7,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -304,6 +335,27 @@ func (x *Command) GetSignature() []byte {
 		return x.Signature
 	}
 	return nil
+}
+
+func (x *Command) GetActor() string {
+	if x != nil {
+		return x.Actor
+	}
+	return ""
+}
+
+func (x *Command) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *Command) GetIssuedAt() int64 {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return 0
 }
 
 type MissingUpdate struct {
@@ -715,26 +767,34 @@ func (x *RebootSpec) GetMessage() string {
 }
 
 type SoftwareDeploySpec struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	PackageId        string                 `protobuf:"bytes,1,opt,name=package_id,json=packageId,proto3" json:"package_id,omitempty"`
-	Name             string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Version          string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
-	Action           string                 `protobuf:"bytes,4,opt,name=action,proto3" json:"action,omitempty"`
-	InstallerType    string                 `protobuf:"bytes,5,opt,name=installer_type,json=installerType,proto3" json:"installer_type,omitempty"`
-	FilePath         string                 `protobuf:"bytes,6,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
-	ExpectedHash     string                 `protobuf:"bytes,7,opt,name=expected_hash,json=expectedHash,proto3" json:"expected_hash,omitempty"`
-	HashAlgorithm    string                 `protobuf:"bytes,8,opt,name=hash_algorithm,json=hashAlgorithm,proto3" json:"hash_algorithm,omitempty"`
-	SilentArgs       string                 `protobuf:"bytes,9,opt,name=silent_args,json=silentArgs,proto3" json:"silent_args,omitempty"`
-	SuccessExitCodes []int32                `protobuf:"varint,10,rep,packed,name=success_exit_codes,json=successExitCodes,proto3" json:"success_exit_codes,omitempty"`
-	TimeoutSeconds   int32                  `protobuf:"varint,11,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
-	ContentId        string                 `protobuf:"bytes,12,opt,name=content_id,json=contentId,proto3" json:"content_id,omitempty"`
-	RequireSignature bool                   `protobuf:"varint,13,opt,name=require_signature,json=requireSignature,proto3" json:"require_signature,omitempty"`
-	ProductCode      string                 `protobuf:"bytes,14,opt,name=product_code,json=productCode,proto3" json:"product_code,omitempty"`
-	UninstallKey     string                 `protobuf:"bytes,15,opt,name=uninstall_key,json=uninstallKey,proto3" json:"uninstall_key,omitempty"`
-	DisplayName      string                 `protobuf:"bytes,16,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	Parameters       map[string]string      `protobuf:"bytes,17,rep,name=parameters,proto3" json:"parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state                  protoimpl.MessageState   `protogen:"open.v1"`
+	PackageId              string                   `protobuf:"bytes,1,opt,name=package_id,json=packageId,proto3" json:"package_id,omitempty"`
+	Name                   string                   `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Version                string                   `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
+	Action                 string                   `protobuf:"bytes,4,opt,name=action,proto3" json:"action,omitempty"`
+	InstallerType          string                   `protobuf:"bytes,5,opt,name=installer_type,json=installerType,proto3" json:"installer_type,omitempty"`
+	FilePath               string                   `protobuf:"bytes,6,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	ExpectedHash           string                   `protobuf:"bytes,7,opt,name=expected_hash,json=expectedHash,proto3" json:"expected_hash,omitempty"`
+	HashAlgorithm          string                   `protobuf:"bytes,8,opt,name=hash_algorithm,json=hashAlgorithm,proto3" json:"hash_algorithm,omitempty"`
+	SilentArgs             string                   `protobuf:"bytes,9,opt,name=silent_args,json=silentArgs,proto3" json:"silent_args,omitempty"`
+	SuccessExitCodes       []int32                  `protobuf:"varint,10,rep,packed,name=success_exit_codes,json=successExitCodes,proto3" json:"success_exit_codes,omitempty"`
+	TimeoutSeconds         int32                    `protobuf:"varint,11,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	ContentId              string                   `protobuf:"bytes,12,opt,name=content_id,json=contentId,proto3" json:"content_id,omitempty"`
+	RequireAcPower         bool                     `protobuf:"varint,25,opt,name=require_ac_power,json=requireAcPower,proto3" json:"require_ac_power,omitempty"`
+	RequireSignature       bool                     `protobuf:"varint,13,opt,name=require_signature,json=requireSignature,proto3" json:"require_signature,omitempty"`
+	ProductCode            string                   `protobuf:"bytes,14,opt,name=product_code,json=productCode,proto3" json:"product_code,omitempty"`
+	UninstallKey           string                   `protobuf:"bytes,15,opt,name=uninstall_key,json=uninstallKey,proto3" json:"uninstall_key,omitempty"`
+	DisplayName            string                   `protobuf:"bytes,16,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Parameters             map[string]string        `protobuf:"bytes,17,rep,name=parameters,proto3" json:"parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Execution              *SoftwareExecution       `protobuf:"bytes,18,opt,name=execution,proto3" json:"execution,omitempty"`
+	SecureParameters       map[string]string        `protobuf:"bytes,19,rep,name=secure_parameters,json=secureParameters,proto3" json:"secure_parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Bundle                 *SoftwareBundle          `protobuf:"bytes,20,opt,name=bundle,proto3" json:"bundle,omitempty"`
+	Steps                  *SoftwareDeploymentSteps `protobuf:"bytes,21,opt,name=steps,proto3" json:"steps,omitempty"`
+	Detection              *SoftwareDetection       `protobuf:"bytes,22,opt,name=detection,proto3" json:"detection,omitempty"`
+	MaxFetchBytesPerSecond int64                    `protobuf:"varint,23,opt,name=max_fetch_bytes_per_second,json=maxFetchBytesPerSecond,proto3" json:"max_fetch_bytes_per_second,omitempty"`
+	CaptureScriptContent   bool                     `protobuf:"varint,24,opt,name=capture_script_content,json=captureScriptContent,proto3" json:"capture_script_content,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *SoftwareDeploySpec) Reset() {
@@ -851,6 +911,13 @@ func (x *SoftwareDeploySpec) GetContentId() string {
 	return ""
 }
 
+func (x *SoftwareDeploySpec) GetRequireAcPower() bool {
+	if x != nil {
+		return x.RequireAcPower
+	}
+	return false
+}
+
 func (x *SoftwareDeploySpec) GetRequireSignature() bool {
 	if x != nil {
 		return x.RequireSignature
@@ -886,27 +953,534 @@ func (x *SoftwareDeploySpec) GetParameters() map[string]string {
 	return nil
 }
 
-type ActionStatus struct {
+func (x *SoftwareDeploySpec) GetExecution() *SoftwareExecution {
+	if x != nil {
+		return x.Execution
+	}
+	return nil
+}
+
+func (x *SoftwareDeploySpec) GetSecureParameters() map[string]string {
+	if x != nil {
+		return x.SecureParameters
+	}
+	return nil
+}
+
+func (x *SoftwareDeploySpec) GetBundle() *SoftwareBundle {
+	if x != nil {
+		return x.Bundle
+	}
+	return nil
+}
+
+func (x *SoftwareDeploySpec) GetSteps() *SoftwareDeploymentSteps {
+	if x != nil {
+		return x.Steps
+	}
+	return nil
+}
+
+func (x *SoftwareDeploySpec) GetDetection() *SoftwareDetection {
+	if x != nil {
+		return x.Detection
+	}
+	return nil
+}
+
+func (x *SoftwareDeploySpec) GetMaxFetchBytesPerSecond() int64 {
+	if x != nil {
+		return x.MaxFetchBytesPerSecond
+	}
+	return 0
+}
+
+func (x *SoftwareDeploySpec) GetCaptureScriptContent() bool {
+	if x != nil {
+		return x.CaptureScriptContent
+	}
+	return false
+}
+
+type SoftwareBundle struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EntryPoint    string                 `protobuf:"bytes,1,opt,name=entry_point,json=entryPoint,proto3" json:"entry_point,omitempty"`
+	Command       string                 `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`
+	Destination   string                 `protobuf:"bytes,3,opt,name=destination,proto3" json:"destination,omitempty"`
+	Cleanup       string                 `protobuf:"bytes,4,opt,name=cleanup,proto3" json:"cleanup,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SoftwareBundle) Reset() {
+	*x = SoftwareBundle{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SoftwareBundle) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SoftwareBundle) ProtoMessage() {}
+
+func (x *SoftwareBundle) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SoftwareBundle.ProtoReflect.Descriptor instead.
+func (*SoftwareBundle) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SoftwareBundle) GetEntryPoint() string {
+	if x != nil {
+		return x.EntryPoint
+	}
+	return ""
+}
+
+func (x *SoftwareBundle) GetCommand() string {
+	if x != nil {
+		return x.Command
+	}
+	return ""
+}
+
+func (x *SoftwareBundle) GetDestination() string {
+	if x != nil {
+		return x.Destination
+	}
+	return ""
+}
+
+func (x *SoftwareBundle) GetCleanup() string {
+	if x != nil {
+		return x.Cleanup
+	}
+	return ""
+}
+
+type SoftwareDeploymentSteps struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Before        []*SoftwareCommandStep `protobuf:"bytes,1,rep,name=before,proto3" json:"before,omitempty"`
+	After         []*SoftwareCommandStep `protobuf:"bytes,2,rep,name=after,proto3" json:"after,omitempty"`
+	Rollback      []*SoftwareCommandStep `protobuf:"bytes,3,rep,name=rollback,proto3" json:"rollback,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SoftwareDeploymentSteps) Reset() {
+	*x = SoftwareDeploymentSteps{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SoftwareDeploymentSteps) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SoftwareDeploymentSteps) ProtoMessage() {}
+
+func (x *SoftwareDeploymentSteps) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SoftwareDeploymentSteps.ProtoReflect.Descriptor instead.
+func (*SoftwareDeploymentSteps) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SoftwareDeploymentSteps) GetBefore() []*SoftwareCommandStep {
+	if x != nil {
+		return x.Before
+	}
+	return nil
+}
+
+func (x *SoftwareDeploymentSteps) GetAfter() []*SoftwareCommandStep {
+	if x != nil {
+		return x.After
+	}
+	return nil
+}
+
+func (x *SoftwareDeploymentSteps) GetRollback() []*SoftwareCommandStep {
+	if x != nil {
+		return x.Rollback
+	}
+	return nil
+}
+
+type SoftwareCommandStep struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Name                string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Command             string                 `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`
+	Arguments           string                 `protobuf:"bytes,3,opt,name=arguments,proto3" json:"arguments,omitempty"`
+	TimeoutSeconds      int32                  `protobuf:"varint,4,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	SuccessExitCodes    []int32                `protobuf:"varint,5,rep,packed,name=success_exit_codes,json=successExitCodes,proto3" json:"success_exit_codes,omitempty"`
+	UseSecureParameters bool                   `protobuf:"varint,6,opt,name=use_secure_parameters,json=useSecureParameters,proto3" json:"use_secure_parameters,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *SoftwareCommandStep) Reset() {
+	*x = SoftwareCommandStep{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SoftwareCommandStep) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SoftwareCommandStep) ProtoMessage() {}
+
+func (x *SoftwareCommandStep) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SoftwareCommandStep.ProtoReflect.Descriptor instead.
+func (*SoftwareCommandStep) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *SoftwareCommandStep) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SoftwareCommandStep) GetCommand() string {
+	if x != nil {
+		return x.Command
+	}
+	return ""
+}
+
+func (x *SoftwareCommandStep) GetArguments() string {
+	if x != nil {
+		return x.Arguments
+	}
+	return ""
+}
+
+func (x *SoftwareCommandStep) GetTimeoutSeconds() int32 {
+	if x != nil {
+		return x.TimeoutSeconds
+	}
+	return 0
+}
+
+func (x *SoftwareCommandStep) GetSuccessExitCodes() []int32 {
+	if x != nil {
+		return x.SuccessExitCodes
+	}
+	return nil
+}
+
+func (x *SoftwareCommandStep) GetUseSecureParameters() bool {
+	if x != nil {
+		return x.UseSecureParameters
+	}
+	return false
+}
+
+type SoftwareDetection struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Mode          string                   `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`
+	Rules         []*SoftwareDetectionRule `protobuf:"bytes,2,rep,name=rules,proto3" json:"rules,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SoftwareDetection) Reset() {
+	*x = SoftwareDetection{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SoftwareDetection) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SoftwareDetection) ProtoMessage() {}
+
+func (x *SoftwareDetection) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SoftwareDetection.ProtoReflect.Descriptor instead.
+func (*SoftwareDetection) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *SoftwareDetection) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *SoftwareDetection) GetRules() []*SoftwareDetectionRule {
+	if x != nil {
+		return x.Rules
+	}
+	return nil
+}
+
+type SoftwareDetectionRule struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
-	ActionId       string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
-	ActionType     string                 `protobuf:"bytes,2,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`
-	DeviceId       string                 `protobuf:"bytes,3,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	Phase          ActionPhase            `protobuf:"varint,4,opt,name=phase,proto3,enum=aegisone.v1.ActionPhase" json:"phase,omitempty"`
-	ExitCode       int32                  `protobuf:"varint,5,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	RebootRequired bool                   `protobuf:"varint,6,opt,name=reboot_required,json=rebootRequired,proto3" json:"reboot_required,omitempty"`
-	Reason         string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
-	Detail         string                 `protobuf:"bytes,8,opt,name=detail,proto3" json:"detail,omitempty"`
-	ProgressPct    int32                  `protobuf:"varint,9,opt,name=progress_pct,json=progressPct,proto3" json:"progress_pct,omitempty"`
-	StartedAt      int64                  `protobuf:"varint,10,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	FinishedAt     int64                  `protobuf:"varint,11,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
-	Kb             string                 `protobuf:"bytes,12,opt,name=kb,proto3" json:"kb,omitempty"`
+	Kind           string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	Path           string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	MinimumVersion string                 `protobuf:"bytes,3,opt,name=minimum_version,json=minimumVersion,proto3" json:"minimum_version,omitempty"`
+	Hive           string                 `protobuf:"bytes,4,opt,name=hive,proto3" json:"hive,omitempty"`
+	Key            string                 `protobuf:"bytes,5,opt,name=key,proto3" json:"key,omitempty"`
+	View           string                 `protobuf:"bytes,6,opt,name=view,proto3" json:"view,omitempty"`
+	ValueName      string                 `protobuf:"bytes,7,opt,name=value_name,json=valueName,proto3" json:"value_name,omitempty"`
+	ValueType      string                 `protobuf:"bytes,8,opt,name=value_type,json=valueType,proto3" json:"value_type,omitempty"`
+	ExpectedValue  string                 `protobuf:"bytes,9,opt,name=expected_value,json=expectedValue,proto3" json:"expected_value,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
+func (x *SoftwareDetectionRule) Reset() {
+	*x = SoftwareDetectionRule{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SoftwareDetectionRule) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SoftwareDetectionRule) ProtoMessage() {}
+
+func (x *SoftwareDetectionRule) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SoftwareDetectionRule.ProtoReflect.Descriptor instead.
+func (*SoftwareDetectionRule) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *SoftwareDetectionRule) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *SoftwareDetectionRule) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *SoftwareDetectionRule) GetMinimumVersion() string {
+	if x != nil {
+		return x.MinimumVersion
+	}
+	return ""
+}
+
+func (x *SoftwareDetectionRule) GetHive() string {
+	if x != nil {
+		return x.Hive
+	}
+	return ""
+}
+
+func (x *SoftwareDetectionRule) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *SoftwareDetectionRule) GetView() string {
+	if x != nil {
+		return x.View
+	}
+	return ""
+}
+
+func (x *SoftwareDetectionRule) GetValueName() string {
+	if x != nil {
+		return x.ValueName
+	}
+	return ""
+}
+
+func (x *SoftwareDetectionRule) GetValueType() string {
+	if x != nil {
+		return x.ValueType
+	}
+	return ""
+}
+
+func (x *SoftwareDetectionRule) GetExpectedValue() string {
+	if x != nil {
+		return x.ExpectedValue
+	}
+	return ""
+}
+
+type SoftwareExecution struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Mode           string                 `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`
+	SessionId      *uint32                `protobuf:"varint,2,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
+	Username       string                 `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`
+	Domain         string                 `protobuf:"bytes,4,opt,name=domain,proto3" json:"domain,omitempty"`
+	PasswordUtf8   []byte                 `protobuf:"bytes,5,opt,name=password_utf8,json=passwordUtf8,proto3" json:"password_utf8,omitempty"`
+	DetectionScope string                 `protobuf:"bytes,6,opt,name=detection_scope,json=detectionScope,proto3" json:"detection_scope,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *SoftwareExecution) Reset() {
+	*x = SoftwareExecution{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SoftwareExecution) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SoftwareExecution) ProtoMessage() {}
+
+func (x *SoftwareExecution) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SoftwareExecution.ProtoReflect.Descriptor instead.
+func (*SoftwareExecution) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *SoftwareExecution) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *SoftwareExecution) GetSessionId() uint32 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
+	}
+	return 0
+}
+
+func (x *SoftwareExecution) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *SoftwareExecution) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *SoftwareExecution) GetPasswordUtf8() []byte {
+	if x != nil {
+		return x.PasswordUtf8
+	}
+	return nil
+}
+
+func (x *SoftwareExecution) GetDetectionScope() string {
+	if x != nil {
+		return x.DetectionScope
+	}
+	return ""
+}
+
+type ActionStatus struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	ActionId         string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
+	ActionType       string                 `protobuf:"bytes,2,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`
+	DeviceId         string                 `protobuf:"bytes,3,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	Phase            ActionPhase            `protobuf:"varint,4,opt,name=phase,proto3,enum=aegisone.v1.ActionPhase" json:"phase,omitempty"`
+	ExitCode         int32                  `protobuf:"varint,5,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	RebootRequired   bool                   `protobuf:"varint,6,opt,name=reboot_required,json=rebootRequired,proto3" json:"reboot_required,omitempty"`
+	Reason           string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	Detail           string                 `protobuf:"bytes,8,opt,name=detail,proto3" json:"detail,omitempty"`
+	ProgressPct      int32                  `protobuf:"varint,9,opt,name=progress_pct,json=progressPct,proto3" json:"progress_pct,omitempty"`
+	StartedAt        int64                  `protobuf:"varint,10,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	FinishedAt       int64                  `protobuf:"varint,11,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	Kb               string                 `protobuf:"bytes,12,opt,name=kb,proto3" json:"kb,omitempty"`
+	PackageDirectory string                 `protobuf:"bytes,13,opt,name=package_directory,json=packageDirectory,proto3" json:"package_directory,omitempty"`
+	PackageCleanup   string                 `protobuf:"bytes,14,opt,name=package_cleanup,json=packageCleanup,proto3" json:"package_cleanup,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
 func (x *ActionStatus) Reset() {
 	*x = ActionStatus{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[8]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -918,7 +1492,7 @@ func (x *ActionStatus) String() string {
 func (*ActionStatus) ProtoMessage() {}
 
 func (x *ActionStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[8]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -931,7 +1505,7 @@ func (x *ActionStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActionStatus.ProtoReflect.Descriptor instead.
 func (*ActionStatus) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ActionStatus) GetActionId() string {
@@ -1018,6 +1592,20 @@ func (x *ActionStatus) GetKb() string {
 	return ""
 }
 
+func (x *ActionStatus) GetPackageDirectory() string {
+	if x != nil {
+		return x.PackageDirectory
+	}
+	return ""
+}
+
+func (x *ActionStatus) GetPackageCleanup() string {
+	if x != nil {
+		return x.PackageCleanup
+	}
+	return ""
+}
+
 type DeviceStateReport struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	DeviceId             string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
@@ -1029,13 +1617,15 @@ type DeviceStateReport struct {
 	RebootPending        bool                   `protobuf:"varint,8,opt,name=reboot_pending,json=rebootPending,proto3" json:"reboot_pending,omitempty"`
 	RebootPendingKbs     []string               `protobuf:"bytes,9,rep,name=reboot_pending_kbs,json=rebootPendingKbs,proto3" json:"reboot_pending_kbs,omitempty"`
 	RebootPendingSources []string               `protobuf:"bytes,10,rep,name=reboot_pending_sources,json=rebootPendingSources,proto3" json:"reboot_pending_sources,omitempty"`
+	InstalledApps        []*InstalledApp        `protobuf:"bytes,11,rep,name=installed_apps,json=installedApps,proto3" json:"installed_apps,omitempty"`
+	InstalledKbs         []string               `protobuf:"bytes,12,rep,name=installed_kbs,json=installedKbs,proto3" json:"installed_kbs,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
 
 func (x *DeviceStateReport) Reset() {
 	*x = DeviceStateReport{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[9]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1047,7 +1637,7 @@ func (x *DeviceStateReport) String() string {
 func (*DeviceStateReport) ProtoMessage() {}
 
 func (x *DeviceStateReport) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[9]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1060,7 +1650,7 @@ func (x *DeviceStateReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeviceStateReport.ProtoReflect.Descriptor instead.
 func (*DeviceStateReport) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{9}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DeviceStateReport) GetDeviceId() string {
@@ -1126,6 +1716,120 @@ func (x *DeviceStateReport) GetRebootPendingSources() []string {
 	return nil
 }
 
+func (x *DeviceStateReport) GetInstalledApps() []*InstalledApp {
+	if x != nil {
+		return x.InstalledApps
+	}
+	return nil
+}
+
+func (x *DeviceStateReport) GetInstalledKbs() []string {
+	if x != nil {
+		return x.InstalledKbs
+	}
+	return nil
+}
+
+type InstalledApp struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	DisplayName     string                 `protobuf:"bytes,1,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	DisplayVersion  string                 `protobuf:"bytes,2,opt,name=display_version,json=displayVersion,proto3" json:"display_version,omitempty"`
+	Publisher       string                 `protobuf:"bytes,3,opt,name=publisher,proto3" json:"publisher,omitempty"`
+	InstallDate     string                 `protobuf:"bytes,4,opt,name=install_date,json=installDate,proto3" json:"install_date,omitempty"`
+	UninstallKey    string                 `protobuf:"bytes,5,opt,name=uninstall_key,json=uninstallKey,proto3" json:"uninstall_key,omitempty"`
+	Hive            string                 `protobuf:"bytes,6,opt,name=hive,proto3" json:"hive,omitempty"`
+	EstimatedSizeKb int64                  `protobuf:"varint,7,opt,name=estimated_size_kb,json=estimatedSizeKb,proto3" json:"estimated_size_kb,omitempty"`
+	UninstallString string                 `protobuf:"bytes,8,opt,name=uninstall_string,json=uninstallString,proto3" json:"uninstall_string,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *InstalledApp) Reset() {
+	*x = InstalledApp{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstalledApp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstalledApp) ProtoMessage() {}
+
+func (x *InstalledApp) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstalledApp.ProtoReflect.Descriptor instead.
+func (*InstalledApp) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *InstalledApp) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *InstalledApp) GetDisplayVersion() string {
+	if x != nil {
+		return x.DisplayVersion
+	}
+	return ""
+}
+
+func (x *InstalledApp) GetPublisher() string {
+	if x != nil {
+		return x.Publisher
+	}
+	return ""
+}
+
+func (x *InstalledApp) GetInstallDate() string {
+	if x != nil {
+		return x.InstallDate
+	}
+	return ""
+}
+
+func (x *InstalledApp) GetUninstallKey() string {
+	if x != nil {
+		return x.UninstallKey
+	}
+	return ""
+}
+
+func (x *InstalledApp) GetHive() string {
+	if x != nil {
+		return x.Hive
+	}
+	return ""
+}
+
+func (x *InstalledApp) GetEstimatedSizeKb() int64 {
+	if x != nil {
+		return x.EstimatedSizeKb
+	}
+	return 0
+}
+
+func (x *InstalledApp) GetUninstallString() string {
+	if x != nil {
+		return x.UninstallString
+	}
+	return ""
+}
+
 type CacheFullReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DeviceId      string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
@@ -1140,7 +1844,7 @@ type CacheFullReport struct {
 
 func (x *CacheFullReport) Reset() {
 	*x = CacheFullReport{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[10]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1152,7 +1856,7 @@ func (x *CacheFullReport) String() string {
 func (*CacheFullReport) ProtoMessage() {}
 
 func (x *CacheFullReport) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[10]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1165,7 +1869,7 @@ func (x *CacheFullReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CacheFullReport.ProtoReflect.Descriptor instead.
 func (*CacheFullReport) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CacheFullReport) GetDeviceId() string {
@@ -1210,6 +1914,834 @@ func (x *CacheFullReport) GetMessage() string {
 	return ""
 }
 
+type FullInventoryReport struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DeviceId      string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	CollectedAt   int64                  `protobuf:"varint,2,opt,name=collected_at,json=collectedAt,proto3" json:"collected_at,omitempty"`
+	Trigger       string                 `protobuf:"bytes,3,opt,name=trigger,proto3" json:"trigger,omitempty"`
+	Hardware      *HardwareInventory     `protobuf:"bytes,4,opt,name=hardware,proto3" json:"hardware,omitempty"`
+	InstalledApps []*InstalledApp        `protobuf:"bytes,5,rep,name=installed_apps,json=installedApps,proto3" json:"installed_apps,omitempty"`
+	Drivers       []*DriverInventory     `protobuf:"bytes,6,rep,name=drivers,proto3" json:"drivers,omitempty"`
+	InstalledAppx []*InstalledAppx       `protobuf:"bytes,7,rep,name=installed_appx,json=installedAppx,proto3" json:"installed_appx,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FullInventoryReport) Reset() {
+	*x = FullInventoryReport{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FullInventoryReport) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FullInventoryReport) ProtoMessage() {}
+
+func (x *FullInventoryReport) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FullInventoryReport.ProtoReflect.Descriptor instead.
+func (*FullInventoryReport) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *FullInventoryReport) GetDeviceId() string {
+	if x != nil {
+		return x.DeviceId
+	}
+	return ""
+}
+
+func (x *FullInventoryReport) GetCollectedAt() int64 {
+	if x != nil {
+		return x.CollectedAt
+	}
+	return 0
+}
+
+func (x *FullInventoryReport) GetTrigger() string {
+	if x != nil {
+		return x.Trigger
+	}
+	return ""
+}
+
+func (x *FullInventoryReport) GetHardware() *HardwareInventory {
+	if x != nil {
+		return x.Hardware
+	}
+	return nil
+}
+
+func (x *FullInventoryReport) GetInstalledApps() []*InstalledApp {
+	if x != nil {
+		return x.InstalledApps
+	}
+	return nil
+}
+
+func (x *FullInventoryReport) GetDrivers() []*DriverInventory {
+	if x != nil {
+		return x.Drivers
+	}
+	return nil
+}
+
+func (x *FullInventoryReport) GetInstalledAppx() []*InstalledAppx {
+	if x != nil {
+		return x.InstalledAppx
+	}
+	return nil
+}
+
+type InstalledAppx struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	DisplayName       string                 `protobuf:"bytes,1,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	PackageFullName   string                 `protobuf:"bytes,2,opt,name=package_full_name,json=packageFullName,proto3" json:"package_full_name,omitempty"`
+	PackageFamilyName string                 `protobuf:"bytes,3,opt,name=package_family_name,json=packageFamilyName,proto3" json:"package_family_name,omitempty"`
+	Name              string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
+	Version           string                 `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`
+	Architecture      string                 `protobuf:"bytes,6,opt,name=architecture,proto3" json:"architecture,omitempty"`
+	PublisherId       string                 `protobuf:"bytes,7,opt,name=publisher_id,json=publisherId,proto3" json:"publisher_id,omitempty"`
+	InstallLocation   string                 `protobuf:"bytes,8,opt,name=install_location,json=installLocation,proto3" json:"install_location,omitempty"`
+	Origin            string                 `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *InstalledAppx) Reset() {
+	*x = InstalledAppx{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstalledAppx) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstalledAppx) ProtoMessage() {}
+
+func (x *InstalledAppx) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstalledAppx.ProtoReflect.Descriptor instead.
+func (*InstalledAppx) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *InstalledAppx) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *InstalledAppx) GetPackageFullName() string {
+	if x != nil {
+		return x.PackageFullName
+	}
+	return ""
+}
+
+func (x *InstalledAppx) GetPackageFamilyName() string {
+	if x != nil {
+		return x.PackageFamilyName
+	}
+	return ""
+}
+
+func (x *InstalledAppx) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *InstalledAppx) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *InstalledAppx) GetArchitecture() string {
+	if x != nil {
+		return x.Architecture
+	}
+	return ""
+}
+
+func (x *InstalledAppx) GetPublisherId() string {
+	if x != nil {
+		return x.PublisherId
+	}
+	return ""
+}
+
+func (x *InstalledAppx) GetInstallLocation() string {
+	if x != nil {
+		return x.InstallLocation
+	}
+	return ""
+}
+
+func (x *InstalledAppx) GetOrigin() string {
+	if x != nil {
+		return x.Origin
+	}
+	return ""
+}
+
+type DriverInventory struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DeviceName    string                 `protobuf:"bytes,1,opt,name=device_name,json=deviceName,proto3" json:"device_name,omitempty"`
+	DeviceClass   string                 `protobuf:"bytes,2,opt,name=device_class,json=deviceClass,proto3" json:"device_class,omitempty"`
+	DriverVersion string                 `protobuf:"bytes,3,opt,name=driver_version,json=driverVersion,proto3" json:"driver_version,omitempty"`
+	DriverDate    string                 `protobuf:"bytes,4,opt,name=driver_date,json=driverDate,proto3" json:"driver_date,omitempty"`
+	ProviderName  string                 `protobuf:"bytes,5,opt,name=provider_name,json=providerName,proto3" json:"provider_name,omitempty"`
+	HardwareId    string                 `protobuf:"bytes,6,opt,name=hardware_id,json=hardwareId,proto3" json:"hardware_id,omitempty"`
+	InfName       string                 `protobuf:"bytes,7,opt,name=inf_name,json=infName,proto3" json:"inf_name,omitempty"`
+	Manufacturer  string                 `protobuf:"bytes,8,opt,name=manufacturer,proto3" json:"manufacturer,omitempty"`
+	IsSigned      bool                   `protobuf:"varint,9,opt,name=is_signed,json=isSigned,proto3" json:"is_signed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DriverInventory) Reset() {
+	*x = DriverInventory{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DriverInventory) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DriverInventory) ProtoMessage() {}
+
+func (x *DriverInventory) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DriverInventory.ProtoReflect.Descriptor instead.
+func (*DriverInventory) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *DriverInventory) GetDeviceName() string {
+	if x != nil {
+		return x.DeviceName
+	}
+	return ""
+}
+
+func (x *DriverInventory) GetDeviceClass() string {
+	if x != nil {
+		return x.DeviceClass
+	}
+	return ""
+}
+
+func (x *DriverInventory) GetDriverVersion() string {
+	if x != nil {
+		return x.DriverVersion
+	}
+	return ""
+}
+
+func (x *DriverInventory) GetDriverDate() string {
+	if x != nil {
+		return x.DriverDate
+	}
+	return ""
+}
+
+func (x *DriverInventory) GetProviderName() string {
+	if x != nil {
+		return x.ProviderName
+	}
+	return ""
+}
+
+func (x *DriverInventory) GetHardwareId() string {
+	if x != nil {
+		return x.HardwareId
+	}
+	return ""
+}
+
+func (x *DriverInventory) GetInfName() string {
+	if x != nil {
+		return x.InfName
+	}
+	return ""
+}
+
+func (x *DriverInventory) GetManufacturer() string {
+	if x != nil {
+		return x.Manufacturer
+	}
+	return ""
+}
+
+func (x *DriverInventory) GetIsSigned() bool {
+	if x != nil {
+		return x.IsSigned
+	}
+	return false
+}
+
+type HardwareInventory struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	CpuVendor          string                 `protobuf:"bytes,1,opt,name=cpu_vendor,json=cpuVendor,proto3" json:"cpu_vendor,omitempty"`
+	CpuModel           string                 `protobuf:"bytes,2,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`
+	CpuPhysicalCores   int32                  `protobuf:"varint,3,opt,name=cpu_physical_cores,json=cpuPhysicalCores,proto3" json:"cpu_physical_cores,omitempty"`
+	CpuLogicalCores    int32                  `protobuf:"varint,4,opt,name=cpu_logical_cores,json=cpuLogicalCores,proto3" json:"cpu_logical_cores,omitempty"`
+	MemoryTotalBytes   int64                  `protobuf:"varint,5,opt,name=memory_total_bytes,json=memoryTotalBytes,proto3" json:"memory_total_bytes,omitempty"`
+	Disks              []*DiskInventory       `protobuf:"bytes,6,rep,name=disks,proto3" json:"disks,omitempty"`
+	Nics               []*NetworkInterface    `protobuf:"bytes,7,rep,name=nics,proto3" json:"nics,omitempty"`
+	BiosVendor         string                 `protobuf:"bytes,8,opt,name=bios_vendor,json=biosVendor,proto3" json:"bios_vendor,omitempty"`
+	BiosVersion        string                 `protobuf:"bytes,9,opt,name=bios_version,json=biosVersion,proto3" json:"bios_version,omitempty"`
+	BiosReleaseDate    string                 `protobuf:"bytes,10,opt,name=bios_release_date,json=biosReleaseDate,proto3" json:"bios_release_date,omitempty"`
+	SystemVendor       string                 `protobuf:"bytes,11,opt,name=system_vendor,json=systemVendor,proto3" json:"system_vendor,omitempty"`
+	SystemProduct      string                 `protobuf:"bytes,12,opt,name=system_product,json=systemProduct,proto3" json:"system_product,omitempty"`
+	SystemSerialNumber string                 `protobuf:"bytes,13,opt,name=system_serial_number,json=systemSerialNumber,proto3" json:"system_serial_number,omitempty"`
+	ChassisType        string                 `protobuf:"bytes,14,opt,name=chassis_type,json=chassisType,proto3" json:"chassis_type,omitempty"`
+	CpuMhz             int32                  `protobuf:"varint,15,opt,name=cpu_mhz,json=cpuMhz,proto3" json:"cpu_mhz,omitempty"`
+	CpuThreadsPerCore  int32                  `protobuf:"varint,16,opt,name=cpu_threads_per_core,json=cpuThreadsPerCore,proto3" json:"cpu_threads_per_core,omitempty"`
+	CpuArchitecture    string                 `protobuf:"bytes,17,opt,name=cpu_architecture,json=cpuArchitecture,proto3" json:"cpu_architecture,omitempty"`
+	OsProductName      string                 `protobuf:"bytes,18,opt,name=os_product_name,json=osProductName,proto3" json:"os_product_name,omitempty"`
+	OsDisplayVersion   string                 `protobuf:"bytes,19,opt,name=os_display_version,json=osDisplayVersion,proto3" json:"os_display_version,omitempty"`
+	OsBuild            string                 `protobuf:"bytes,20,opt,name=os_build,json=osBuild,proto3" json:"os_build,omitempty"`
+	OsServicePack      string                 `protobuf:"bytes,21,opt,name=os_service_pack,json=osServicePack,proto3" json:"os_service_pack,omitempty"`
+	SystemUuid         string                 `protobuf:"bytes,22,opt,name=system_uuid,json=systemUuid,proto3" json:"system_uuid,omitempty"`
+	Virtualization     string                 `protobuf:"bytes,23,opt,name=virtualization,proto3" json:"virtualization,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *HardwareInventory) Reset() {
+	*x = HardwareInventory{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HardwareInventory) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HardwareInventory) ProtoMessage() {}
+
+func (x *HardwareInventory) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HardwareInventory.ProtoReflect.Descriptor instead.
+func (*HardwareInventory) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *HardwareInventory) GetCpuVendor() string {
+	if x != nil {
+		return x.CpuVendor
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetCpuModel() string {
+	if x != nil {
+		return x.CpuModel
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetCpuPhysicalCores() int32 {
+	if x != nil {
+		return x.CpuPhysicalCores
+	}
+	return 0
+}
+
+func (x *HardwareInventory) GetCpuLogicalCores() int32 {
+	if x != nil {
+		return x.CpuLogicalCores
+	}
+	return 0
+}
+
+func (x *HardwareInventory) GetMemoryTotalBytes() int64 {
+	if x != nil {
+		return x.MemoryTotalBytes
+	}
+	return 0
+}
+
+func (x *HardwareInventory) GetDisks() []*DiskInventory {
+	if x != nil {
+		return x.Disks
+	}
+	return nil
+}
+
+func (x *HardwareInventory) GetNics() []*NetworkInterface {
+	if x != nil {
+		return x.Nics
+	}
+	return nil
+}
+
+func (x *HardwareInventory) GetBiosVendor() string {
+	if x != nil {
+		return x.BiosVendor
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetBiosVersion() string {
+	if x != nil {
+		return x.BiosVersion
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetBiosReleaseDate() string {
+	if x != nil {
+		return x.BiosReleaseDate
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetSystemVendor() string {
+	if x != nil {
+		return x.SystemVendor
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetSystemProduct() string {
+	if x != nil {
+		return x.SystemProduct
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetSystemSerialNumber() string {
+	if x != nil {
+		return x.SystemSerialNumber
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetChassisType() string {
+	if x != nil {
+		return x.ChassisType
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetCpuMhz() int32 {
+	if x != nil {
+		return x.CpuMhz
+	}
+	return 0
+}
+
+func (x *HardwareInventory) GetCpuThreadsPerCore() int32 {
+	if x != nil {
+		return x.CpuThreadsPerCore
+	}
+	return 0
+}
+
+func (x *HardwareInventory) GetCpuArchitecture() string {
+	if x != nil {
+		return x.CpuArchitecture
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetOsProductName() string {
+	if x != nil {
+		return x.OsProductName
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetOsDisplayVersion() string {
+	if x != nil {
+		return x.OsDisplayVersion
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetOsBuild() string {
+	if x != nil {
+		return x.OsBuild
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetOsServicePack() string {
+	if x != nil {
+		return x.OsServicePack
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetSystemUuid() string {
+	if x != nil {
+		return x.SystemUuid
+	}
+	return ""
+}
+
+func (x *HardwareInventory) GetVirtualization() string {
+	if x != nil {
+		return x.Virtualization
+	}
+	return ""
+}
+
+type DiskInventory struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MountPoint    string                 `protobuf:"bytes,1,opt,name=mount_point,json=mountPoint,proto3" json:"mount_point,omitempty"`
+	VolumeLabel   string                 `protobuf:"bytes,2,opt,name=volume_label,json=volumeLabel,proto3" json:"volume_label,omitempty"`
+	FileSystem    string                 `protobuf:"bytes,3,opt,name=file_system,json=fileSystem,proto3" json:"file_system,omitempty"`
+	TotalBytes    int64                  `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	FreeBytes     int64                  `protobuf:"varint,5,opt,name=free_bytes,json=freeBytes,proto3" json:"free_bytes,omitempty"`
+	DriveType     string                 `protobuf:"bytes,6,opt,name=drive_type,json=driveType,proto3" json:"drive_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiskInventory) Reset() {
+	*x = DiskInventory{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiskInventory) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiskInventory) ProtoMessage() {}
+
+func (x *DiskInventory) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiskInventory.ProtoReflect.Descriptor instead.
+func (*DiskInventory) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *DiskInventory) GetMountPoint() string {
+	if x != nil {
+		return x.MountPoint
+	}
+	return ""
+}
+
+func (x *DiskInventory) GetVolumeLabel() string {
+	if x != nil {
+		return x.VolumeLabel
+	}
+	return ""
+}
+
+func (x *DiskInventory) GetFileSystem() string {
+	if x != nil {
+		return x.FileSystem
+	}
+	return ""
+}
+
+func (x *DiskInventory) GetTotalBytes() int64 {
+	if x != nil {
+		return x.TotalBytes
+	}
+	return 0
+}
+
+func (x *DiskInventory) GetFreeBytes() int64 {
+	if x != nil {
+		return x.FreeBytes
+	}
+	return 0
+}
+
+func (x *DiskInventory) GetDriveType() string {
+	if x != nil {
+		return x.DriveType
+	}
+	return ""
+}
+
+type NetworkInterface struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	MacAddress    string                 `protobuf:"bytes,2,opt,name=mac_address,json=macAddress,proto3" json:"mac_address,omitempty"`
+	Ipv4Addresses []string               `protobuf:"bytes,3,rep,name=ipv4_addresses,json=ipv4Addresses,proto3" json:"ipv4_addresses,omitempty"`
+	Ipv6Addresses []string               `protobuf:"bytes,4,rep,name=ipv6_addresses,json=ipv6Addresses,proto3" json:"ipv6_addresses,omitempty"`
+	LinkSpeedBps  int64                  `protobuf:"varint,5,opt,name=link_speed_bps,json=linkSpeedBps,proto3" json:"link_speed_bps,omitempty"`
+	Status        string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NetworkInterface) Reset() {
+	*x = NetworkInterface{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NetworkInterface) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NetworkInterface) ProtoMessage() {}
+
+func (x *NetworkInterface) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NetworkInterface.ProtoReflect.Descriptor instead.
+func (*NetworkInterface) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *NetworkInterface) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *NetworkInterface) GetMacAddress() string {
+	if x != nil {
+		return x.MacAddress
+	}
+	return ""
+}
+
+func (x *NetworkInterface) GetIpv4Addresses() []string {
+	if x != nil {
+		return x.Ipv4Addresses
+	}
+	return nil
+}
+
+func (x *NetworkInterface) GetIpv6Addresses() []string {
+	if x != nil {
+		return x.Ipv6Addresses
+	}
+	return nil
+}
+
+func (x *NetworkInterface) GetLinkSpeedBps() int64 {
+	if x != nil {
+		return x.LinkSpeedBps
+	}
+	return 0
+}
+
+func (x *NetworkInterface) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+type AuditEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DeviceId      string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	Ts            int64                  `protobuf:"varint,2,opt,name=ts,proto3" json:"ts,omitempty"`
+	EventType     string                 `protobuf:"bytes,3,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	CommandId     string                 `protobuf:"bytes,4,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	CommandType   string                 `protobuf:"bytes,5,opt,name=command_type,json=commandType,proto3" json:"command_type,omitempty"`
+	Actor         string                 `protobuf:"bytes,6,opt,name=actor,proto3" json:"actor,omitempty"`
+	Source        string                 `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
+	IssuedAt      int64                  `protobuf:"varint,8,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	SignatureOk   bool                   `protobuf:"varint,9,opt,name=signature_ok,json=signatureOk,proto3" json:"signature_ok,omitempty"`
+	Decision      string                 `protobuf:"bytes,10,opt,name=decision,proto3" json:"decision,omitempty"`
+	Reason        string                 `protobuf:"bytes,11,opt,name=reason,proto3" json:"reason,omitempty"`
+	Details       string                 `protobuf:"bytes,14,opt,name=details,proto3" json:"details,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AuditEvent) Reset() {
+	*x = AuditEvent{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuditEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuditEvent) ProtoMessage() {}
+
+func (x *AuditEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuditEvent.ProtoReflect.Descriptor instead.
+func (*AuditEvent) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *AuditEvent) GetDeviceId() string {
+	if x != nil {
+		return x.DeviceId
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetTs() int64 {
+	if x != nil {
+		return x.Ts
+	}
+	return 0
+}
+
+func (x *AuditEvent) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetCommandType() string {
+	if x != nil {
+		return x.CommandType
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetActor() string {
+	if x != nil {
+		return x.Actor
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetIssuedAt() int64 {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return 0
+}
+
+func (x *AuditEvent) GetSignatureOk() bool {
+	if x != nil {
+		return x.SignatureOk
+	}
+	return false
+}
+
+func (x *AuditEvent) GetDecision() string {
+	if x != nil {
+		return x.Decision
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetDetails() string {
+	if x != nil {
+		return x.Details
+	}
+	return ""
+}
+
 type AgentMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Payload:
@@ -1220,6 +2752,8 @@ type AgentMessage struct {
 	//	*AgentMessage_DeviceState
 	//	*AgentMessage_CacheFull
 	//	*AgentMessage_ActionStatus
+	//	*AgentMessage_FullInventory
+	//	*AgentMessage_AuditEvent
 	Payload       isAgentMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1227,7 +2761,7 @@ type AgentMessage struct {
 
 func (x *AgentMessage) Reset() {
 	*x = AgentMessage{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[11]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1239,7 +2773,7 @@ func (x *AgentMessage) String() string {
 func (*AgentMessage) ProtoMessage() {}
 
 func (x *AgentMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[11]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1252,7 +2786,7 @@ func (x *AgentMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentMessage.ProtoReflect.Descriptor instead.
 func (*AgentMessage) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *AgentMessage) GetPayload() isAgentMessage_Payload {
@@ -1316,6 +2850,24 @@ func (x *AgentMessage) GetActionStatus() *ActionStatus {
 	return nil
 }
 
+func (x *AgentMessage) GetFullInventory() *FullInventoryReport {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_FullInventory); ok {
+			return x.FullInventory
+		}
+	}
+	return nil
+}
+
+func (x *AgentMessage) GetAuditEvent() *AuditEvent {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_AuditEvent); ok {
+			return x.AuditEvent
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Payload interface {
 	isAgentMessage_Payload()
 }
@@ -1344,6 +2896,14 @@ type AgentMessage_ActionStatus struct {
 	ActionStatus *ActionStatus `protobuf:"bytes,8,opt,name=action_status,json=actionStatus,proto3,oneof"`
 }
 
+type AgentMessage_FullInventory struct {
+	FullInventory *FullInventoryReport `protobuf:"bytes,9,opt,name=full_inventory,json=fullInventory,proto3,oneof"`
+}
+
+type AgentMessage_AuditEvent struct {
+	AuditEvent *AuditEvent `protobuf:"bytes,10,opt,name=audit_event,json=auditEvent,proto3,oneof"`
+}
+
 func (*AgentMessage_Heartbeat) isAgentMessage_Payload() {}
 
 func (*AgentMessage_CommandResult) isAgentMessage_Payload() {}
@@ -1356,6 +2916,10 @@ func (*AgentMessage_CacheFull) isAgentMessage_Payload() {}
 
 func (*AgentMessage_ActionStatus) isAgentMessage_Payload() {}
 
+func (*AgentMessage_FullInventory) isAgentMessage_Payload() {}
+
+func (*AgentMessage_AuditEvent) isAgentMessage_Payload() {}
+
 type PatchBaseline struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Build         string                 `protobuf:"bytes,1,opt,name=build,proto3" json:"build,omitempty"`
@@ -1367,7 +2931,7 @@ type PatchBaseline struct {
 
 func (x *PatchBaseline) Reset() {
 	*x = PatchBaseline{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[12]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1379,7 +2943,7 @@ func (x *PatchBaseline) String() string {
 func (*PatchBaseline) ProtoMessage() {}
 
 func (x *PatchBaseline) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[12]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1392,7 +2956,7 @@ func (x *PatchBaseline) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PatchBaseline.ProtoReflect.Descriptor instead.
 func (*PatchBaseline) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *PatchBaseline) GetBuild() string {
@@ -1426,7 +2990,7 @@ type CabManifest struct {
 
 func (x *CabManifest) Reset() {
 	*x = CabManifest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[13]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1438,7 +3002,7 @@ func (x *CabManifest) String() string {
 func (*CabManifest) ProtoMessage() {}
 
 func (x *CabManifest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[13]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1451,7 +3015,7 @@ func (x *CabManifest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CabManifest.ProtoReflect.Descriptor instead.
 func (*CabManifest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *CabManifest) GetVersion() string {
@@ -1482,7 +3046,7 @@ type ServerMessage struct {
 
 func (x *ServerMessage) Reset() {
 	*x = ServerMessage{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[14]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1494,7 +3058,7 @@ func (x *ServerMessage) String() string {
 func (*ServerMessage) ProtoMessage() {}
 
 func (x *ServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[14]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1507,7 +3071,7 @@ func (x *ServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerMessage.ProtoReflect.Descriptor instead.
 func (*ServerMessage) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ServerMessage) GetPayload() isServerMessage_Payload {
@@ -1571,13 +3135,14 @@ type ContentRequest struct {
 	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
 	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
 	Sha256        string                 `protobuf:"bytes,3,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	Offset        int64                  `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ContentRequest) Reset() {
 	*x = ContentRequest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[15]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1589,7 +3154,7 @@ func (x *ContentRequest) String() string {
 func (*ContentRequest) ProtoMessage() {}
 
 func (x *ContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[15]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1602,7 +3167,7 @@ func (x *ContentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContentRequest.ProtoReflect.Descriptor instead.
 func (*ContentRequest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ContentRequest) GetKind() string {
@@ -1626,6 +3191,13 @@ func (x *ContentRequest) GetSha256() string {
 	return ""
 }
 
+func (x *ContentRequest) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
 type ContentChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
@@ -1635,7 +3207,7 @@ type ContentChunk struct {
 
 func (x *ContentChunk) Reset() {
 	*x = ContentChunk{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[16]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1647,7 +3219,7 @@ func (x *ContentChunk) String() string {
 func (*ContentChunk) ProtoMessage() {}
 
 func (x *ContentChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[16]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1660,7 +3232,7 @@ func (x *ContentChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContentChunk.ProtoReflect.Descriptor instead.
 func (*ContentChunk) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ContentChunk) GetData() []byte {
@@ -1671,23 +3243,26 @@ func (x *ContentChunk) GetData() []byte {
 }
 
 type EnrollRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EnrollToken   string                 `protobuf:"bytes,1,opt,name=enroll_token,json=enrollToken,proto3" json:"enroll_token,omitempty"`
-	DeviceId      string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	CsrPem        string                 `protobuf:"bytes,3,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"`
-	SystemUuid    string                 `protobuf:"bytes,4,opt,name=system_uuid,json=systemUuid,proto3" json:"system_uuid,omitempty"`
-	MachineGuid   string                 `protobuf:"bytes,5,opt,name=machine_guid,json=machineGuid,proto3" json:"machine_guid,omitempty"`
-	Hostname      string                 `protobuf:"bytes,6,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	Os            string                 `protobuf:"bytes,7,opt,name=os,proto3" json:"os,omitempty"`
-	AgentVersion  string                 `protobuf:"bytes,8,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	TpmEk         string                 `protobuf:"bytes,9,opt,name=tpm_ek,json=tpmEk,proto3" json:"tpm_ek,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	EnrollToken       string                 `protobuf:"bytes,1,opt,name=enroll_token,json=enrollToken,proto3" json:"enroll_token,omitempty"`
+	DeviceId          string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	CsrPem            string                 `protobuf:"bytes,3,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"`
+	SystemUuid        string                 `protobuf:"bytes,4,opt,name=system_uuid,json=systemUuid,proto3" json:"system_uuid,omitempty"`
+	MachineGuid       string                 `protobuf:"bytes,5,opt,name=machine_guid,json=machineGuid,proto3" json:"machine_guid,omitempty"`
+	Hostname          string                 `protobuf:"bytes,6,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	Os                string                 `protobuf:"bytes,7,opt,name=os,proto3" json:"os,omitempty"`
+	AgentVersion      string                 `protobuf:"bytes,8,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	TpmEk             string                 `protobuf:"bytes,9,opt,name=tpm_ek,json=tpmEk,proto3" json:"tpm_ek,omitempty"`
+	SchemaVersion     string                 `protobuf:"bytes,10,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	AgentCapabilities []string               `protobuf:"bytes,11,rep,name=agent_capabilities,json=agentCapabilities,proto3" json:"agent_capabilities,omitempty"`
+	DeviceType        string                 `protobuf:"bytes,12,opt,name=device_type,json=deviceType,proto3" json:"device_type,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *EnrollRequest) Reset() {
 	*x = EnrollRequest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[17]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1699,7 +3274,7 @@ func (x *EnrollRequest) String() string {
 func (*EnrollRequest) ProtoMessage() {}
 
 func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[17]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1712,7 +3287,7 @@ func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollRequest.ProtoReflect.Descriptor instead.
 func (*EnrollRequest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{17}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *EnrollRequest) GetEnrollToken() string {
@@ -1778,6 +3353,27 @@ func (x *EnrollRequest) GetTpmEk() string {
 	return ""
 }
 
+func (x *EnrollRequest) GetSchemaVersion() string {
+	if x != nil {
+		return x.SchemaVersion
+	}
+	return ""
+}
+
+func (x *EnrollRequest) GetAgentCapabilities() []string {
+	if x != nil {
+		return x.AgentCapabilities
+	}
+	return nil
+}
+
+func (x *EnrollRequest) GetDeviceType() string {
+	if x != nil {
+		return x.DeviceType
+	}
+	return ""
+}
+
 type EnrollResponse struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	ClientCertPem    string                 `protobuf:"bytes,1,opt,name=client_cert_pem,json=clientCertPem,proto3" json:"client_cert_pem,omitempty"`
@@ -1791,7 +3387,7 @@ type EnrollResponse struct {
 
 func (x *EnrollResponse) Reset() {
 	*x = EnrollResponse{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[18]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1803,7 +3399,7 @@ func (x *EnrollResponse) String() string {
 func (*EnrollResponse) ProtoMessage() {}
 
 func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[18]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1816,7 +3412,7 @@ func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollResponse.ProtoReflect.Descriptor instead.
 func (*EnrollResponse) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{18}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *EnrollResponse) GetClientCertPem() string {
@@ -1855,18 +3451,19 @@ func (x *EnrollResponse) GetComputerId() string {
 }
 
 type CollectFileSpec struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Paths         []string               `protobuf:"bytes,1,rep,name=paths,proto3" json:"paths,omitempty"`
-	MaxBytesEach  int64                  `protobuf:"varint,2,opt,name=max_bytes_each,json=maxBytesEach,proto3" json:"max_bytes_each,omitempty"`
-	TailBytes     int64                  `protobuf:"varint,3,opt,name=tail_bytes,json=tailBytes,proto3" json:"tail_bytes,omitempty"`
-	MaxTotalBytes int64                  `protobuf:"varint,4,opt,name=max_total_bytes,json=maxTotalBytes,proto3" json:"max_total_bytes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                   protoimpl.MessageState `protogen:"open.v1"`
+	Paths                   []string               `protobuf:"bytes,1,rep,name=paths,proto3" json:"paths,omitempty"`
+	MaxBytesEach            int64                  `protobuf:"varint,2,opt,name=max_bytes_each,json=maxBytesEach,proto3" json:"max_bytes_each,omitempty"`
+	TailBytes               int64                  `protobuf:"varint,3,opt,name=tail_bytes,json=tailBytes,proto3" json:"tail_bytes,omitempty"`
+	MaxTotalBytes           int64                  `protobuf:"varint,4,opt,name=max_total_bytes,json=maxTotalBytes,proto3" json:"max_total_bytes,omitempty"`
+	MaxUploadBytesPerSecond int64                  `protobuf:"varint,5,opt,name=max_upload_bytes_per_second,json=maxUploadBytesPerSecond,proto3" json:"max_upload_bytes_per_second,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *CollectFileSpec) Reset() {
 	*x = CollectFileSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1878,7 +3475,7 @@ func (x *CollectFileSpec) String() string {
 func (*CollectFileSpec) ProtoMessage() {}
 
 func (x *CollectFileSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1891,7 +3488,7 @@ func (x *CollectFileSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CollectFileSpec.ProtoReflect.Descriptor instead.
 func (*CollectFileSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *CollectFileSpec) GetPaths() []string {
@@ -1922,6 +3519,13 @@ func (x *CollectFileSpec) GetMaxTotalBytes() int64 {
 	return 0
 }
 
+func (x *CollectFileSpec) GetMaxUploadBytesPerSecond() int64 {
+	if x != nil {
+		return x.MaxUploadBytesPerSecond
+	}
+	return 0
+}
+
 type UploadChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ActionId      string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
@@ -1935,7 +3539,7 @@ type UploadChunk struct {
 
 func (x *UploadChunk) Reset() {
 	*x = UploadChunk{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1947,7 +3551,7 @@ func (x *UploadChunk) String() string {
 func (*UploadChunk) ProtoMessage() {}
 
 func (x *UploadChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1960,7 +3564,7 @@ func (x *UploadChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadChunk.ProtoReflect.Descriptor instead.
 func (*UploadChunk) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{20}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *UploadChunk) GetActionId() string {
@@ -2010,7 +3614,7 @@ type UploadAck struct {
 
 func (x *UploadAck) Reset() {
 	*x = UploadAck{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2022,7 +3626,7 @@ func (x *UploadAck) String() string {
 func (*UploadAck) ProtoMessage() {}
 
 func (x *UploadAck) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2035,7 +3639,7 @@ func (x *UploadAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadAck.ProtoReflect.Descriptor instead.
 func (*UploadAck) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{21}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *UploadAck) GetStoredPath() string {
@@ -2075,7 +3679,7 @@ type RenewRequest struct {
 
 func (x *RenewRequest) Reset() {
 	*x = RenewRequest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2087,7 +3691,7 @@ func (x *RenewRequest) String() string {
 func (*RenewRequest) ProtoMessage() {}
 
 func (x *RenewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2100,7 +3704,7 @@ func (x *RenewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewRequest.ProtoReflect.Descriptor instead.
 func (*RenewRequest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{22}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *RenewRequest) GetCsrPem() string {
@@ -2120,7 +3724,7 @@ type RenewResponse struct {
 
 func (x *RenewResponse) Reset() {
 	*x = RenewResponse{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2132,7 +3736,7 @@ func (x *RenewResponse) String() string {
 func (*RenewResponse) ProtoMessage() {}
 
 func (x *RenewResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2145,7 +3749,7 @@ func (x *RenewResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewResponse.ProtoReflect.Descriptor instead.
 func (*RenewResponse) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{23}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *RenewResponse) GetClientCertPem() string {
@@ -2175,7 +3779,7 @@ type OpenShellSpec struct {
 
 func (x *OpenShellSpec) Reset() {
 	*x = OpenShellSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2187,7 +3791,7 @@ func (x *OpenShellSpec) String() string {
 func (*OpenShellSpec) ProtoMessage() {}
 
 func (x *OpenShellSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2200,7 +3804,7 @@ func (x *OpenShellSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenShellSpec.ProtoReflect.Descriptor instead.
 func (*OpenShellSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{24}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *OpenShellSpec) GetSessionId() string {
@@ -2248,7 +3852,7 @@ type ShellInput struct {
 
 func (x *ShellInput) Reset() {
 	*x = ShellInput{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2260,7 +3864,7 @@ func (x *ShellInput) String() string {
 func (*ShellInput) ProtoMessage() {}
 
 func (x *ShellInput) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2273,7 +3877,7 @@ func (x *ShellInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShellInput.ProtoReflect.Descriptor instead.
 func (*ShellInput) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{25}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ShellInput) GetStdin() []byte {
@@ -2304,7 +3908,7 @@ type ShellOutput struct {
 
 func (x *ShellOutput) Reset() {
 	*x = ShellOutput{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2316,7 +3920,7 @@ func (x *ShellOutput) String() string {
 func (*ShellOutput) ProtoMessage() {}
 
 func (x *ShellOutput) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2329,7 +3933,7 @@ func (x *ShellOutput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShellOutput.ProtoReflect.Descriptor instead.
 func (*ShellOutput) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{26}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ShellOutput) GetSessionId() string {
@@ -2390,7 +3994,7 @@ type RunCommandSpec struct {
 
 func (x *RunCommandSpec) Reset() {
 	*x = RunCommandSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2402,7 +4006,7 @@ func (x *RunCommandSpec) String() string {
 func (*RunCommandSpec) ProtoMessage() {}
 
 func (x *RunCommandSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2415,7 +4019,7 @@ func (x *RunCommandSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunCommandSpec.ProtoReflect.Descriptor instead.
 func (*RunCommandSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{27}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *RunCommandSpec) GetCommand() string {
@@ -2491,7 +4095,7 @@ type RunCommandResult struct {
 
 func (x *RunCommandResult) Reset() {
 	*x = RunCommandResult{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2503,7 +4107,7 @@ func (x *RunCommandResult) String() string {
 func (*RunCommandResult) ProtoMessage() {}
 
 func (x *RunCommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2516,7 +4120,7 @@ func (x *RunCommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunCommandResult.ProtoReflect.Descriptor instead.
 func (*RunCommandResult) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{28}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *RunCommandResult) GetExitCode() int32 {
@@ -2586,24 +4190,31 @@ var File_aegisone_v1_agent_proto protoreflect.FileDescriptor
 
 const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x17aegisone/v1/agent.proto\x12\vaegisone.v1\"\x97\x01\n" +
+	"\x17aegisone/v1/agent.proto\x12\vaegisone.v1\"\x8e\x02\n" +
 	"\tHeartbeat\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12#\n" +
 	"\ragent_version\x18\x02 \x01(\tR\fagentVersion\x12\x0e\n" +
 	"\x02os\x18\x03 \x01(\tR\x02os\x12\x1a\n" +
 	"\bhostname\x18\x04 \x01(\tR\bhostname\x12\x1c\n" +
-	"\ttimestamp\x18\x05 \x01(\x03R\ttimestamp\"`\n" +
+	"\ttimestamp\x18\x05 \x01(\x03R\ttimestamp\x12%\n" +
+	"\x0eschema_version\x18\x06 \x01(\tR\rschemaVersion\x12-\n" +
+	"\x12agent_capabilities\x18\a \x03(\tR\x11agentCapabilities\x12\x1f\n" +
+	"\vdevice_type\x18\b \x01(\tR\n" +
+	"deviceType\"`\n" +
 	"\rCommandResult\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage\"t\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"\xbf\x01\n" +
 	"\aCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x18\n" +
 	"\apayload\x18\x03 \x01(\fR\apayload\x12\x1c\n" +
-	"\tsignature\x18\x04 \x01(\fR\tsignature\"\xd4\x04\n" +
+	"\tsignature\x18\x04 \x01(\fR\tsignature\x12\x14\n" +
+	"\x05actor\x18\x05 \x01(\tR\x05actor\x12\x16\n" +
+	"\x06source\x18\x06 \x01(\tR\x06source\x12\x1b\n" +
+	"\tissued_at\x18\a \x01(\x03R\bissuedAt\"\xd4\x04\n" +
 	"\rMissingUpdate\x12\x1b\n" +
 	"\tupdate_id\x18\x01 \x01(\tR\bupdateId\x12$\n" +
 	"\x0ekb_article_ids\x18\x02 \x03(\tR\fkbArticleIds\x12\x14\n" +
@@ -2645,7 +4256,7 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"RebootSpec\x12#\n" +
 	"\rdelay_seconds\x18\x01 \x01(\x05R\fdelaySeconds\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\xc8\x05\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xfa\t\n" +
 	"\x12SoftwareDeploySpec\x12\x1d\n" +
 	"\n" +
 	"package_id\x18\x01 \x01(\tR\tpackageId\x12\x12\n" +
@@ -2662,17 +4273,69 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	" \x03(\x05R\x10successExitCodes\x12'\n" +
 	"\x0ftimeout_seconds\x18\v \x01(\x05R\x0etimeoutSeconds\x12\x1d\n" +
 	"\n" +
-	"content_id\x18\f \x01(\tR\tcontentId\x12+\n" +
+	"content_id\x18\f \x01(\tR\tcontentId\x12(\n" +
+	"\x10require_ac_power\x18\x19 \x01(\bR\x0erequireAcPower\x12+\n" +
 	"\x11require_signature\x18\r \x01(\bR\x10requireSignature\x12!\n" +
 	"\fproduct_code\x18\x0e \x01(\tR\vproductCode\x12#\n" +
 	"\runinstall_key\x18\x0f \x01(\tR\funinstallKey\x12!\n" +
 	"\fdisplay_name\x18\x10 \x01(\tR\vdisplayName\x12O\n" +
 	"\n" +
 	"parameters\x18\x11 \x03(\v2/.aegisone.v1.SoftwareDeploySpec.ParametersEntryR\n" +
-	"parameters\x1a=\n" +
+	"parameters\x12<\n" +
+	"\texecution\x18\x12 \x01(\v2\x1e.aegisone.v1.SoftwareExecutionR\texecution\x12b\n" +
+	"\x11secure_parameters\x18\x13 \x03(\v25.aegisone.v1.SoftwareDeploySpec.SecureParametersEntryR\x10secureParameters\x123\n" +
+	"\x06bundle\x18\x14 \x01(\v2\x1b.aegisone.v1.SoftwareBundleR\x06bundle\x12:\n" +
+	"\x05steps\x18\x15 \x01(\v2$.aegisone.v1.SoftwareDeploymentStepsR\x05steps\x12<\n" +
+	"\tdetection\x18\x16 \x01(\v2\x1e.aegisone.v1.SoftwareDetectionR\tdetection\x12:\n" +
+	"\x1amax_fetch_bytes_per_second\x18\x17 \x01(\x03R\x16maxFetchBytesPerSecond\x124\n" +
+	"\x16capture_script_content\x18\x18 \x01(\bR\x14captureScriptContent\x1a=\n" +
 	"\x0fParametersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aC\n" +
+	"\x15SecureParametersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x87\x01\n" +
+	"\x0eSoftwareBundle\x12\x1f\n" +
+	"\ventry_point\x18\x01 \x01(\tR\n" +
+	"entryPoint\x12\x18\n" +
+	"\acommand\x18\x02 \x01(\tR\acommand\x12 \n" +
+	"\vdestination\x18\x03 \x01(\tR\vdestination\x12\x18\n" +
+	"\acleanup\x18\x04 \x01(\tR\acleanup\"\xc9\x01\n" +
+	"\x17SoftwareDeploymentSteps\x128\n" +
+	"\x06before\x18\x01 \x03(\v2 .aegisone.v1.SoftwareCommandStepR\x06before\x126\n" +
+	"\x05after\x18\x02 \x03(\v2 .aegisone.v1.SoftwareCommandStepR\x05after\x12<\n" +
+	"\brollback\x18\x03 \x03(\v2 .aegisone.v1.SoftwareCommandStepR\brollback\"\xec\x01\n" +
+	"\x13SoftwareCommandStep\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\acommand\x18\x02 \x01(\tR\acommand\x12\x1c\n" +
+	"\targuments\x18\x03 \x01(\tR\targuments\x12'\n" +
+	"\x0ftimeout_seconds\x18\x04 \x01(\x05R\x0etimeoutSeconds\x12,\n" +
+	"\x12success_exit_codes\x18\x05 \x03(\x05R\x10successExitCodes\x122\n" +
+	"\x15use_secure_parameters\x18\x06 \x01(\bR\x13useSecureParameters\"a\n" +
+	"\x11SoftwareDetection\x12\x12\n" +
+	"\x04mode\x18\x01 \x01(\tR\x04mode\x128\n" +
+	"\x05rules\x18\x02 \x03(\v2\".aegisone.v1.SoftwareDetectionRuleR\x05rules\"\x87\x02\n" +
+	"\x15SoftwareDetectionRule\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12'\n" +
+	"\x0fminimum_version\x18\x03 \x01(\tR\x0eminimumVersion\x12\x12\n" +
+	"\x04hive\x18\x04 \x01(\tR\x04hive\x12\x10\n" +
+	"\x03key\x18\x05 \x01(\tR\x03key\x12\x12\n" +
+	"\x04view\x18\x06 \x01(\tR\x04view\x12\x1d\n" +
+	"\n" +
+	"value_name\x18\a \x01(\tR\tvalueName\x12\x1d\n" +
+	"\n" +
+	"value_type\x18\b \x01(\tR\tvalueType\x12%\n" +
+	"\x0eexpected_value\x18\t \x01(\tR\rexpectedValue\"\xdc\x01\n" +
+	"\x11SoftwareExecution\x12\x12\n" +
+	"\x04mode\x18\x01 \x01(\tR\x04mode\x12\"\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\rH\x00R\tsessionId\x88\x01\x01\x12\x1a\n" +
+	"\busername\x18\x03 \x01(\tR\busername\x12\x16\n" +
+	"\x06domain\x18\x04 \x01(\tR\x06domain\x12#\n" +
+	"\rpassword_utf8\x18\x05 \x01(\fR\fpasswordUtf8\x12'\n" +
+	"\x0fdetection_scope\x18\x06 \x01(\tR\x0edetectionScopeB\r\n" +
+	"\v_session_id\"\xd8\x03\n" +
 	"\fActionStatus\x12\x1b\n" +
 	"\taction_id\x18\x01 \x01(\tR\bactionId\x12\x1f\n" +
 	"\vaction_type\x18\x02 \x01(\tR\n" +
@@ -2689,7 +4352,9 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	" \x01(\x03R\tstartedAt\x12\x1f\n" +
 	"\vfinished_at\x18\v \x01(\x03R\n" +
 	"finishedAt\x12\x0e\n" +
-	"\x02kb\x18\f \x01(\tR\x02kb\"\xea\x02\n" +
+	"\x02kb\x18\f \x01(\tR\x02kb\x12+\n" +
+	"\x11package_directory\x18\r \x01(\tR\x10packageDirectory\x12'\n" +
+	"\x0fpackage_cleanup\x18\x0e \x01(\tR\x0epackageCleanup\"\xd1\x03\n" +
 	"\x11DeviceStateReport\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12!\n" +
 	"\fproduct_name\x18\x02 \x01(\tR\vproductName\x12'\n" +
@@ -2700,7 +4365,18 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\x0ereboot_pending\x18\b \x01(\bR\rrebootPending\x12,\n" +
 	"\x12reboot_pending_kbs\x18\t \x03(\tR\x10rebootPendingKbs\x124\n" +
 	"\x16reboot_pending_sources\x18\n" +
-	" \x03(\tR\x14rebootPendingSourcesJ\x04\b\a\x10\b\"\xc9\x01\n" +
+	" \x03(\tR\x14rebootPendingSources\x12@\n" +
+	"\x0einstalled_apps\x18\v \x03(\v2\x19.aegisone.v1.InstalledAppR\rinstalledApps\x12#\n" +
+	"\rinstalled_kbs\x18\f \x03(\tR\finstalledKbsJ\x04\b\a\x10\b\"\xab\x02\n" +
+	"\fInstalledApp\x12!\n" +
+	"\fdisplay_name\x18\x01 \x01(\tR\vdisplayName\x12'\n" +
+	"\x0fdisplay_version\x18\x02 \x01(\tR\x0edisplayVersion\x12\x1c\n" +
+	"\tpublisher\x18\x03 \x01(\tR\tpublisher\x12!\n" +
+	"\finstall_date\x18\x04 \x01(\tR\vinstallDate\x12#\n" +
+	"\runinstall_key\x18\x05 \x01(\tR\funinstallKey\x12\x12\n" +
+	"\x04hive\x18\x06 \x01(\tR\x04hive\x12*\n" +
+	"\x11estimated_size_kb\x18\a \x01(\x03R\x0festimatedSizeKb\x12)\n" +
+	"\x10uninstall_string\x18\b \x01(\tR\x0funinstallString\"\xc9\x01\n" +
 	"\x0fCacheFullReport\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12\x1d\n" +
 	"\n" +
@@ -2709,7 +4385,103 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\tcap_bytes\x18\x04 \x01(\x03R\bcapBytes\x12 \n" +
 	"\fin_use_bytes\x18\x05 \x01(\x03R\n" +
 	"inUseBytes\x12\x18\n" +
-	"\amessage\x18\x06 \x01(\tR\amessage\"\xb4\x03\n" +
+	"\amessage\x18\x06 \x01(\tR\amessage\"\xe8\x02\n" +
+	"\x13FullInventoryReport\x12\x1b\n" +
+	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12!\n" +
+	"\fcollected_at\x18\x02 \x01(\x03R\vcollectedAt\x12\x18\n" +
+	"\atrigger\x18\x03 \x01(\tR\atrigger\x12:\n" +
+	"\bhardware\x18\x04 \x01(\v2\x1e.aegisone.v1.HardwareInventoryR\bhardware\x12@\n" +
+	"\x0einstalled_apps\x18\x05 \x03(\v2\x19.aegisone.v1.InstalledAppR\rinstalledApps\x126\n" +
+	"\adrivers\x18\x06 \x03(\v2\x1c.aegisone.v1.DriverInventoryR\adrivers\x12A\n" +
+	"\x0einstalled_appx\x18\a \x03(\v2\x1a.aegisone.v1.InstalledAppxR\rinstalledAppx\"\xc6\x02\n" +
+	"\rInstalledAppx\x12!\n" +
+	"\fdisplay_name\x18\x01 \x01(\tR\vdisplayName\x12*\n" +
+	"\x11package_full_name\x18\x02 \x01(\tR\x0fpackageFullName\x12.\n" +
+	"\x13package_family_name\x18\x03 \x01(\tR\x11packageFamilyName\x12\x12\n" +
+	"\x04name\x18\x04 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x05 \x01(\tR\aversion\x12\"\n" +
+	"\farchitecture\x18\x06 \x01(\tR\farchitecture\x12!\n" +
+	"\fpublisher_id\x18\a \x01(\tR\vpublisherId\x12)\n" +
+	"\x10install_location\x18\b \x01(\tR\x0finstallLocation\x12\x16\n" +
+	"\x06origin\x18\t \x01(\tR\x06origin\"\xbf\x02\n" +
+	"\x0fDriverInventory\x12\x1f\n" +
+	"\vdevice_name\x18\x01 \x01(\tR\n" +
+	"deviceName\x12!\n" +
+	"\fdevice_class\x18\x02 \x01(\tR\vdeviceClass\x12%\n" +
+	"\x0edriver_version\x18\x03 \x01(\tR\rdriverVersion\x12\x1f\n" +
+	"\vdriver_date\x18\x04 \x01(\tR\n" +
+	"driverDate\x12#\n" +
+	"\rprovider_name\x18\x05 \x01(\tR\fproviderName\x12\x1f\n" +
+	"\vhardware_id\x18\x06 \x01(\tR\n" +
+	"hardwareId\x12\x19\n" +
+	"\binf_name\x18\a \x01(\tR\ainfName\x12\"\n" +
+	"\fmanufacturer\x18\b \x01(\tR\fmanufacturer\x12\x1b\n" +
+	"\tis_signed\x18\t \x01(\bR\bisSigned\"\xa4\a\n" +
+	"\x11HardwareInventory\x12\x1d\n" +
+	"\n" +
+	"cpu_vendor\x18\x01 \x01(\tR\tcpuVendor\x12\x1b\n" +
+	"\tcpu_model\x18\x02 \x01(\tR\bcpuModel\x12,\n" +
+	"\x12cpu_physical_cores\x18\x03 \x01(\x05R\x10cpuPhysicalCores\x12*\n" +
+	"\x11cpu_logical_cores\x18\x04 \x01(\x05R\x0fcpuLogicalCores\x12,\n" +
+	"\x12memory_total_bytes\x18\x05 \x01(\x03R\x10memoryTotalBytes\x120\n" +
+	"\x05disks\x18\x06 \x03(\v2\x1a.aegisone.v1.DiskInventoryR\x05disks\x121\n" +
+	"\x04nics\x18\a \x03(\v2\x1d.aegisone.v1.NetworkInterfaceR\x04nics\x12\x1f\n" +
+	"\vbios_vendor\x18\b \x01(\tR\n" +
+	"biosVendor\x12!\n" +
+	"\fbios_version\x18\t \x01(\tR\vbiosVersion\x12*\n" +
+	"\x11bios_release_date\x18\n" +
+	" \x01(\tR\x0fbiosReleaseDate\x12#\n" +
+	"\rsystem_vendor\x18\v \x01(\tR\fsystemVendor\x12%\n" +
+	"\x0esystem_product\x18\f \x01(\tR\rsystemProduct\x120\n" +
+	"\x14system_serial_number\x18\r \x01(\tR\x12systemSerialNumber\x12!\n" +
+	"\fchassis_type\x18\x0e \x01(\tR\vchassisType\x12\x17\n" +
+	"\acpu_mhz\x18\x0f \x01(\x05R\x06cpuMhz\x12/\n" +
+	"\x14cpu_threads_per_core\x18\x10 \x01(\x05R\x11cpuThreadsPerCore\x12)\n" +
+	"\x10cpu_architecture\x18\x11 \x01(\tR\x0fcpuArchitecture\x12&\n" +
+	"\x0fos_product_name\x18\x12 \x01(\tR\rosProductName\x12,\n" +
+	"\x12os_display_version\x18\x13 \x01(\tR\x10osDisplayVersion\x12\x19\n" +
+	"\bos_build\x18\x14 \x01(\tR\aosBuild\x12&\n" +
+	"\x0fos_service_pack\x18\x15 \x01(\tR\rosServicePack\x12\x1f\n" +
+	"\vsystem_uuid\x18\x16 \x01(\tR\n" +
+	"systemUuid\x12&\n" +
+	"\x0evirtualization\x18\x17 \x01(\tR\x0evirtualization\"\xd3\x01\n" +
+	"\rDiskInventory\x12\x1f\n" +
+	"\vmount_point\x18\x01 \x01(\tR\n" +
+	"mountPoint\x12!\n" +
+	"\fvolume_label\x18\x02 \x01(\tR\vvolumeLabel\x12\x1f\n" +
+	"\vfile_system\x18\x03 \x01(\tR\n" +
+	"fileSystem\x12\x1f\n" +
+	"\vtotal_bytes\x18\x04 \x01(\x03R\n" +
+	"totalBytes\x12\x1d\n" +
+	"\n" +
+	"free_bytes\x18\x05 \x01(\x03R\tfreeBytes\x12\x1d\n" +
+	"\n" +
+	"drive_type\x18\x06 \x01(\tR\tdriveType\"\xd3\x01\n" +
+	"\x10NetworkInterface\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1f\n" +
+	"\vmac_address\x18\x02 \x01(\tR\n" +
+	"macAddress\x12%\n" +
+	"\x0eipv4_addresses\x18\x03 \x03(\tR\ripv4Addresses\x12%\n" +
+	"\x0eipv6_addresses\x18\x04 \x03(\tR\ripv6Addresses\x12$\n" +
+	"\x0elink_speed_bps\x18\x05 \x01(\x03R\flinkSpeedBps\x12\x16\n" +
+	"\x06status\x18\x06 \x01(\tR\x06status\"\xe2\x02\n" +
+	"\n" +
+	"AuditEvent\x12\x1b\n" +
+	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12\x0e\n" +
+	"\x02ts\x18\x02 \x01(\x03R\x02ts\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x03 \x01(\tR\teventType\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x04 \x01(\tR\tcommandId\x12!\n" +
+	"\fcommand_type\x18\x05 \x01(\tR\vcommandType\x12\x14\n" +
+	"\x05actor\x18\x06 \x01(\tR\x05actor\x12\x16\n" +
+	"\x06source\x18\a \x01(\tR\x06source\x12\x1b\n" +
+	"\tissued_at\x18\b \x01(\x03R\bissuedAt\x12!\n" +
+	"\fsignature_ok\x18\t \x01(\bR\vsignatureOk\x12\x1a\n" +
+	"\bdecision\x18\n" +
+	" \x01(\tR\bdecision\x12\x16\n" +
+	"\x06reason\x18\v \x01(\tR\x06reason\x12\x18\n" +
+	"\adetails\x18\x0e \x01(\tR\adetailsJ\x04\b\f\x10\rJ\x04\b\r\x10\x0e\"\xbb\x04\n" +
 	"\fAgentMessage\x126\n" +
 	"\theartbeat\x18\x01 \x01(\v2\x16.aegisone.v1.HeartbeatH\x00R\theartbeat\x12C\n" +
 	"\x0ecommand_result\x18\x02 \x01(\v2\x1a.aegisone.v1.CommandResultH\x00R\rcommandResult\x12J\n" +
@@ -2717,7 +4489,11 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\fdevice_state\x18\x06 \x01(\v2\x1e.aegisone.v1.DeviceStateReportH\x00R\vdeviceState\x12=\n" +
 	"\n" +
 	"cache_full\x18\a \x01(\v2\x1c.aegisone.v1.CacheFullReportH\x00R\tcacheFull\x12@\n" +
-	"\raction_status\x18\b \x01(\v2\x19.aegisone.v1.ActionStatusH\x00R\factionStatusB\t\n" +
+	"\raction_status\x18\b \x01(\v2\x19.aegisone.v1.ActionStatusH\x00R\factionStatus\x12I\n" +
+	"\x0efull_inventory\x18\t \x01(\v2 .aegisone.v1.FullInventoryReportH\x00R\rfullInventory\x12:\n" +
+	"\vaudit_event\x18\n" +
+	" \x01(\v2\x17.aegisone.v1.AuditEventH\x00R\n" +
+	"auditEventB\t\n" +
 	"\apayloadJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"a\n" +
 	"\rPatchBaseline\x12\x14\n" +
 	"\x05build\x18\x01 \x01(\tR\x05build\x12\x1d\n" +
@@ -2731,13 +4507,14 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\acommand\x18\x01 \x01(\v2\x14.aegisone.v1.CommandH\x00R\acommand\x12C\n" +
 	"\x0epatch_baseline\x18\x02 \x01(\v2\x1a.aegisone.v1.PatchBaselineH\x00R\rpatchBaseline\x12=\n" +
 	"\fcab_manifest\x18\x03 \x01(\v2\x18.aegisone.v1.CabManifestH\x00R\vcabManifestB\t\n" +
-	"\apayload\"L\n" +
+	"\apayload\"d\n" +
 	"\x0eContentRequest\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x16\n" +
-	"\x06sha256\x18\x03 \x01(\tR\x06sha256\"\"\n" +
+	"\x06sha256\x18\x03 \x01(\tR\x06sha256\x12\x16\n" +
+	"\x06offset\x18\x04 \x01(\x03R\x06offset\"\"\n" +
 	"\fContentChunk\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04data\"\x94\x02\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"\x8b\x03\n" +
 	"\rEnrollRequest\x12!\n" +
 	"\fenroll_token\x18\x01 \x01(\tR\venrollToken\x12\x1b\n" +
 	"\tdevice_id\x18\x02 \x01(\tR\bdeviceId\x12\x17\n" +
@@ -2748,7 +4525,12 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\bhostname\x18\x06 \x01(\tR\bhostname\x12\x0e\n" +
 	"\x02os\x18\a \x01(\tR\x02os\x12#\n" +
 	"\ragent_version\x18\b \x01(\tR\fagentVersion\x12\x15\n" +
-	"\x06tpm_ek\x18\t \x01(\tR\x05tpmEk\"\xbf\x01\n" +
+	"\x06tpm_ek\x18\t \x01(\tR\x05tpmEk\x12%\n" +
+	"\x0eschema_version\x18\n" +
+	" \x01(\tR\rschemaVersion\x12-\n" +
+	"\x12agent_capabilities\x18\v \x03(\tR\x11agentCapabilities\x12\x1f\n" +
+	"\vdevice_type\x18\f \x01(\tR\n" +
+	"deviceType\"\xbf\x01\n" +
 	"\x0eEnrollResponse\x12&\n" +
 	"\x0fclient_cert_pem\x18\x01 \x01(\tR\rclientCertPem\x12 \n" +
 	"\fca_chain_pem\x18\x02 \x01(\tR\n" +
@@ -2756,13 +4538,14 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\x12assigned_device_id\x18\x03 \x01(\tR\x10assignedDeviceId\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\x12\x1f\n" +
 	"\vcomputer_id\x18\x05 \x01(\tR\n" +
-	"computerId\"\x94\x01\n" +
+	"computerId\"\xd2\x01\n" +
 	"\x0fCollectFileSpec\x12\x14\n" +
 	"\x05paths\x18\x01 \x03(\tR\x05paths\x12$\n" +
 	"\x0emax_bytes_each\x18\x02 \x01(\x03R\fmaxBytesEach\x12\x1d\n" +
 	"\n" +
 	"tail_bytes\x18\x03 \x01(\x03R\ttailBytes\x12&\n" +
-	"\x0fmax_total_bytes\x18\x04 \x01(\x03R\rmaxTotalBytes\"\x92\x01\n" +
+	"\x0fmax_total_bytes\x18\x04 \x01(\x03R\rmaxTotalBytes\x12<\n" +
+	"\x1bmax_upload_bytes_per_second\x18\x05 \x01(\x03R\x17maxUploadBytesPerSecond\"\x92\x01\n" +
 	"\vUploadChunk\x12\x1b\n" +
 	"\taction_id\x18\x01 \x01(\tR\bactionId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -2859,73 +4642,106 @@ func file_aegisone_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_aegisone_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_aegisone_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
+var file_aegisone_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
 var file_aegisone_v1_agent_proto_goTypes = []any{
-	(ActionPhase)(0),           // 0: aegisone.v1.ActionPhase
-	(*Heartbeat)(nil),          // 1: aegisone.v1.Heartbeat
-	(*CommandResult)(nil),      // 2: aegisone.v1.CommandResult
-	(*Command)(nil),            // 3: aegisone.v1.Command
-	(*MissingUpdate)(nil),      // 4: aegisone.v1.MissingUpdate
-	(*PatchScanResult)(nil),    // 5: aegisone.v1.PatchScanResult
-	(*InstallPatchSpec)(nil),   // 6: aegisone.v1.InstallPatchSpec
-	(*RebootSpec)(nil),         // 7: aegisone.v1.RebootSpec
-	(*SoftwareDeploySpec)(nil), // 8: aegisone.v1.SoftwareDeploySpec
-	(*ActionStatus)(nil),       // 9: aegisone.v1.ActionStatus
-	(*DeviceStateReport)(nil),  // 10: aegisone.v1.DeviceStateReport
-	(*CacheFullReport)(nil),    // 11: aegisone.v1.CacheFullReport
-	(*AgentMessage)(nil),       // 12: aegisone.v1.AgentMessage
-	(*PatchBaseline)(nil),      // 13: aegisone.v1.PatchBaseline
-	(*CabManifest)(nil),        // 14: aegisone.v1.CabManifest
-	(*ServerMessage)(nil),      // 15: aegisone.v1.ServerMessage
-	(*ContentRequest)(nil),     // 16: aegisone.v1.ContentRequest
-	(*ContentChunk)(nil),       // 17: aegisone.v1.ContentChunk
-	(*EnrollRequest)(nil),      // 18: aegisone.v1.EnrollRequest
-	(*EnrollResponse)(nil),     // 19: aegisone.v1.EnrollResponse
-	(*CollectFileSpec)(nil),    // 20: aegisone.v1.CollectFileSpec
-	(*UploadChunk)(nil),        // 21: aegisone.v1.UploadChunk
-	(*UploadAck)(nil),          // 22: aegisone.v1.UploadAck
-	(*RenewRequest)(nil),       // 23: aegisone.v1.RenewRequest
-	(*RenewResponse)(nil),      // 24: aegisone.v1.RenewResponse
-	(*OpenShellSpec)(nil),      // 25: aegisone.v1.OpenShellSpec
-	(*ShellInput)(nil),         // 26: aegisone.v1.ShellInput
-	(*ShellOutput)(nil),        // 27: aegisone.v1.ShellOutput
-	(*RunCommandSpec)(nil),     // 28: aegisone.v1.RunCommandSpec
-	(*RunCommandResult)(nil),   // 29: aegisone.v1.RunCommandResult
-	nil,                        // 30: aegisone.v1.SoftwareDeploySpec.ParametersEntry
-	nil,                        // 31: aegisone.v1.RunCommandSpec.ParametersEntry
+	(ActionPhase)(0),                // 0: aegisone.v1.ActionPhase
+	(*Heartbeat)(nil),               // 1: aegisone.v1.Heartbeat
+	(*CommandResult)(nil),           // 2: aegisone.v1.CommandResult
+	(*Command)(nil),                 // 3: aegisone.v1.Command
+	(*MissingUpdate)(nil),           // 4: aegisone.v1.MissingUpdate
+	(*PatchScanResult)(nil),         // 5: aegisone.v1.PatchScanResult
+	(*InstallPatchSpec)(nil),        // 6: aegisone.v1.InstallPatchSpec
+	(*RebootSpec)(nil),              // 7: aegisone.v1.RebootSpec
+	(*SoftwareDeploySpec)(nil),      // 8: aegisone.v1.SoftwareDeploySpec
+	(*SoftwareBundle)(nil),          // 9: aegisone.v1.SoftwareBundle
+	(*SoftwareDeploymentSteps)(nil), // 10: aegisone.v1.SoftwareDeploymentSteps
+	(*SoftwareCommandStep)(nil),     // 11: aegisone.v1.SoftwareCommandStep
+	(*SoftwareDetection)(nil),       // 12: aegisone.v1.SoftwareDetection
+	(*SoftwareDetectionRule)(nil),   // 13: aegisone.v1.SoftwareDetectionRule
+	(*SoftwareExecution)(nil),       // 14: aegisone.v1.SoftwareExecution
+	(*ActionStatus)(nil),            // 15: aegisone.v1.ActionStatus
+	(*DeviceStateReport)(nil),       // 16: aegisone.v1.DeviceStateReport
+	(*InstalledApp)(nil),            // 17: aegisone.v1.InstalledApp
+	(*CacheFullReport)(nil),         // 18: aegisone.v1.CacheFullReport
+	(*FullInventoryReport)(nil),     // 19: aegisone.v1.FullInventoryReport
+	(*InstalledAppx)(nil),           // 20: aegisone.v1.InstalledAppx
+	(*DriverInventory)(nil),         // 21: aegisone.v1.DriverInventory
+	(*HardwareInventory)(nil),       // 22: aegisone.v1.HardwareInventory
+	(*DiskInventory)(nil),           // 23: aegisone.v1.DiskInventory
+	(*NetworkInterface)(nil),        // 24: aegisone.v1.NetworkInterface
+	(*AuditEvent)(nil),              // 25: aegisone.v1.AuditEvent
+	(*AgentMessage)(nil),            // 26: aegisone.v1.AgentMessage
+	(*PatchBaseline)(nil),           // 27: aegisone.v1.PatchBaseline
+	(*CabManifest)(nil),             // 28: aegisone.v1.CabManifest
+	(*ServerMessage)(nil),           // 29: aegisone.v1.ServerMessage
+	(*ContentRequest)(nil),          // 30: aegisone.v1.ContentRequest
+	(*ContentChunk)(nil),            // 31: aegisone.v1.ContentChunk
+	(*EnrollRequest)(nil),           // 32: aegisone.v1.EnrollRequest
+	(*EnrollResponse)(nil),          // 33: aegisone.v1.EnrollResponse
+	(*CollectFileSpec)(nil),         // 34: aegisone.v1.CollectFileSpec
+	(*UploadChunk)(nil),             // 35: aegisone.v1.UploadChunk
+	(*UploadAck)(nil),               // 36: aegisone.v1.UploadAck
+	(*RenewRequest)(nil),            // 37: aegisone.v1.RenewRequest
+	(*RenewResponse)(nil),           // 38: aegisone.v1.RenewResponse
+	(*OpenShellSpec)(nil),           // 39: aegisone.v1.OpenShellSpec
+	(*ShellInput)(nil),              // 40: aegisone.v1.ShellInput
+	(*ShellOutput)(nil),             // 41: aegisone.v1.ShellOutput
+	(*RunCommandSpec)(nil),          // 42: aegisone.v1.RunCommandSpec
+	(*RunCommandResult)(nil),        // 43: aegisone.v1.RunCommandResult
+	nil,                             // 44: aegisone.v1.SoftwareDeploySpec.ParametersEntry
+	nil,                             // 45: aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
+	nil,                             // 46: aegisone.v1.RunCommandSpec.ParametersEntry
 }
 var file_aegisone_v1_agent_proto_depIdxs = []int32{
 	4,  // 0: aegisone.v1.PatchScanResult.missing:type_name -> aegisone.v1.MissingUpdate
 	4,  // 1: aegisone.v1.PatchScanResult.installed:type_name -> aegisone.v1.MissingUpdate
-	30, // 2: aegisone.v1.SoftwareDeploySpec.parameters:type_name -> aegisone.v1.SoftwareDeploySpec.ParametersEntry
-	0,  // 3: aegisone.v1.ActionStatus.phase:type_name -> aegisone.v1.ActionPhase
-	1,  // 4: aegisone.v1.AgentMessage.heartbeat:type_name -> aegisone.v1.Heartbeat
-	2,  // 5: aegisone.v1.AgentMessage.command_result:type_name -> aegisone.v1.CommandResult
-	5,  // 6: aegisone.v1.AgentMessage.patch_scan_result:type_name -> aegisone.v1.PatchScanResult
-	10, // 7: aegisone.v1.AgentMessage.device_state:type_name -> aegisone.v1.DeviceStateReport
-	11, // 8: aegisone.v1.AgentMessage.cache_full:type_name -> aegisone.v1.CacheFullReport
-	9,  // 9: aegisone.v1.AgentMessage.action_status:type_name -> aegisone.v1.ActionStatus
-	3,  // 10: aegisone.v1.ServerMessage.command:type_name -> aegisone.v1.Command
-	13, // 11: aegisone.v1.ServerMessage.patch_baseline:type_name -> aegisone.v1.PatchBaseline
-	14, // 12: aegisone.v1.ServerMessage.cab_manifest:type_name -> aegisone.v1.CabManifest
-	31, // 13: aegisone.v1.RunCommandSpec.parameters:type_name -> aegisone.v1.RunCommandSpec.ParametersEntry
-	12, // 14: aegisone.v1.AgentControlPlane.Connect:input_type -> aegisone.v1.AgentMessage
-	16, // 15: aegisone.v1.AgentControlPlane.FetchContent:input_type -> aegisone.v1.ContentRequest
-	21, // 16: aegisone.v1.AgentControlPlane.UploadContent:input_type -> aegisone.v1.UploadChunk
-	18, // 17: aegisone.v1.AgentControlPlane.Enroll:input_type -> aegisone.v1.EnrollRequest
-	23, // 18: aegisone.v1.AgentControlPlane.Renew:input_type -> aegisone.v1.RenewRequest
-	27, // 19: aegisone.v1.AgentControlPlane.ShellSession:input_type -> aegisone.v1.ShellOutput
-	15, // 20: aegisone.v1.AgentControlPlane.Connect:output_type -> aegisone.v1.ServerMessage
-	17, // 21: aegisone.v1.AgentControlPlane.FetchContent:output_type -> aegisone.v1.ContentChunk
-	22, // 22: aegisone.v1.AgentControlPlane.UploadContent:output_type -> aegisone.v1.UploadAck
-	19, // 23: aegisone.v1.AgentControlPlane.Enroll:output_type -> aegisone.v1.EnrollResponse
-	24, // 24: aegisone.v1.AgentControlPlane.Renew:output_type -> aegisone.v1.RenewResponse
-	26, // 25: aegisone.v1.AgentControlPlane.ShellSession:output_type -> aegisone.v1.ShellInput
-	20, // [20:26] is the sub-list for method output_type
-	14, // [14:20] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	44, // 2: aegisone.v1.SoftwareDeploySpec.parameters:type_name -> aegisone.v1.SoftwareDeploySpec.ParametersEntry
+	14, // 3: aegisone.v1.SoftwareDeploySpec.execution:type_name -> aegisone.v1.SoftwareExecution
+	45, // 4: aegisone.v1.SoftwareDeploySpec.secure_parameters:type_name -> aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
+	9,  // 5: aegisone.v1.SoftwareDeploySpec.bundle:type_name -> aegisone.v1.SoftwareBundle
+	10, // 6: aegisone.v1.SoftwareDeploySpec.steps:type_name -> aegisone.v1.SoftwareDeploymentSteps
+	12, // 7: aegisone.v1.SoftwareDeploySpec.detection:type_name -> aegisone.v1.SoftwareDetection
+	11, // 8: aegisone.v1.SoftwareDeploymentSteps.before:type_name -> aegisone.v1.SoftwareCommandStep
+	11, // 9: aegisone.v1.SoftwareDeploymentSteps.after:type_name -> aegisone.v1.SoftwareCommandStep
+	11, // 10: aegisone.v1.SoftwareDeploymentSteps.rollback:type_name -> aegisone.v1.SoftwareCommandStep
+	13, // 11: aegisone.v1.SoftwareDetection.rules:type_name -> aegisone.v1.SoftwareDetectionRule
+	0,  // 12: aegisone.v1.ActionStatus.phase:type_name -> aegisone.v1.ActionPhase
+	17, // 13: aegisone.v1.DeviceStateReport.installed_apps:type_name -> aegisone.v1.InstalledApp
+	22, // 14: aegisone.v1.FullInventoryReport.hardware:type_name -> aegisone.v1.HardwareInventory
+	17, // 15: aegisone.v1.FullInventoryReport.installed_apps:type_name -> aegisone.v1.InstalledApp
+	21, // 16: aegisone.v1.FullInventoryReport.drivers:type_name -> aegisone.v1.DriverInventory
+	20, // 17: aegisone.v1.FullInventoryReport.installed_appx:type_name -> aegisone.v1.InstalledAppx
+	23, // 18: aegisone.v1.HardwareInventory.disks:type_name -> aegisone.v1.DiskInventory
+	24, // 19: aegisone.v1.HardwareInventory.nics:type_name -> aegisone.v1.NetworkInterface
+	1,  // 20: aegisone.v1.AgentMessage.heartbeat:type_name -> aegisone.v1.Heartbeat
+	2,  // 21: aegisone.v1.AgentMessage.command_result:type_name -> aegisone.v1.CommandResult
+	5,  // 22: aegisone.v1.AgentMessage.patch_scan_result:type_name -> aegisone.v1.PatchScanResult
+	16, // 23: aegisone.v1.AgentMessage.device_state:type_name -> aegisone.v1.DeviceStateReport
+	18, // 24: aegisone.v1.AgentMessage.cache_full:type_name -> aegisone.v1.CacheFullReport
+	15, // 25: aegisone.v1.AgentMessage.action_status:type_name -> aegisone.v1.ActionStatus
+	19, // 26: aegisone.v1.AgentMessage.full_inventory:type_name -> aegisone.v1.FullInventoryReport
+	25, // 27: aegisone.v1.AgentMessage.audit_event:type_name -> aegisone.v1.AuditEvent
+	3,  // 28: aegisone.v1.ServerMessage.command:type_name -> aegisone.v1.Command
+	27, // 29: aegisone.v1.ServerMessage.patch_baseline:type_name -> aegisone.v1.PatchBaseline
+	28, // 30: aegisone.v1.ServerMessage.cab_manifest:type_name -> aegisone.v1.CabManifest
+	46, // 31: aegisone.v1.RunCommandSpec.parameters:type_name -> aegisone.v1.RunCommandSpec.ParametersEntry
+	26, // 32: aegisone.v1.AgentControlPlane.Connect:input_type -> aegisone.v1.AgentMessage
+	30, // 33: aegisone.v1.AgentControlPlane.FetchContent:input_type -> aegisone.v1.ContentRequest
+	35, // 34: aegisone.v1.AgentControlPlane.UploadContent:input_type -> aegisone.v1.UploadChunk
+	32, // 35: aegisone.v1.AgentControlPlane.Enroll:input_type -> aegisone.v1.EnrollRequest
+	37, // 36: aegisone.v1.AgentControlPlane.Renew:input_type -> aegisone.v1.RenewRequest
+	41, // 37: aegisone.v1.AgentControlPlane.ShellSession:input_type -> aegisone.v1.ShellOutput
+	29, // 38: aegisone.v1.AgentControlPlane.Connect:output_type -> aegisone.v1.ServerMessage
+	31, // 39: aegisone.v1.AgentControlPlane.FetchContent:output_type -> aegisone.v1.ContentChunk
+	36, // 40: aegisone.v1.AgentControlPlane.UploadContent:output_type -> aegisone.v1.UploadAck
+	33, // 41: aegisone.v1.AgentControlPlane.Enroll:output_type -> aegisone.v1.EnrollResponse
+	38, // 42: aegisone.v1.AgentControlPlane.Renew:output_type -> aegisone.v1.RenewResponse
+	40, // 43: aegisone.v1.AgentControlPlane.ShellSession:output_type -> aegisone.v1.ShellInput
+	38, // [38:44] is the sub-list for method output_type
+	32, // [32:38] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_aegisone_v1_agent_proto_init() }
@@ -2933,15 +4749,18 @@ func file_aegisone_v1_agent_proto_init() {
 	if File_aegisone_v1_agent_proto != nil {
 		return
 	}
-	file_aegisone_v1_agent_proto_msgTypes[11].OneofWrappers = []any{
+	file_aegisone_v1_agent_proto_msgTypes[13].OneofWrappers = []any{}
+	file_aegisone_v1_agent_proto_msgTypes[25].OneofWrappers = []any{
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_CommandResult)(nil),
 		(*AgentMessage_PatchScanResult)(nil),
 		(*AgentMessage_DeviceState)(nil),
 		(*AgentMessage_CacheFull)(nil),
 		(*AgentMessage_ActionStatus)(nil),
+		(*AgentMessage_FullInventory)(nil),
+		(*AgentMessage_AuditEvent)(nil),
 	}
-	file_aegisone_v1_agent_proto_msgTypes[14].OneofWrappers = []any{
+	file_aegisone_v1_agent_proto_msgTypes[28].OneofWrappers = []any{
 		(*ServerMessage_Command)(nil),
 		(*ServerMessage_PatchBaseline)(nil),
 		(*ServerMessage_CabManifest)(nil),
@@ -2952,7 +4771,7 @@ func file_aegisone_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_aegisone_v1_agent_proto_rawDesc), len(file_aegisone_v1_agent_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   31,
+			NumMessages:   46,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -150,9 +150,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg := &aegisonev1.ServerMessage{Payload: &aegisonev1.ServerMessage_Command{Command: &aegisonev1.Command{
-		CommandId: commandID, Type: cmdType, Payload: wirePayload, Signature: signature,
-	}}}
+	msg := &aegisonev1.ServerMessage{Payload: &aegisonev1.ServerMessage_Command{Command: commands.Envelope(commandID, cmdType, wirePayload, signature, "api_client:"+caller.ClientName)}}
 	if err := h.dispatcher.Dispatch(deviceID, msg); err != nil {
 		if mErr := h.store.MarkFailed(ctx, commandID, err.Error()); mErr != nil {
 			h.log.Error("could not mark command failed", "command_id", commandID, "error", mErr.Error())

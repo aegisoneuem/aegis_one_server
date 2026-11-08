@@ -407,9 +407,7 @@ func (d *Deployer) send(ctx context.Context, x result) error {
 		WHERE id = $1`, x.id, cmdID); err != nil {
 		return err
 	}
-	msg := &aegisonev1.ServerMessage{Payload: &aegisonev1.ServerMessage_Command{Command: &aegisonev1.Command{
-		CommandId: cmdID, Type: cmdType, Payload: payload, Signature: sig,
-	}}}
+	msg := &aegisonev1.ServerMessage{Payload: &aegisonev1.ServerMessage_Command{Command: commands.Envelope(cmdID, cmdType, payload, sig, "software_deployment:"+x.deploymentID)}}
 	if err := d.disp.Dispatch(x.deviceID, msg); err != nil {
 		if mErr := d.cmds.MarkFailed(ctx, cmdID, err.Error()); mErr != nil {
 			d.log.Error("software deploy: mark command failed", "command_id", cmdID, "error", mErr.Error())

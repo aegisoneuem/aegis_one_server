@@ -10,15 +10,22 @@ import (
 )
 
 // DeviceState saves the agent's fast-lane report (OS build, UBR,
-// architecture, pending reboot) on the device row. Fields the agent left
+// architecture, pending reboot) on the device row, plus the installed update
+// set and installed apps when the report carries them. Fields the agent left
 // empty keep their old value.
-func (s *Store) DeviceState(ctx context.Context, known *identity.Known, ds *aegisonev1.DeviceStateReport) error {
+func (s *Store) DeviceState(ctx context.Context, known *identity.Known, ds *aegisonev1.DeviceStateReport) (InventorySummary, error) {
+	var sum InventorySummary
 	build, ubr := SplitBuild(ds.GetBuild())
 	var ubrArg *int
 	if ubr >= 0 {
 		ubrArg = &ubr
 	}
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return sum, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
+	if _, err := tx.Exec(ctx, `
 		UPDATE devices SET
 		    os_build       = coalesce($2, os_build),
 		    os_ubr         = CASE WHEN $2::text IS NOT NULL THEN $3 ELSE os_ubr END,
@@ -30,8 +37,16 @@ func (s *Store) DeviceState(ctx context.Context, known *identity.Known, ds *aegi
 		WHERE id = $1`,
 		known.DeviceUUID, nullIfEmpty(build), ubrArg, nullIfEmpty(NormalizeArch(ds.GetArchitecture())),
 		nullIfEmpty(ds.GetProductName()), nullIfEmpty(ds.GetDisplayVersion()),
-		ds.GetRebootPending(), nullIfEmpty(strings.Join(ds.GetRebootPendingSources(), ",")))
-	return err
+		ds.GetRebootPending(), nullIfEmpty(strings.Join(ds.GetRebootPendingSources(), ","))); err != nil {
+		return sum, err
+	}
+	if sum.KBs, err = s.installedKBs(ctx, tx, known.DeviceUUID, ds.GetInstalledKbs()); err != nil {
+		return sum, err
+	}
+	if err := s.installedApps(ctx, tx, known.DeviceUUID, ds.GetInstalledApps(), &sum); err != nil {
+		return sum, err
+	}
+	return sum, tx.Commit(ctx)
 }
 
 // SplitBuild splits the agent's "26100.4652" into build "26100" and UBR 4652.

@@ -212,6 +212,21 @@ func NewID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
+// Source is what we put in Command.source: the agent records it (with actor and
+// issued_at) in its command_received audit event.
+const Source = "aegis-server"
+
+// Envelope is the wire Command for a signed command. actor says who asked for
+// it ("api_client:<name>", "patch_deployment:<id>", ...). Actor, source and
+// issued_at are attribution for the agent's audit trail only: the signature
+// covers type, id and payload, not these.
+func Envelope(id, cmdType string, payload, signature []byte, actor string) *aegisonev1.Command {
+	return &aegisonev1.Command{
+		CommandId: id, Type: cmdType, Payload: payload, Signature: signature,
+		Actor: actor, Source: Source, IssuedAt: time.Now().Unix(),
+	}
+}
+
 // IsCommandID reports whether id has the shape of a server-issued command id
 // (agent_commands.id). The agent also sends ActionStatus for actions it starts
 // itself, e.g. scheduled scans with ids like "scan-1761130000"; those are not

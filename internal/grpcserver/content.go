@@ -8,7 +8,10 @@ package grpcserver
 //     differ, calls FetchContent{kind:"cab", id:version, sha256}, verifies the
 //     SHA-256, swaps the file in and runs a full scan. We use the SHA-256 itself
 //     as the version, so equal versions mean identical bytes.
-//   - FetchContent streams the file in chunks.
+//   - FetchContent streams the file in chunks. ContentRequest.offset resumes an
+//     interrupted download: the agent appends to its partial file and checks
+//     the whole-file SHA-256 at the end, so we stream from that byte on. An
+//     offset past the end is OutOfRange, which tells the agent to start over.
 //
 // Integrity is the SHA-256 in the manifest, which arrives over mTLS from this
 // server. The manifest itself is not Ed25519-signed: the agent's contract has no
@@ -182,7 +185,7 @@ func (s *Server) FetchContent(req *aegisonev1.ContentRequest, stream aegisonev1.
 		return status.FromContextError(ctx.Err()).Err()
 	}
 	defer func() { <-s.content.slots }()
-	return s.sendFile(stream, known.DeviceID, req.GetKind(), f)
+	return s.sendFile(stream, known.DeviceID, req.GetKind(), f, req.GetOffset())
 }
 
 // contentFile is a vetted file to stream: path on disk plus the size and hash
@@ -264,7 +267,10 @@ func (s *Server) packageFile(ctx context.Context, deviceUUID string, req *aegiso
 	return contentFile{path: s.content.software.Path(p), name: p.FileName, sha256: p.SHA256, size: p.SizeBytes}, nil
 }
 
-func (s *Server) sendFile(stream aegisonev1.AgentControlPlane_FetchContentServer, deviceID, kind string, cf contentFile) error {
+func (s *Server) sendFile(stream aegisonev1.AgentControlPlane_FetchContentServer, deviceID, kind string, cf contentFile, offset int64) error {
+	if offset < 0 || offset > cf.size {
+		return status.Errorf(codes.OutOfRange, "resume offset %d is outside the %d-byte file; start over", offset, cf.size)
+	}
 	f, err := os.Open(cf.path)
 	if err != nil {
 		s.log.Error("fetch content: file missing on disk", "kind", kind, "file", cf.name, "error", err.Error())
@@ -277,9 +283,16 @@ func (s *Server) sendFile(stream aegisonev1.AgentControlPlane_FetchContentServer
 		s.log.Error("fetch content: file size does not match catalog", "kind", kind, "file", cf.name, "want_bytes", cf.size)
 		return status.Error(codes.Internal, "content unavailable")
 	}
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			s.log.Error("fetch content: seek", "kind", kind, "file", cf.name, "offset", offset, "error", err.Error())
+			return status.Error(codes.Internal, "content read failed")
+		}
+	}
 
 	start := time.Now()
-	s.log.Info("fetch content: sending", "kind", kind, "device_id", deviceID, "file", cf.name, "sha256", cf.sha256, "size_bytes", cf.size)
+	s.log.Info("fetch content: sending", "kind", kind, "device_id", deviceID, "file", cf.name, "sha256", cf.sha256,
+		"size_bytes", cf.size, "offset", offset)
 	buf := make([]byte, contentChunkSize)
 	var sent int64
 	for {

@@ -3,8 +3,8 @@
 //
 // Each connection is identified by its mTLS client certificate fingerprint via
 // internal/identity (trust-on-first-use against the agent-reported device_id).
-// Once identified, Heartbeat/PatchScanResult messages are persisted via
-// internal/ingest. Dispatch (Dispatch) sends a signed command to a connected
+// Once identified, agent messages are persisted via internal/ingest.
+// Dispatch (Dispatch) sends a signed command to a connected
 // agent by device_id. Both identity tracking and ingestion no-op (old
 // trust-the-message-field, log-only behavior) when no database is configured.
 package grpcserver
@@ -312,20 +312,15 @@ func shortFingerprint(fp string) string {
 }
 
 func deviceIDOf(msg *aegisonev1.AgentMessage) string {
-	switch p := msg.GetPayload().(type) {
-	case *aegisonev1.AgentMessage_Heartbeat:
-		return p.Heartbeat.GetDeviceId()
-	case *aegisonev1.AgentMessage_PatchScanResult:
-		return p.PatchScanResult.GetDeviceId()
-	default:
-		return ""
-	}
+	dev, _, _, _ := identityFieldsOf(msg)
+	return dev
 }
 
-// identityFieldsOf extracts everything Bootstrap needs. PatchScanResult carries a
-// device_id but no hostname/agent_version (those come from Heartbeat) - Bootstrap
-// falls back to sensible placeholders for those when triggered this way; a
-// Heartbeat typically follows shortly and could refine them (not done yet).
+// identityFieldsOf extracts everything Bootstrap needs from any message that
+// names its device. Only Heartbeat carries hostname/agent_version; for the
+// others Bootstrap falls back to placeholders and the next Heartbeat fills
+// them in. The agent often sends its inventory before its first Heartbeat, so
+// waiting for one would drop those reports.
 func identityFieldsOf(msg *aegisonev1.AgentMessage) (deviceID, hostname, osFamily, agentVersion string) {
 	switch p := msg.GetPayload().(type) {
 	case *aegisonev1.AgentMessage_Heartbeat:
@@ -333,14 +328,21 @@ func identityFieldsOf(msg *aegisonev1.AgentMessage) (deviceID, hostname, osFamil
 		return hb.GetDeviceId(), hb.GetHostname(), hb.GetOs(), hb.GetAgentVersion()
 	case *aegisonev1.AgentMessage_PatchScanResult:
 		return p.PatchScanResult.GetDeviceId(), "", "windows", ""
+	case *aegisonev1.AgentMessage_DeviceState:
+		return p.DeviceState.GetDeviceId(), "", "windows", ""
+	case *aegisonev1.AgentMessage_FullInventory:
+		return p.FullInventory.GetDeviceId(), "", "windows", ""
+	case *aegisonev1.AgentMessage_AuditEvent:
+		return p.AuditEvent.GetDeviceId(), "", "windows", ""
+	case *aegisonev1.AgentMessage_CacheFull:
+		return p.CacheFull.GetDeviceId(), "", "windows", ""
 	default:
 		return "", "", "", ""
 	}
 }
 
 // handleMessage logs every message, and - once the connection has a resolved
-// identity and a database is configured - persists Heartbeat/PatchScanResult via
-// internal/ingest. known is nil until this connection's first identifying
+// identity and a database is configured - persists it via internal/ingest. known is nil until this connection's first identifying
 // message has been processed (or always nil if identity tracking is disabled).
 func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *aegisonev1.AgentMessage) {
 	switch payload := msg.GetPayload().(type) {
@@ -397,10 +399,15 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			"device_id", ds.GetDeviceId(),
 			"build", ds.GetBuild(),
 			"reboot_pending", ds.GetRebootPending(),
-			"reboot_pending_kbs", ds.GetRebootPendingKbs())
+			"reboot_pending_kbs", ds.GetRebootPendingKbs(),
+			"installed_kbs", len(ds.GetInstalledKbs()),
+			"installed_apps", len(ds.GetInstalledApps()))
 		if known != nil {
-			if err := s.ingest.DeviceState(ctx, known, ds); err != nil {
+			if sum, err := s.ingest.DeviceState(ctx, known, ds); err != nil {
 				s.log.Error("persist device state failed", "device_id", known.DeviceID, "error", err.Error())
+			} else if sum.AppsAdded > 0 || sum.AppsRemoved > 0 {
+				s.log.Info("software inventory changed", "device_id", known.DeviceID,
+					"apps", sum.Apps, "added", sum.AppsAdded, "removed", sum.AppsRemoved)
 			}
 			build, ubr := ingest.SplitBuild(ds.GetBuild())
 			var ubrPtr *int
@@ -419,6 +426,41 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			"needed_bytes", cf.GetNeededBytes(),
 			"cap_bytes", cf.GetCapBytes(),
 			"message", cf.GetMessage())
+
+	case *aegisonev1.AgentMessage_FullInventory:
+		inv := payload.FullInventory
+		s.log.Info("full inventory",
+			"device_id", inv.GetDeviceId(),
+			"trigger", inv.GetTrigger(),
+			"apps", len(inv.GetInstalledApps()),
+			"drivers", len(inv.GetDrivers()),
+			"appx", len(inv.GetInstalledAppx()))
+		if known != nil {
+			sum, err := s.ingest.FullInventory(ctx, known, inv)
+			if err != nil {
+				s.log.Error("persist full inventory failed", "device_id", known.DeviceID, "error", err.Error())
+			} else {
+				s.log.Info("full inventory persisted", "device_id", known.DeviceID,
+					"apps", sum.Apps, "apps_added", sum.AppsAdded, "apps_removed", sum.AppsRemoved,
+					"drivers", sum.Drivers, "appx", sum.Appx, "disks", sum.Disks, "nics", sum.NICs)
+			}
+		}
+
+	case *aegisonev1.AgentMessage_AuditEvent:
+		ev := payload.AuditEvent
+		s.log.Info("agent audit event",
+			"device_id", ev.GetDeviceId(),
+			"event_type", ev.GetEventType(),
+			"command_id", ev.GetCommandId(),
+			"command_type", ev.GetCommandType(),
+			"decision", ev.GetDecision(),
+			"signature_ok", ev.GetSignatureOk())
+		if known != nil {
+			if _, err := s.ingest.AuditEvent(ctx, known, ev); err != nil {
+				s.log.Error("persist agent audit event failed", "device_id", known.DeviceID,
+					"event_type", ev.GetEventType(), "error", err.Error())
+			}
+		}
 
 	case *aegisonev1.AgentMessage_PatchScanResult:
 		psr := payload.PatchScanResult
