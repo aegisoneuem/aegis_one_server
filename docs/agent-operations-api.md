@@ -100,7 +100,9 @@ type, because results can hold command output.
 - **Transfers:**
   - The source packs and uploads, and the server checks that the archive digest matches.
   - Each destination fetches the archive with a random content id that works only for that device.
+  - The source folder lands inside `destination` under its own name (`C:\src` copied to `D:\dst` gives `D:\dst\src\...`).
   - A move deletes the source files only after every destination has them, and the agent re-checks hashes first.
+  - A move cannot list the source device as a destination; for a move on one device use `POST files` with `move`.
   - The temporary archive is deleted at the end.
 - **Shells:**
   - The session id is random and single-use, and must be attached within its TTL.
