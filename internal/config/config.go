@@ -73,6 +73,22 @@ type Config struct {
 	// FeedScheduler runs the MSRC/CISA KEV syncs in-process (needs a database and
 	// outbound internet). Set AEGIS_FEED_SCHEDULER=off on air-gapped deployments.
 	FeedScheduler bool
+	// MSRCDocuments is how many of the newest monthly MSRC documents each
+	// scheduled sync reads (AEGIS_MSRC_DOCUMENTS, 1..12, default 2): before
+	// Patch Tuesday the newest is nearly empty, and the previous month keeps
+	// getting revised.
+	MSRCDocuments int
+
+	// CabManifest: when false (AEGIS_CAB_MANIFEST=off) agents are not told about
+	// the scan cab, so they never download it (~640 MB each). Their optional
+	// cab scan, which finds .NET / Office / standalone updates, then stops; the
+	// server-side diff still covers cumulative updates.
+	CabManifest bool
+	// CabAnnounceSpread spreads a NEW cab's announcement to connected agents
+	// over this window, in random order, instead of all at once
+	// (AEGIS_CAB_ANNOUNCE_SPREAD, e.g. "6h"; default 0 = at once). Agents that
+	// connect meanwhile get the manifest straight away.
+	CabAnnounceSpread time.Duration
 
 	LogLevel string // debug | info | warn | error
 
@@ -110,6 +126,14 @@ func Load() Config {
 	if err != nil || maxUpload < 1 {
 		maxUpload = 4 << 30
 	}
+	msrcDocs, err := strconv.Atoi(getenv("AEGIS_MSRC_DOCUMENTS", "2"))
+	if err != nil || msrcDocs < 1 || msrcDocs > 12 {
+		msrcDocs = 2
+	}
+	cabSpread, err := time.ParseDuration(getenv("AEGIS_CAB_ANNOUNCE_SPREAD", "0"))
+	if err != nil || cabSpread < 0 || cabSpread > 7*24*time.Hour {
+		cabSpread = 0
+	}
 	return Config{
 		GRPCAddr:               getenv("AEGIS_GRPC_ADDR", ":50051"),
 		HTTPAddr:               getenv("AEGIS_HTTP_ADDR", ":8080"),
@@ -132,6 +156,9 @@ func Load() Config {
 		PatchDownloadWorkers:   downloadWorkers,
 		SoftwareMaxUploadBytes: maxUpload,
 		FeedScheduler:          !strings.EqualFold(getenv("AEGIS_FEED_SCHEDULER", "on"), "off"),
+		MSRCDocuments:          msrcDocs,
+		CabManifest:            !strings.EqualFold(getenv("AEGIS_CAB_MANIFEST", "on"), "off"),
+		CabAnnounceSpread:      cabSpread,
 		LogLevel:               getenv("AEGIS_LOG_LEVEL", "info"),
 		ShutdownTimeout:        10 * time.Second,
 	}

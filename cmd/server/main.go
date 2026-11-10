@@ -143,6 +143,7 @@ func main() {
 		patches = patchcontent.New(pool, cfg.ContentDir, log)
 		software = softwaredist.NewStore(pool, cfg.ContentDir, cfg.SoftwareMaxUploadBytes, log)
 		agentSrv.EnableContent(pool, cfg.ContentDir, cfg.ContentMaxStreams, patches)
+		agentSrv.SetCabAnnounce(cfg.CabManifest, cfg.CabAnnounceSpread)
 		agentSrv.EnableSoftwareContent(software)
 		agentSrv.EnableBaseline(pool)
 		differ = patchdiff.New(pool, log)
@@ -305,7 +306,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			log.Info("feed scheduler started", "check_every", feedsched.CheckEvery.String())
-			feedsched.New(pool, log, feedJobs(cfg.ContentDir, cfg.BSDTar)...).Run(ctx)
+			feedsched.New(pool, log, feedJobs(cfg.ContentDir, cfg.BSDTar, cfg.MSRCDocuments)...).Run(ctx)
 		}()
 	}
 
@@ -326,10 +327,10 @@ func main() {
 // feedJobs lists the scheduled feeds. Names must match the content_feeds.name
 // each sync records under. MSRC runs first, but either order converges
 // (both call kev.Apply).
-func feedJobs(contentDir, bsdtar string) []feedsched.Job {
+func feedJobs(contentDir, bsdtar string, msrcDocuments int) []feedsched.Job {
 	return []feedsched.Job{
 		{Name: "microsoft_cvrf", Run: func(ctx context.Context, pool *pgxpool.Pool) (string, error) {
-			s, err := patchfeed.RunLatest(ctx, pool)
+			s, err := patchfeed.RunRecent(ctx, pool, msrcDocuments)
 			return fmt.Sprintf("%s: %d KBs, %d CVEs, %d has_kev changed, %d deadlines tightened",
 				s.DocumentID, s.KBsSeen, s.CVEsSeen, s.KEVPatchesChanged, s.DeadlinesTightened), err
 		}},

@@ -31,28 +31,53 @@ type Summary struct {
 	DeadlinesTightened int
 }
 
-// RunLatest fetches the most recently released MSRC document and syncs it - the
-// unattended path used by the feed scheduler. Older months are not backfilled;
-// import those with cmd/syncpatchfeed <document-id>.
-func RunLatest(ctx context.Context, pool *pgxpool.Pool) (Summary, error) {
-	var summary Summary
+// RunRecent fetches the n most recently released MSRC documents and syncs
+// them oldest first, so the newest data wins - the unattended path used by the
+// feed scheduler. Reading more than the newest one matters: before Patch
+// Tuesday the newest document is nearly empty, and Microsoft keeps revising
+// the previous month. Each document is its own transaction. Older months are
+// not backfilled; import those with cmd/syncpatchfeed <document-id>.
+// Summary.DocumentID lists the documents read, comma-separated; the counts are
+// totals (CVEsSeen/KBsSeen count a CVE or KB once per document).
+func RunRecent(ctx context.Context, pool *pgxpool.Pool, n int) (Summary, error) {
+	var total Summary
 	err := feedrun.Track(ctx, pool, feed, func() (string, int, int, error) {
 		client := msrc.NewClient()
-		docID, err := client.LatestUpdateID(ctx)
+		ids, err := client.RecentUpdateIDs(ctx, n)
 		if err != nil {
-			return "", 0, 0, fmt.Errorf("find latest MSRC document: %w", err)
+			return "", 0, 0, fmt.Errorf("find recent MSRC documents: %w", err)
 		}
-		summary.DocumentID = docID
-		doc, err := client.FetchDocument(ctx, docID)
-		if err != nil {
-			return "", 0, 0, err
+		total.DocumentID = strings.Join(ids, ",")
+		for _, docID := range ids {
+			doc, err := client.FetchDocument(ctx, docID)
+			if err != nil {
+				return total.DocumentID, 0, 0, fmt.Errorf("%s: %w", docID, err)
+			}
+			cves, kbs := Extract(doc)
+			one := Summary{DocumentID: docID, CVEsSeen: len(cves), KBsSeen: len(kbs)}
+			if err := runSync(ctx, pool, cves, kbs, &one); err != nil {
+				return total.DocumentID, 0, 0, fmt.Errorf("%s: %w", docID, err)
+			}
+			total.add(one)
 		}
-		cves, kbs := Extract(doc)
-		summary.CVEsSeen, summary.KBsSeen = len(cves), len(kbs)
-		err = runSync(ctx, pool, cves, kbs, &summary)
-		return docID, summary.PatchesAdded + summary.CVEsAdded, summary.PatchesUpdated + summary.CVEsUpdated, err
+		return total.DocumentID, total.PatchesAdded + total.CVEsAdded, total.PatchesUpdated + total.CVEsUpdated, nil
 	})
-	return summary, err
+	return total, err
+}
+
+// add sums one document's counts into s.
+func (s *Summary) add(o Summary) {
+	s.CVEsSeen += o.CVEsSeen
+	s.KBsSeen += o.KBsSeen
+	s.CVEsAdded += o.CVEsAdded
+	s.CVEsUpdated += o.CVEsUpdated
+	s.PatchesAdded += o.PatchesAdded
+	s.PatchesUpdated += o.PatchesUpdated
+	s.ApplicabilityRules += o.ApplicabilityRules
+	s.FixedBuilds += o.FixedBuilds
+	s.SupersedenceLinks += o.SupersedenceLinks
+	s.KEVPatchesChanged += o.KEVPatchesChanged
+	s.DeadlinesTightened += o.DeadlinesTightened
 }
 
 // Sync upserts the extracted CVE/KB data for one already-fetched MSRC document

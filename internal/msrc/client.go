@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 )
 
@@ -53,24 +54,46 @@ func (c *Client) ListUpdates(ctx context.Context) ([]UpdateSummary, error) {
 // (CurrentReleaseDate moves), so the newest revision can be a months-old
 // release.
 func (c *Client) LatestUpdateID(ctx context.Context) (string, error) {
-	updates, err := c.ListUpdates(ctx)
+	ids, err := c.RecentUpdateIDs(ctx, 1)
 	if err != nil {
 		return "", err
 	}
-	return latestID(updates)
+	return ids[0], nil
 }
 
-func latestID(updates []UpdateSummary) (string, error) {
-	var latestID, latestDate string
+// RecentUpdateIDs returns the IDs of the n most recently released monthly
+// documents (by InitialReleaseDate, like LatestUpdateID), OLDEST FIRST, so a
+// caller syncing them in order lets the newest data win.
+func (c *Client) RecentUpdateIDs(ctx context.Context, n int) ([]string, error) {
+	updates, err := c.ListUpdates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return recentIDs(updates, n)
+}
+
+func recentIDs(updates []UpdateSummary, n int) ([]string, error) {
+	valid := make([]UpdateSummary, 0, len(updates))
 	for _, u := range updates {
-		if u.InitialReleaseDate > latestDate {
-			latestDate, latestID = u.InitialReleaseDate, u.ID
+		if u.ID != "" && u.InitialReleaseDate != "" {
+			valid = append(valid, u)
 		}
 	}
-	if latestID == "" {
-		return "", fmt.Errorf("msrc: no updates returned")
+	if len(valid) == 0 {
+		return nil, fmt.Errorf("msrc: no updates returned")
 	}
-	return latestID, nil
+	sort.SliceStable(valid, func(i, j int) bool { return valid[i].InitialReleaseDate > valid[j].InitialReleaseDate })
+	if n < 1 {
+		n = 1
+	}
+	if n > len(valid) {
+		n = len(valid)
+	}
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[n-1-i] = valid[i].ID
+	}
+	return ids, nil
 }
 
 // Document is a single monthly CVRF release: one vulnerability per CVE, with

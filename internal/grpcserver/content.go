@@ -13,6 +13,10 @@ package grpcserver
 //     the whole-file SHA-256 at the end, so we stream from that byte on. An
 //     offset past the end is OutOfRange, which tells the agent to start over.
 //
+// At fleet scale every announced cab is a ~640 MB download per agent, so
+// SetCabAnnounce can turn the manifest off (agents never fetch the cab; their
+// optional cab scan stops) or spread a new cab's announcement over a window.
+//
 // Integrity is the SHA-256 in the manifest, which arrives over mTLS from this
 // server. The manifest itself is not Ed25519-signed: the agent's contract has no
 // signature field for it.
@@ -29,6 +33,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,6 +63,11 @@ type contentStore struct {
 	// software is the uploaded package store; nil means kind "package" is off.
 	software *softwaredist.Store
 
+	// announceOff stops CabManifest entirely; spread paces a new cab's
+	// announcement (0 = all at once). See SetCabAnnounce.
+	announceOff bool
+	spread      time.Duration
+
 	mu  sync.Mutex
 	cab *cabfeed.Catalog // current cab as of the last WatchCab check; nil if none
 }
@@ -68,6 +78,21 @@ type contentStore struct {
 // WatchCab.
 func (s *Server) EnableContent(pool *pgxpool.Pool, dir string, maxStreams int, patches *patchcontent.Store) {
 	s.content = &contentStore{pool: pool, dir: dir, slots: make(chan struct{}, maxStreams), patches: patches}
+}
+
+// SetCabAnnounce sets how agents learn about the scan cab: on=false sends no
+// CabManifest at all; spread > 0 announces a NEW cab to the connected agents
+// over that window in random order. Call after EnableContent, before serving.
+func (s *Server) SetCabAnnounce(on bool, spread time.Duration) {
+	if s.content == nil {
+		return
+	}
+	s.content.announceOff, s.content.spread = !on, spread
+	if !on {
+		s.log.Info("cab manifest: off (AEGIS_CAB_MANIFEST=off) - agents won't fetch the scan cab")
+	} else if spread > 0 {
+		s.log.Info("cab manifest: new cabs announced gradually", "spread", spread.String())
+	}
 }
 
 // EnableSoftwareContent turns on FetchContent kind "package". Call after
@@ -94,11 +119,15 @@ func (s *Server) WatchCab(ctx context.Context, interval time.Duration) {
 		prev := s.content.cab
 		s.content.cab = cat
 		s.content.mu.Unlock()
-		if cat == nil || (prev != nil && prev.SHA256 == cat.SHA256) {
+		if cat == nil || (prev != nil && prev.SHA256 == cat.SHA256) || s.content.announceOff {
 			return
 		}
 		if prev == nil {
 			s.log.Info("cab manifest: serving scan cab", "sha256", cat.SHA256, "size_bytes", cat.SizeBytes)
+		}
+		if s.content.spread > 0 {
+			go s.announceSpread(ctx, cat.SHA256, s.content.spread)
+			return
 		}
 		sent, skipped := s.broadcast(s.cabManifestMessage())
 		if prev != nil || sent > 0 {
@@ -118,10 +147,63 @@ func (s *Server) WatchCab(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// announceSpread sends the CabManifest for cab sha256 to the agents connected
+// now, one at a time, evenly over spread in random order. It stops early if a
+// newer cab becomes current (that one starts its own round). Agents that
+// connect meanwhile already got the manifest in register; a repeat is harmless,
+// the agent compares versions.
+func (s *Server) announceSpread(ctx context.Context, sha256 string, spread time.Duration) {
+	s.mu.Lock()
+	devices := make([]string, 0, len(s.clients))
+	for dev := range s.clients {
+		devices = append(devices, dev)
+	}
+	s.mu.Unlock()
+	if len(devices) == 0 {
+		return
+	}
+	rand.Shuffle(len(devices), func(i, j int) { devices[i], devices[j] = devices[j], devices[i] })
+	gap := spread / time.Duration(len(devices))
+	s.log.Info("cab manifest: announcing new scan cab gradually", "sha256", sha256, "agents", len(devices),
+		"spread", spread.String(), "gap", gap.String())
+	sent, skipped, gone := 0, 0, 0
+	t := time.NewTimer(0)
+	defer t.Stop()
+	for i, dev := range devices {
+		if i > 0 {
+			t.Reset(gap)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		msg := s.cabManifestMessage()
+		if msg == nil || msg.GetCabManifest().GetSha256() != sha256 {
+			s.log.Info("cab manifest: newer cab current, stopping this announcement", "sha256", sha256, "sent", sent)
+			return
+		}
+		s.mu.Lock()
+		ch, ok := s.clients[dev]
+		if ok {
+			select {
+			case ch <- msg:
+				sent++
+			default:
+				skipped++
+			}
+		} else {
+			gone++ // disconnected; it gets the manifest when it reconnects
+		}
+		s.mu.Unlock()
+	}
+	s.log.Info("cab manifest: new scan cab announced", "sha256", sha256, "agents", sent, "queue_full", skipped, "disconnected", gone)
+}
+
 // cabManifestMessage is the CabManifest for the current cab, or nil if content
-// delivery is off or there is no cab yet.
+// delivery or the manifest is off, or there is no cab yet.
 func (s *Server) cabManifestMessage() *aegisonev1.ServerMessage {
-	if s.content == nil {
+	if s.content == nil || s.content.announceOff {
 		return nil
 	}
 	s.content.mu.Lock()
