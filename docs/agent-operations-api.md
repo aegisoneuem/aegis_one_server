@@ -75,6 +75,24 @@ type, because results can hold command output.
   - Nothing is deleted.
 - **Coming back:** only by enrolling again with an enrollment token, which checks the license again. With trust-on-first-use (dev, no enrollment CA), a retired device can't bind a new certificate.
 
+## Patch push: `/internal/deploy` (`patch.deploy`)
+
+- `POST /internal/deploy?device_id=<DEVICE_ID>&kb=KB5066835` pushes one missing patch to one device.
+- `GET /internal/deploy?id=<deployment_id>` shows progress.
+
+**Several files per push.** A 24H2+ cumulative update ships its own `.msu` plus the checkpoint `.msu` file(s) it builds on. The agent installs one file per `install_patch`, so the server takes each file through stage → install in turn:
+- **Order:** checkpoints first, oldest KB first, then the pushed KB.
+- **Where the files come from:** the update the device reported. With the server-side diff (no UpdateID), the update that lists the KB's own file.
+- **Already installed:** a checkpoint the device already has comes back `NOT_APPLICABLE` and the push moves on.
+- **Failure:** any failed file fails the push, and the error names it (`file 1/2 (KB5043080): ...`).
+- **Reboot:** a reboot a file asks for does not stop the next file; it shows in `file_results`.
+- **Limit:** at most 6 files per push.
+
+The status shows:
+- `files`: the install order.
+- `file_number`: the file being worked on.
+- `file_results`: one entry per finished file, with `phase`, `reboot_required` and `reason`.
+
 ## Software distribution v2
 
 `POST /internal/software/packages` (multipart) accepts these fields on top of v1:

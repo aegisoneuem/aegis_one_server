@@ -65,7 +65,10 @@ type resultView struct {
 	Step         *string    `json:"step,omitempty"`
 	File         *string    `json:"file,omitempty"`
 	Download     *string    `json:"download_state,omitempty"`
-	SkippedFiles []string   `json:"skipped_files,omitempty"`
+	SkippedFiles []string   `json:"skipped_files,omitempty"` // rows from before multi-file pushes
+	Files        []PlanFile `json:"files,omitempty"`         // install order
+	FileNumber   int        `json:"file_number,omitempty"`   // 1-based: the file being worked on
+	FileResults  []any      `json:"file_results,omitempty"`  // one entry per finished file
 	StageCmd     *string    `json:"stage_command_id,omitempty"`
 	InstallCmd   *string    `json:"install_command_id,omitempty"`
 	Error        *string    `json:"error,omitempty"`
@@ -87,7 +90,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.d.pool.Query(r.Context(), `
 		SELECT r.id, dv.agent_reported_id, p.kb_or_advisory_id, r.status, r.step, pc.file_name, pc.state, r.skipped_files,
-		       r.stage_command_id::text, r.install_command_id::text, r.error_message, r.started_at, r.completed_at
+		       r.files, r.file_index, r.file_results, r.stage_command_id::text, r.install_command_id::text, r.error_message, r.started_at, r.completed_at
 		FROM patch_deployment_results r
 		JOIN devices dv ON dv.id = r.device_id
 		JOIN patch_catalog p ON p.id = r.patch_id
@@ -102,11 +105,15 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	results := []resultView{}
 	for rows.Next() {
 		var v resultView
+		var fileIndex int
 		if err := rows.Scan(&v.ResultID, &v.DeviceID, &v.KB, &v.Status, &v.Step, &v.File, &v.Download, &v.SkippedFiles,
-			&v.StageCmd, &v.InstallCmd, &v.Error, &v.StartedAt, &v.CompletedAt); err != nil {
+			&v.Files, &fileIndex, &v.FileResults, &v.StageCmd, &v.InstallCmd, &v.Error, &v.StartedAt, &v.CompletedAt); err != nil {
 			h.log.Error("patch deploy: status scan", "error", err.Error())
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
+		}
+		if len(v.Files) > 0 {
+			v.FileNumber = fileIndex + 1
 		}
 		results = append(results, v)
 	}

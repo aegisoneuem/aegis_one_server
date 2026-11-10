@@ -13,10 +13,12 @@
 // cache (filled by stage_patch via FetchContent) or a local path, so the two
 // commands are sent strictly in sequence.
 //
-// One file per push for now: the .msu named for the pushed KB. Other
-// installable files of the same update (e.g. the checkpoint .msu a 24H2
-// cumulative needs first) are recorded in skipped_files until the agent can
-// install several files in one go.
+// Several files per push: a 24H2+ cumulative ships its .msu plus the
+// checkpoint .msu file(s) it builds on, and the agent installs one file per
+// install_patch. So each file goes through stage -> install in turn,
+// checkpoints first (oldest KB first), the pushed KB last. A checkpoint the
+// device already has comes back NOT_APPLICABLE and the push moves on; any
+// failed file fails the push.
 //
 // State lives in patch_deployments / patch_deployment_results; Run polls it, so
 // a server restart resumes where it left off. A device that is offline just
@@ -30,6 +32,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +54,9 @@ const (
 	// commandTimeout fails a step whose command got no final answer: the agent
 	// may have lost it (e.g. it restarted mid-fetch) and nothing re-sends it.
 	commandTimeout = 6 * time.Hour
+	// maxPlanFiles caps one push; a cumulative has its own file plus one or
+	// two checkpoints.
+	maxPlanFiles = 6
 )
 
 type Dispatcher interface {
@@ -90,13 +97,69 @@ type Request struct {
 }
 
 type Created struct {
-	DeploymentID string   `json:"deployment_id"`
-	ResultID     string   `json:"result_id"`
-	KB           string   `json:"kb"`
-	UpdateID     string   `json:"update_id"`
-	File         string   `json:"file"`
-	SkippedFiles []string `json:"skipped_files,omitempty"`
-	Downloaded   bool     `json:"already_downloaded"`
+	DeploymentID string `json:"deployment_id"`
+	ResultID     string `json:"result_id"`
+	KB           string `json:"kb"`
+	UpdateID     string `json:"update_id"`
+	File         string `json:"file"`
+	// Files is the install order: checkpoints first, File last.
+	Files      []PlanFile `json:"files"`
+	Downloaded bool       `json:"already_downloaded"`
+}
+
+// PlanFile is one file of a push, as stored in patch_deployment_results.files.
+type PlanFile struct {
+	KB     string `json:"kb"`
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
+}
+
+// installPlan orders an update's installable files for kb: the other KBs'
+// files (checkpoints) first, oldest KB first, then kb's own file. Duplicates
+// (same digest) are dropped.
+func installPlan(files []wucatalog.File, kb string) ([]PlanFile, error) {
+	var main *PlanFile
+	var others []PlanFile
+	seen := map[string]bool{}
+	for _, f := range files {
+		if seen[f.Digest] {
+			continue
+		}
+		seen[f.Digest] = true
+		fkb := wucatalog.KBOf(f.Name)
+		if fkb == "" {
+			continue
+		}
+		pf := PlanFile{KB: "KB" + fkb, Name: f.Name, Digest: f.Digest}
+		if pf.KB == kb {
+			if main != nil {
+				return nil, userErr("%s has two files in this update (%s, %s); can't tell which to install", kb, main.Name, pf.Name)
+			}
+			main = &pf
+			continue
+		}
+		others = append(others, pf)
+	}
+	if main == nil {
+		names := make([]string, 0, len(files))
+		for _, f := range files {
+			names = append(names, f.Name)
+		}
+		return nil, userErr("no file named for %s (files: %s)", kb, strings.Join(names, ", "))
+	}
+	sort.SliceStable(others, func(i, j int) bool {
+		a, _ := strconv.Atoi(strings.TrimPrefix(others[i].KB, "KB"))
+		b, _ := strconv.Atoi(strings.TrimPrefix(others[j].KB, "KB"))
+		if a != b {
+			return a < b
+		}
+		return others[i].Name < others[j].Name
+	})
+	plan := append(others, *main)
+	if len(plan) > maxPlanFiles {
+		return nil, userErr("%s needs %d files, more than the %d one push handles", kb, len(plan), maxPlanFiles)
+	}
+	return plan, nil
 }
 
 // Create starts pushing req.KB to one device.
@@ -166,26 +229,34 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		if len(files) == 0 {
 			return nil, userErr("no %s file for %s in the current scan cab (not indexed yet, or no package for this architecture)", deref(arch), kb)
 		}
-	}
-	var main *wucatalog.File
-	skipped := []string{} // non-nil: the column is NOT NULL
-	for i := range files {
-		if main == nil && "KB"+wucatalog.KBOf(files[i].Name) == kb {
-			main = &files[i]
-			continue
+		// The checkpoint files sit in the same update as the KB's own file.
+		if files, err = d.withUpdateSiblings(ctx, files[0], deref(arch)); err != nil {
+			return nil, err
 		}
-		skipped = append(skipped, files[i].Name)
 	}
-	if main == nil {
-		return nil, userErr("no file named for %s (files: %s)", kb, strings.Join(skipped, ", "))
-	}
-
-	notReady, err := d.content.Request(ctx, []wucatalog.File{*main})
+	plan, err := installPlan(files, kb)
 	if err != nil {
 		return nil, err
 	}
+	byDigest := make(map[string]wucatalog.File, len(files))
+	for _, f := range files {
+		byDigest[f.Digest] = f
+	}
+	download := make([]wucatalog.File, 0, len(plan))
+	for _, pf := range plan {
+		download = append(download, byDigest[pf.Digest])
+	}
+	notReady, err := d.content.Request(ctx, download)
+	if err != nil {
+		return nil, err
+	}
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		return nil, err
+	}
+	main := plan[len(plan)-1]
 
-	out := &Created{KB: kb, UpdateID: deref(updateID), File: main.Name, SkippedFiles: skipped, Downloaded: notReady == 0}
+	out := &Created{KB: kb, UpdateID: deref(updateID), File: main.Name, Files: plan, Downloaded: notReady == 0}
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -199,9 +270,9 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO patch_deployment_results
-			(deployment_id, device_id, patch_id, status, step, vendor_update_id, file_digest, skipped_files, started_at)
-		VALUES ($1, $2, $3, 'in_progress', 'downloading', $4, $5, $6, now())
-		RETURNING id`, out.DeploymentID, deviceUUID, patchID, updateID, main.Digest, skipped).Scan(&out.ResultID)
+			(deployment_id, device_id, patch_id, status, step, vendor_update_id, file_digest, files, started_at)
+		VALUES ($1, $2, $3, 'in_progress', 'downloading', $4, $5, $6::jsonb, now())
+		RETURNING id`, out.DeploymentID, deviceUUID, patchID, updateID, plan[0].Digest, string(planJSON)).Scan(&out.ResultID)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.ConstraintName == "uq_pdr_active_device_patch" {
 		return nil, userErr("%s is already being pushed to this device", kb)
@@ -211,7 +282,7 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 	}
 	details, _ := json.Marshal(map[string]any{
 		"deployment_id": out.DeploymentID, "device_id": req.DeviceID, "kb": kb,
-		"update_id": deref(updateID), "file": main.Name, "skipped_files": skipped,
+		"update_id": deref(updateID), "file": main.Name, "files": plan,
 	})
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_log (actor_type, actor_api_client_id, actor_label, action, target_type, target_id, details)
@@ -223,7 +294,7 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, err
 	}
 	d.log.Info("patch deployment created", "deployment_id", out.DeploymentID, "device_id", req.DeviceID, "kb", kb,
-		"file", main.Name, "skipped_files", len(skipped), "already_downloaded", out.Downloaded)
+		"file", main.Name, "files", len(plan), "already_downloaded", out.Downloaded)
 	d.kick()
 	return out, nil
 }
@@ -264,6 +335,31 @@ func (d *Deployer) filesForKB(ctx context.Context, kb, arch string) ([]wucatalog
 			kb, len(out), arch, strings.Join(names, ", "))
 	}
 	return out, nil
+}
+
+// withUpdateSiblings returns main plus the other installable files of the
+// update(s) main belongs to, for arch: that is where a cumulative's checkpoint
+// .msu is listed.
+func (d *Deployer) withUpdateSiblings(ctx context.Context, main wucatalog.File, arch string) ([]wucatalog.File, error) {
+	rows, err := d.pool.Query(ctx, `
+		SELECT DISTINCT f.file_digest, f.file_name, f.url FROM wu_update_files f
+		WHERE f.update_id IN (SELECT update_id FROM wu_update_files WHERE file_digest = $1)
+		ORDER BY f.file_name`, main.Digest)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []wucatalog.File{main}
+	for rows.Next() {
+		var f wucatalog.File
+		if err := rows.Scan(&f.Digest, &f.Name, &f.URL); err != nil {
+			return nil, err
+		}
+		if f.Digest != main.Digest && ArchMatches(f.Name, arch) {
+			out = append(out, f)
+		}
+	}
+	return out, rows.Err()
 }
 
 // ArchMatches reports whether a Windows update file name is for arch (x64,
@@ -324,8 +420,31 @@ type row struct {
 	stageStatus, installStatus                    *string
 	stageAt, installAt                            *time.Time
 	stageReason, installReason                    *string
+	installPhase                                  *string
+	installReboot                                 *bool
 	patchState                                    *string // device_patch_state.state now; nil = row gone (no longer applicable)
+	files                                         []PlanFile
+	fileIndex                                     int
 }
+
+// fileKB is the KB of the file being worked on (the pushed KB for a one-file
+// row created before 0022).
+func (x row) fileKB() string {
+	if x.fileIndex < len(x.files) {
+		return x.files[x.fileIndex].KB
+	}
+	return x.kb
+}
+
+// fileLabel prefixes reasons with which file it is, when there are several.
+func (x row) fileLabel() string {
+	if len(x.files) < 2 || x.fileIndex >= len(x.files) {
+		return ""
+	}
+	return fmt.Sprintf("file %d/%d (%s): ", x.fileIndex+1, len(x.files), x.files[x.fileIndex].KB)
+}
+
+func (x row) lastFile() bool { return x.fileIndex >= len(x.files)-1 }
 
 func (d *Deployer) advanceAll(ctx context.Context) error {
 	rows, err := d.pool.Query(ctx, `
@@ -334,7 +453,8 @@ func (d *Deployer) advanceAll(ctx context.Context) error {
 		       pc.state, pc.file_name, pc.sha256_hash, pc.last_error,
 		       r.stage_command_id::text, r.install_command_id::text,
 		       sc.status, ic.status, COALESCE(sc.dispatched_at, sc.issued_at), COALESCE(ic.dispatched_at, ic.issued_at),
-		       sc.result->>'reason', ic.result->>'reason', dps.state
+		       sc.result->>'reason', ic.result->>'reason', ic.result->>'phase', (ic.result->>'reboot_required')::boolean,
+		       dps.state, r.files, r.file_index
 		FROM patch_deployment_results r
 		JOIN patch_deployments pd ON pd.id = r.deployment_id
 		JOIN devices dv ON dv.id = r.device_id
@@ -354,7 +474,8 @@ func (d *Deployer) advanceAll(ctx context.Context) error {
 		var x row
 		if err := rows.Scan(&x.id, &x.deploymentID, &x.deviceID, &x.agentID, &x.kb, &x.step, &x.clientID,
 			&x.contentState, &x.fileName, &x.sha256, &x.contentErr, &x.stageID, &x.installID,
-			&x.stageStatus, &x.installStatus, &x.stageAt, &x.installAt, &x.stageReason, &x.installReason, &x.patchState); err != nil {
+			&x.stageStatus, &x.installStatus, &x.stageAt, &x.installAt, &x.stageReason, &x.installReason,
+			&x.installPhase, &x.installReboot, &x.patchState, &x.files, &x.fileIndex); err != nil {
 			rows.Close()
 			return err
 		}
@@ -396,7 +517,7 @@ func (d *Deployer) advance(ctx context.Context, x row) error {
 		case "ready":
 			return d.sendStep(ctx, x, "stage_patch", "staging")
 		case "failed":
-			return d.finish(ctx, x, false, "server download failed: "+deref(x.contentErr))
+			return d.finish(ctx, x, false, x.fileLabel()+"server download failed: "+deref(x.contentErr))
 		}
 		return nil // pending / downloading
 
@@ -405,28 +526,69 @@ func (d *Deployer) advance(ctx context.Context, x row) error {
 		case "succeeded":
 			return d.sendStep(ctx, x, "install_patch", "installing")
 		case "failed", "rejected_signature", "expired":
-			return d.finish(ctx, x, false, fmt.Sprintf("stage_patch %s: %s", deref(x.stageStatus), deref(x.stageReason)))
+			return d.finish(ctx, x, false, fmt.Sprintf("%sstage_patch %s: %s", x.fileLabel(), deref(x.stageStatus), deref(x.stageReason)))
 		}
 		if timedOut(x.stageAt) {
-			return d.finish(ctx, x, false, "no final answer to stage_patch from the agent")
+			return d.finish(ctx, x, false, x.fileLabel()+"no final answer to stage_patch from the agent")
 		}
 		return nil
 
 	case "installing":
 		switch deref(x.installStatus) {
-		case "succeeded":
+		case "succeeded": // SUCCESS or NOT_APPLICABLE (e.g. a checkpoint the device already has)
+			if !x.lastFile() {
+				return d.nextFile(ctx, x)
+			}
 			return d.finish(ctx, x, true, "")
 		case "failed", "rejected_signature", "expired":
-			return d.finish(ctx, x, false, fmt.Sprintf("install_patch %s: %s", deref(x.installStatus), deref(x.installReason)))
+			return d.finish(ctx, x, false, fmt.Sprintf("%sinstall_patch %s: %s", x.fileLabel(), deref(x.installStatus), deref(x.installReason)))
 		}
 		if timedOut(x.installAt) {
-			return d.finish(ctx, x, false, "no final answer to install_patch from the agent")
+			return d.finish(ctx, x, false, x.fileLabel()+"no final answer to install_patch from the agent")
 		}
 	}
 	return nil
 }
 
 func timedOut(at *time.Time) bool { return at != nil && time.Since(*at) > commandTimeout }
+
+// fileResult is the file_results entry for x's current file, once its
+// install_patch has a final answer; nil before that.
+func (x row) fileResult() []byte {
+	if x.step != "installing" || x.installID == nil || x.fileIndex >= len(x.files) {
+		return nil
+	}
+	f := x.files[x.fileIndex]
+	b, _ := json.Marshal(map[string]any{
+		"kb": f.KB, "file": f.Name, "command_id": deref(x.installID), "status": deref(x.installStatus),
+		"phase": deref(x.installPhase), "reboot_required": x.installReboot != nil && *x.installReboot,
+		"reason": deref(x.installReason),
+	})
+	return b
+}
+
+// nextFile records the finished file and moves x to the next one in the plan.
+// The file was requested for download at Create, so it is usually ready.
+func (d *Deployer) nextFile(ctx context.Context, x row) error {
+	next := x.files[x.fileIndex+1]
+	tag, err := d.pool.Exec(ctx, `
+		UPDATE patch_deployment_results SET
+			file_results = file_results || jsonb_build_array($3::jsonb),
+			file_index = $2 + 1, file_digest = $4, step = 'downloading',
+			stage_command_id = NULL, install_command_id = NULL, updated_at = now()
+		WHERE id = $1 AND file_index = $2 AND status = 'in_progress'`,
+		x.id, x.fileIndex, string(x.fileResult()), next.Digest)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 {
+		d.log.Info("patch deploy: file done, next file", "result_id", x.id, "device_id", x.deviceID, "done_kb", x.fileKB(),
+			"phase", deref(x.installPhase), "reboot_required", x.installReboot != nil && *x.installReboot,
+			"next_kb", next.KB, "file", fmt.Sprintf("%d/%d", x.fileIndex+2, len(x.files)))
+		d.kick()
+	}
+	return nil
+}
 
 // sendStep signs and dispatches cmdType for x and moves it to nextStep. An
 // offline device is left as is and retried on a later tick.
@@ -442,7 +604,7 @@ func (d *Deployer) sendStep(ctx context.Context, x row, cmdType, nextStep string
 	}
 	// file_path only carries the extension (.msu/.cab) the agent keeps for
 	// DISM; the bytes come from its cache, filled by stage_patch.
-	spec := &aegisonev1.InstallPatchSpec{Kb: x.kb, FilePath: deref(x.fileName), ExpectedHash: deref(x.sha256), HashAlgorithm: "sha256"}
+	spec := &aegisonev1.InstallPatchSpec{Kb: x.fileKB(), FilePath: deref(x.fileName), ExpectedHash: deref(x.sha256), HashAlgorithm: "sha256"}
 	payload, err := proto.Marshal(spec)
 	if err != nil {
 		return err
@@ -459,7 +621,7 @@ func (d *Deployer) sendStep(ctx context.Context, x row, cmdType, nextStep string
 			"hash_algorithm": spec.HashAlgorithm, "patch_deployment_id": x.deploymentID,
 		},
 		Signature: sig, SigningKeyID: d.keyID,
-		IdempotencyKey:      fmt.Sprintf("patchdeploy:%s:%s:%d", x.id, cmdType, attempt),
+		IdempotencyKey:      fmt.Sprintf("patchdeploy:%s:%d:%s:%d", x.id, x.fileIndex, cmdType, attempt),
 		IssuedByAPIClientID: deref(x.clientID), IssuedByLabel: "patch deployment " + x.deploymentID,
 		SourceJobType: "patch_deployment", SourceJobID: x.deploymentID,
 	})
@@ -488,7 +650,8 @@ func (d *Deployer) sendStep(ctx context.Context, x row, cmdType, nextStep string
 		x.id, nextStep, cmdID); err != nil {
 		return err
 	}
-	d.log.Info("patch deploy: command sent", "result_id", x.id, "device_id", x.deviceID, "kb", x.kb, "command", cmdType, "command_id", cmdID)
+	d.log.Info("patch deploy: command sent", "result_id", x.id, "device_id", x.deviceID, "kb", x.kb, "file_kb", spec.Kb,
+		"command", cmdType, "command_id", cmdID)
 	return nil
 }
 
@@ -504,9 +667,15 @@ func (d *Deployer) finish(ctx context.Context, x row, ok bool, reason string) er
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
+	var fileResult *string
+	if b := x.fileResult(); b != nil {
+		s := string(b)
+		fileResult = &s
+	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE patch_deployment_results SET status = $2, error_message = NULLIF($3, ''), completed_at = now(), updated_at = now()
-		WHERE id = $1 AND status = 'in_progress'`, x.id, status, reason); err != nil {
+		UPDATE patch_deployment_results SET status = $2, error_message = NULLIF($3, ''), completed_at = now(), updated_at = now(),
+			file_results = CASE WHEN $4::jsonb IS NULL THEN file_results ELSE file_results || jsonb_build_array($4::jsonb) END
+		WHERE id = $1 AND status = 'in_progress'`, x.id, status, reason, fileResult); err != nil {
 		return err
 	}
 	if !ok {
