@@ -32,6 +32,7 @@ import (
 	"aegis-one/internal/crypto"
 	"aegis-one/internal/db"
 	"aegis-one/internal/dbmigrate"
+	"aegis-one/internal/devices"
 	"aegis-one/internal/enroll"
 	"aegis-one/internal/feedsched"
 	"aegis-one/internal/grpcserver"
@@ -401,6 +402,12 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 		mux.Handle("/internal/remote/", auth.Require("", remoteops.NewHandler(pool, remote.sender, remote.uploads, remote.transfers, remote.shells, log)))
 	}
 	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool)))
+	if pool != nil {
+		// Checks devices.view / devices.manage per route.
+		dh := auth.Require("", devices.New(pool, agentSrv, log))
+		mux.Handle("/internal/devices", dh)
+		mux.Handle("/internal/devices/", dh)
+	}
 	// /content/* authorizes per request: agent mTLS cert or a content.download token.
 	mux.Handle("/content/", contentapi.New(pool, contentDir, identity.New(pool), auth, log))
 	return mux

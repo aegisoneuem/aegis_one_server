@@ -58,10 +58,13 @@ type Server struct {
 
 	mu      sync.Mutex
 	clients map[string]chan *aegisonev1.ServerMessage // device_id -> outbound queue
+	// device_id -> every live stream's kick channel (an old stream can outlive a
+	// reconnect for a moment); Disconnect closes them all.
+	kicks map[string]map[chan *aegisonev1.ServerMessage]chan struct{}
 }
 
 func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store, cmds *commands.Store, enr *enroll.Service) *Server {
-	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, enroll: enr, clients: make(map[string]chan *aegisonev1.ServerMessage)}
+	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, enroll: enr, clients: make(map[string]chan *aegisonev1.ServerMessage), kicks: make(map[string]map[chan *aegisonev1.ServerMessage]chan struct{})}
 }
 
 // EnablePatchDiff turns on the server-side patch diff after each
@@ -207,8 +210,22 @@ func (s *Server) Connected(deviceID string) bool {
 	return ok
 }
 
-func (s *Server) register(deviceID string) chan *aegisonev1.ServerMessage {
+// Disconnect ends deviceID's live stream (used when the device is retired; its
+// revoked certificate then keeps it out). Reports whether a stream was live.
+func (s *Server) Disconnect(deviceID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	streams := s.kicks[deviceID]
+	for _, kick := range streams {
+		close(kick)
+	}
+	delete(s.kicks, deviceID)
+	return len(streams) > 0
+}
+
+func (s *Server) register(deviceID string) (chan *aegisonev1.ServerMessage, chan struct{}) {
 	ch := make(chan *aegisonev1.ServerMessage, 16)
+	kick := make(chan struct{})
 	// Tell a (re)connecting agent which scan cab is current; it fetches only if
 	// its own copy differs. The queue is new and empty, so this never blocks.
 	if m := s.cabManifestMessage(); m != nil {
@@ -216,8 +233,12 @@ func (s *Server) register(deviceID string) chan *aegisonev1.ServerMessage {
 	}
 	s.mu.Lock()
 	s.clients[deviceID] = ch
+	if s.kicks[deviceID] == nil {
+		s.kicks[deviceID] = make(map[chan *aegisonev1.ServerMessage]chan struct{})
+	}
+	s.kicks[deviceID][ch] = kick
 	s.mu.Unlock()
-	return ch
+	return ch, kick
 }
 
 // unregister removes deviceID's queue only if it is still ch: when an agent
@@ -228,6 +249,12 @@ func (s *Server) unregister(deviceID string, ch chan *aegisonev1.ServerMessage) 
 	if s.clients[deviceID] == ch {
 		delete(s.clients, deviceID)
 	}
+	if streams := s.kicks[deviceID]; streams != nil {
+		delete(streams, ch)
+		if len(streams) == 0 {
+			delete(s.kicks, deviceID)
+		}
+	}
 	s.mu.Unlock()
 	s.baselineDisconnected(deviceID, ch)
 }
@@ -235,6 +262,7 @@ func (s *Server) unregister(deviceID string, ch chan *aegisonev1.ServerMessage) 
 type registration struct {
 	deviceID string
 	outbound chan *aegisonev1.ServerMessage
+	kick     chan struct{}
 }
 
 func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) error {
@@ -274,8 +302,8 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 		resolved := known
 		if resolved != nil {
 			deviceID = resolved.DeviceID
-			ch := s.register(deviceID)
-			registeredCh <- registration{deviceID: deviceID, outbound: ch}
+			ch, kick := s.register(deviceID)
+			registeredCh <- registration{deviceID: deviceID, outbound: ch, kick: kick}
 			s.baselineConnected(ctx, resolved, ch)
 		}
 		for {
@@ -296,8 +324,8 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 						resolved = k
 					}
 					deviceID = dev
-					ch := s.register(deviceID)
-					registeredCh <- registration{deviceID: deviceID, outbound: ch}
+					ch, kick := s.register(deviceID)
+					registeredCh <- registration{deviceID: deviceID, outbound: ch, kick: kick}
 					s.baselineConnected(ctx, resolved, ch)
 					s.log.Info("agent identified", "device_id", deviceID, "bootstrapped", resolved != nil && known == nil)
 				}
@@ -311,6 +339,7 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 
 	var deviceID string
 	var outbound chan *aegisonev1.ServerMessage
+	var kick chan struct{}
 	for {
 		select {
 		case err := <-recvErrCh:
@@ -326,7 +355,12 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 			return err
 
 		case reg := <-registeredCh:
-			deviceID, outbound = reg.deviceID, reg.outbound
+			deviceID, outbound, kick = reg.deviceID, reg.outbound, reg.kick
+
+		case <-kick: // nil until registered
+			s.unregister(deviceID, outbound)
+			s.log.Info("agent disconnected: device retired", "device_id", deviceID)
+			return status.Error(codes.PermissionDenied, "agent revoked")
 
 		case msg := <-outbound: // nil until registered; a nil channel is never selected
 			if err := stream.Send(msg); err != nil {

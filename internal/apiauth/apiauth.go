@@ -66,6 +66,9 @@ const (
 	// PermDevicesView (seeded for operator) also allows the harmless refresh
 	// triggers scan_now and report_device_state.
 	PermDevicesView = "devices.view"
+	// PermDevicesManage retires devices (revokes the agent and its
+	// certificates). Admin-only by default.
+	PermDevicesManage = "devices.manage"
 )
 
 type Principal struct {

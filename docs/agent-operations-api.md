@@ -20,7 +20,8 @@ type, because results can hold command output.
 
 | Permission | Default role | Covers |
 |---|---|---|
-| `devices.view` | operator | `scan_now`, `report_device_state` |
+| `devices.view` | operator | device list / detail / summary, `scan_now`, `report_device_state` |
+| `devices.manage` | admin | retire devices |
 | `patch.deploy` | operator | `uninstall_patch`, patch deployments |
 | `software.deploy` | operator | packages and deployments (msi/exe/inf/msix, bundles with an installer entry point) |
 | `software.script` | admin | script packages, bundle commands, deployment steps |
@@ -47,6 +48,32 @@ type, because results can hold command output.
 - `cancel_reboot` cancels any pending Windows shutdown, not only one we scheduled. If nothing is pending it returns FAILED.
 - `uninstall_patch`: the device's build is sent so the agent can find a cumulative update's package. Windows refuses to remove some LCU/SSU updates; that comes back as FAILED with the reason.
 - `report_device_state` forces a DeviceStateReport, so the server-side patch diff runs again.
+
+## Devices: `/internal/devices`
+
+| Call | Body / query |
+|---|---|
+| `GET /internal/devices` | `state` (online, offline, stale, retired, unmanaged, all), `q` (hostname prefix or exact device_id), `limit` (1..1000, default 100), `after` (the previous page's `next_after`) |
+| `GET /internal/devices?id=` | one device, plus agent enrollment time and certificate expiry |
+| `GET /internal/devices/summary` | count per state |
+| `POST /internal/devices/retire` | `{"device_ids": [...], "reason": "..."}`; reason is required, at most 256 characters |
+
+- **State:**
+  - `online`: last heartbeat within `agent.offline_after_minutes` (default 15).
+  - `offline`: older than that, but within `device.stale_after_days` (default 30).
+  - `stale`: older than that, or never seen.
+  - `retired`: retired by an admin.
+  - Both settings live in `system_settings`. `connected` shows whether the agent has a live stream right now.
+- **Retire**, per device:
+  - Revokes the agent and its certificates.
+  - Fails the device's open commands (`device retired`), so deployments and transfers move on.
+  - Ends the live stream and writes `audit_log` (`device.retire`).
+  - The result is `retired`, `already_retired` or `unknown_device`.
+- After retiring:
+  - The agent is refused at every reconnect.
+  - The device leaves compliance reports and frees its license seat.
+  - Nothing is deleted.
+- **Coming back:** only by enrolling again with an enrollment token, which checks the license again. With trust-on-first-use (dev, no enrollment CA), a retired device can't bind a new certificate.
 
 ## Software distribution v2
 

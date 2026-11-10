@@ -98,8 +98,11 @@ func (r *Resolver) Bootstrap(ctx context.Context, fingerprint string, cert *x509
 		return nil, fmt.Errorf("check existing binding: %w", err)
 	}
 
-	var deviceUUID string
-	err = tx.QueryRow(ctx, `SELECT id FROM devices WHERE agent_reported_id = $1`, deviceID).Scan(&deviceUUID)
+	var deviceUUID, deviceStatus string
+	err = tx.QueryRow(ctx, `SELECT id, status FROM devices WHERE agent_reported_id = $1`, deviceID).Scan(&deviceUUID, &deviceStatus)
+	if err == nil && deviceStatus == "decommissioned" {
+		return nil, fmt.Errorf("device_id %q is retired - it can come back only by enrolling again with a token", deviceID)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(ctx, `
 			INSERT INTO devices (hostname, os_family, agent_reported_id, first_seen_at, last_seen_at)

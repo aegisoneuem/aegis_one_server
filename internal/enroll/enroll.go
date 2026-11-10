@@ -155,7 +155,8 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 				smbios_uuid = COALESCE(NULLIF($3, ''), smbios_uuid),
 				machine_id  = COALESCE(NULLIF($4, ''), machine_id),
 				hostname    = COALESCE(NULLIF($5, ''), hostname),
-				computer_id = $6, status = 'active', last_seen_at = now()
+				computer_id = $6, status = 'active', last_seen_at = now(),
+				retired_at = NULL, retired_reason = NULL, retired_by = NULL   -- re-enrolling brings a retired device back
 			WHERE id = $1`,
 			dev.id, sig.tpmEK, sig.systemUUID, sig.machineGUID, req.GetHostname(), dev.computerID); err != nil {
 			return nil, fmt.Errorf("update device: %w", err)
