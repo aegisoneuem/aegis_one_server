@@ -6,10 +6,15 @@ package ingest
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 
 	aegisonev1 "aegis-one/gen/aegisone/v1"
+	"aegis-one/internal/enroll"
 	"aegis-one/internal/identity"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -59,10 +64,26 @@ func (s *Store) Heartbeat(ctx context.Context, known *identity.Known, hb *aegiso
 		nullableN(hb.GetDeviceType(), 100)); err != nil {
 		return err
 	}
-	// Hostname is a mutable attribute (renames happen), never an identity key.
-	if _, err := tx.Exec(ctx, `UPDATE devices SET last_seen_at = now(), hostname = coalesce($2, hostname) WHERE id = $1`,
-		known.DeviceUUID, nullableN(hb.GetHostname(), 255)); err != nil {
+	// Hostname is a mutable attribute (renames happen), never an identity key;
+	// a change is still audited for admins.
+	var oldHost, newHost string
+	// The self-join reads the row as it was before this UPDATE.
+	err = tx.QueryRow(ctx, `
+		UPDATE devices d SET last_seen_at = now(), hostname = coalesce($2, d.hostname)
+		FROM devices old WHERE d.id = $1 AND old.id = d.id
+		RETURNING old.hostname, d.hostname`,
+		known.DeviceUUID, nullableN(hb.GetHostname(), 255)).Scan(&oldHost, &newHost)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
+	}
+	if err == nil && oldHost != newHost {
+		details, _ := json.Marshal(enroll.Renamed(oldHost, newHost))
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO audit_log (actor_type, actor_label, action, target_type, target_id, details)
+			VALUES ('agent', $1, 'device.rename', 'device', $2, $3::jsonb)`,
+			known.DeviceID, known.DeviceUUID, string(details)); err != nil {
+			return fmt.Errorf("audit rename: %w", err)
+		}
 	}
 	return tx.Commit(ctx)
 }

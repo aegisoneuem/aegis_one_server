@@ -9,6 +9,13 @@
 // EnrollResponse.error (the agent fails loud on it); everything happens in one
 // transaction so a crash can't half-register a device.
 //
+// Reconciling only decides which device RECORD the agent belongs to (agent
+// track's TPM device identity spec); it never authorizes anything. Only a
+// strong signal (TPM EK, the agent's own device_id) reactivates an existing
+// record automatically. A weak one (SMBIOS UUID, MachineGuid), or a strong one
+// whose record has an agent connected right now, gets a new record plus a
+// device_merge_candidates row for an admin (see 0023). Hostname is never used.
+//
 // Renew: called over an existing mTLS connection (no token); signs a fresh cert
 // for the already-authenticated device.
 package enroll
@@ -42,8 +49,18 @@ type Service struct {
 	ca         *ca.CA
 	certTTL    time.Duration
 	licenseMax int // 0 = unlimited
+	live       Live
 	log        *slog.Logger
 }
+
+// Live says whether a device's agent has a live stream right now.
+type Live interface {
+	Connected(deviceID string) bool
+}
+
+// SetLive enables the "agent connected right now" conflict check. Without it a
+// strong match always reactivates.
+func (s *Service) SetLive(l Live) { s.live = l }
 
 func New(pool *pgxpool.Pool, authority *ca.CA, certTTL time.Duration, licenseMax int, log *slog.Logger) *Service {
 	return &Service{pool: pool, ca: authority, certTTL: certTTL, licenseMax: licenseMax, log: log}
@@ -129,9 +146,15 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 		return nil, err
 	}
 
-	dev, matchedBy, err := reconcile(ctx, tx, sig)
+	m, err := reconcile(ctx, tx, sig)
 	if err != nil {
 		return nil, err
+	}
+	m, review := classify(m, s.live)
+	var dev *device
+	matchedBy := ""
+	if m != nil {
+		dev, matchedBy = &m.dev, m.by
 	}
 	reconciled := dev != nil
 
@@ -143,6 +166,7 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 		}
 	}
 
+	var commandsFailed int64
 	if reconciled {
 		if dev.computerID == 0 { // e.g. a device first seen before enrollment existed
 			if dev.computerID, err = allocateComputerID(ctx, tx); err != nil {
@@ -161,6 +185,21 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 			dev.id, sig.tpmEK, sig.systemUUID, sig.machineGUID, req.GetHostname(), dev.computerID); err != nil {
 			return nil, fmt.Errorf("update device: %w", err)
 		}
+		// Commands issued to the record before this enrollment must not reach the
+		// returning agent (secure parameters, transfers, reboots); their jobs see
+		// them fail and move on, as with retire.
+		tag, err := tx.Exec(ctx, `
+			UPDATE agent_commands SET status = 'failed', completed_at = now(), result = '{"error": "device re-enrolled"}'::jsonb
+			WHERE status IN ('queued', 'dispatched', 'acknowledged') AND agent_id IN (SELECT id FROM agents WHERE device_id = $1)`, dev.id)
+		if err != nil {
+			return nil, fmt.Errorf("fail open commands: %w", err)
+		}
+		commandsFailed = tag.RowsAffected()
+		if h := strings.TrimSpace(req.GetHostname()); h != "" && h != dev.hostname {
+			if err := audit(ctx, tx, "device.rename", dev.deviceID, dev.id, Renamed(dev.hostname, h)); err != nil {
+				return nil, err
+			}
+		}
 	} else {
 		dev = &device{status: "active"}
 		dev.deviceID = sig.deviceID
@@ -172,13 +211,35 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 		if dev.computerID, err = allocateComputerID(ctx, tx); err != nil {
 			return nil, err
 		}
+		// The EK is unique per record; in a conflict it stays with the existing one.
+		tpm := sig.tpmEK
+		if review != nil && review.by == "tpm_ek_conflict" {
+			tpm = ""
+		}
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO devices (hostname, os_family, agent_reported_id, tpm_ek, smbios_uuid, machine_id, computer_id, first_seen_at, last_seen_at)
 			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), $7, now(), now())
 			RETURNING id`,
 			firstNonEmpty(req.GetHostname(), dev.deviceID), osFamily(req.GetOs()), dev.deviceID,
-			sig.tpmEK, sig.systemUUID, sig.machineGUID, dev.computerID).Scan(&dev.id); err != nil {
+			tpm, sig.systemUUID, sig.machineGUID, dev.computerID).Scan(&dev.id); err != nil {
 			return nil, fmt.Errorf("create device: %w", err)
+		}
+		if review != nil {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO device_merge_candidates (new_device_id, existing_device_id, matched_by, matched_value)
+				VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+				dev.id, review.dev.id, review.by, review.value); err != nil {
+				return nil, fmt.Errorf("record merge candidate: %w", err)
+			}
+			if err := audit(ctx, tx, "device.duplicate_flagged", dev.deviceID, dev.id, map[string]any{
+				"message":            "Possible duplicate - reconcile?",
+				"new_device_id":      dev.deviceID,
+				"existing_device_id": review.dev.deviceID,
+				"matched_by":         review.by,
+				"existing_state":     review.dev.state,
+			}); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -199,15 +260,24 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 		return nil, err
 	}
 
-	details, _ := json.Marshal(map[string]any{
+	if err := audit(ctx, tx, "agent.enroll", dev.deviceID, dev.id, map[string]any{
 		"reconciled": reconciled, "matched_by": matchedBy, "computer_id": dev.computerID,
 		"hostname": req.GetHostname(), "requested_device_id": req.GetDeviceId(), "enrollment_token_id": tokenID,
 		"cert_not_after": cert.NotAfter,
-	})
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO audit_log (actor_type, actor_label, action, target_type, target_id, details)
-		VALUES ('agent', $1, 'agent.enroll', 'device', $2, $3::jsonb)`, dev.deviceID, dev.id, string(details)); err != nil {
-		return nil, fmt.Errorf("audit_log: %w", err)
+	}); err != nil {
+		return nil, err
+	}
+	if reconciled {
+		if err := audit(ctx, tx, "device.reactivate", dev.deviceID, dev.id, map[string]any{
+			"message":             fmt.Sprintf("Device reactivated via %s match - previous status: %s", matchLabel(matchedBy), dev.state),
+			"matched_by":          matchedBy,
+			"previous_status":     dev.state,
+			"requested_device_id": req.GetDeviceId(),
+			"device_id":           dev.deviceID,
+			"commands_failed":     commandsFailed,
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -215,6 +285,10 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 	}
 	s.log.Info("agent enrolled", "device_id", dev.deviceID, "computer_id", dev.computerID,
 		"reconciled", reconciled, "matched_by", matchedBy, "hostname", req.GetHostname())
+	if review != nil {
+		s.log.Warn("enrollment flagged as possible duplicate", "device_id", dev.deviceID,
+			"existing_device_id", review.dev.deviceID, "matched_by", review.by)
+	}
 
 	return &aegisonev1.EnrollResponse{
 		ClientCertPem:    string(certPEM),
@@ -245,63 +319,125 @@ func checkToken(ctx context.Context, tx pgx.Tx, raw string) (string, error) {
 }
 
 type device struct {
-	id, deviceID, status string
-	computerID           int64
+	id, deviceID, status, hostname string
+	state                          string // online/offline/stale/retired/unmanaged when matched
+	computerID                     int64
 }
+
+// match is the existing record an enrollment's signals point at.
+type match struct {
+	dev    device
+	by     string // tpm_ek, device_id, system_uuid, machine_guid
+	value  string
+	strong bool // tpm_ek / device_id: may reactivate without review
+}
+
+// matchSQL reads a candidate record with its lifecycle state (same rules as
+// internal/devices). Records merged into another are skipped.
+const matchSQL = `
+	SELECT id, coalesce(agent_reported_id, ''), status, coalesce(computer_id, 0), hostname,
+	       CASE WHEN status = 'decommissioned' THEN 'retired'
+	            WHEN status = 'unmanaged' THEN 'unmanaged'
+	            WHEN last_seen_at >= now() - make_interval(mins => setting_int('agent.offline_after_minutes', 15)) THEN 'online'
+	            WHEN last_seen_at >= now() - make_interval(days => setting_int('device.stale_after_days', 30)) THEN 'offline'
+	            ELSE 'stale' END
+	FROM devices WHERE merged_into_device_id IS NULL AND `
 
 // reconcile finds the existing device for these signals, strongest first:
 // tpm_ek (unique, clone-proof) > device_id > smbios uuid > machine guid. The two
 // weak signals only count if they match exactly ONE device - some hardware
-// batches share them, and wrongly merging two machines is worse than a new record.
-func reconcile(ctx context.Context, tx pgx.Tx, s signals) (*device, string, error) {
+// batches share them - and even then only as a review candidate.
+func reconcile(ctx context.Context, tx pgx.Tx, s signals) (*match, error) {
 	try := []struct {
 		name, value, where string
-		mustBeUnique       bool
+		strong             bool
 	}{
-		{"tpm_ek", s.tpmEK, "tpm_ek = $1", false},
-		{"device_id", s.deviceID, "agent_reported_id = $1", false},
-		{"system_uuid", s.systemUUID, "lower(smbios_uuid) = $1", true},
-		{"machine_guid", s.machineGUID, "lower(machine_id) = $1", true},
+		{"tpm_ek", s.tpmEK, "tpm_ek = $1", true},
+		{"device_id", s.deviceID, "agent_reported_id = $1", true},
+		{"system_uuid", s.systemUUID, "lower(smbios_uuid) = $1", false},
+		{"machine_guid", s.machineGUID, "lower(machine_id) = $1", false},
 	}
 	for _, t := range try {
 		if t.value == "" {
 			continue
 		}
-		rows, err := tx.Query(ctx, `
-			SELECT id, coalesce(agent_reported_id, ''), status, coalesce(computer_id, 0)
-			FROM devices WHERE `+t.where+` LIMIT 2`, t.value)
+		rows, err := tx.Query(ctx, matchSQL+t.where+` LIMIT 2`, t.value)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		var found []device
 		for rows.Next() {
 			var d device
-			if err := rows.Scan(&d.id, &d.deviceID, &d.status, &d.computerID); err != nil {
+			if err := rows.Scan(&d.id, &d.deviceID, &d.status, &d.computerID, &d.hostname, &d.state); err != nil {
 				rows.Close()
-				return nil, "", err
+				return nil, err
 			}
 			found = append(found, d)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return nil, "", err
+			return nil, err
 		}
-		if len(found) == 1 || (len(found) > 1 && !t.mustBeUnique) {
+		if len(found) == 1 || (len(found) > 1 && t.strong) {
 			d := found[0]
 			if d.deviceID == "" { // legacy row without an agent-facing id
 				id, err := newUUID()
 				if err != nil {
-					return nil, "", err
+					return nil, err
 				}
 				if _, err := tx.Exec(ctx, `UPDATE devices SET agent_reported_id = $2 WHERE id = $1`, d.id, id); err != nil {
-					return nil, "", err
+					return nil, err
 				}
 				d.deviceID = id
 			}
-			return &d, t.name, nil
+			return &match{dev: d, by: t.name, value: t.value, strong: t.strong}, nil
 		}
 	}
-	return nil, "", nil
+	return nil, nil
+}
+
+// classify splits a match into what enrollment acts on now (a strong match:
+// reactivate that record) and what an admin must review (a weak match, or a
+// strong one whose record has an agent connected right now - a cloned VM, or
+// someone else's identity). At most one of the two is set.
+func classify(m *match, live Live) (act, review *match) {
+	if m == nil {
+		return nil, nil
+	}
+	if m.strong && (live == nil || !live.Connected(m.dev.deviceID)) {
+		return m, nil
+	}
+	r := *m
+	if r.strong {
+		r.by += "_conflict"
+	}
+	return nil, &r
+}
+
+func matchLabel(by string) string {
+	switch by {
+	case "tpm_ek":
+		return "TPM"
+	case "device_id":
+		return "agent device_id"
+	}
+	return by
+}
+
+// Renamed is the audit detail for a hostname change. Hostname is an attribute,
+// not an identity signal, but admins want to see renames.
+func Renamed(from, to string) map[string]any {
+	return map[string]any{"message": fmt.Sprintf("Device renamed from %s to %s", from, to), "from": from, "to": to}
+}
+
+func audit(ctx context.Context, tx pgx.Tx, action, deviceID, deviceUUID string, details map[string]any) error {
+	b, _ := json.Marshal(details)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_log (actor_type, actor_label, action, target_type, target_id, details)
+		VALUES ('agent', $1, $2, 'device', $3, $4::jsonb)`, deviceID, action, deviceUUID, string(b)); err != nil {
+		return fmt.Errorf("audit_log %s: %w", action, err)
+	}
+	return nil
 }
 
 func (s *Service) checkSeat(ctx context.Context, tx pgx.Tx) error {

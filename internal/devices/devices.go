@@ -4,10 +4,14 @@
 //	GET  /internal/devices?id=<device_id>            one device (devices.view)
 //	GET  /internal/devices/summary                   count per state (devices.view)
 //	POST /internal/devices/retire                    {"device_ids": [...], "reason": "..."} (devices.manage)
+//	GET  /internal/devices/duplicates?status=         possible duplicates (devices.view)
+//	POST /internal/devices/duplicates/confirm        {"id": "...", "reason": "..."} (devices.manage)
+//	POST /internal/devices/duplicates/reject         {"id": "...", "reason": "..."} (devices.manage)
 //
-// State is derived from devices.status and last_seen_at (see 0021):
-// retired, unmanaged, online, offline, stale. "connected" says whether the
-// agent has a live stream to this server right now.
+// State is derived from devices.status and last_seen_at (see 0021, 0023):
+// merged, retired, unmanaged, online, offline, stale. "stale_alert" marks a
+// device with no heartbeat for device.stale_alert_days (60); nothing is ever
+// deleted. "connected" says whether the agent has a live stream right now.
 //
 // Retiring revokes the device's agent and certificates, fails its open
 // commands, ends its live stream and writes audit_log. Nothing is deleted. A
@@ -44,7 +48,7 @@ const (
 )
 
 // States a device can be in.
-var States = []string{"online", "offline", "stale", "retired", "unmanaged"}
+var States = []string{"online", "offline", "stale", "retired", "merged", "unmanaged"}
 
 // Live is the gRPC server's view of connected agents.
 type Live interface {
@@ -76,6 +80,8 @@ type Device struct {
 	RetiredAt     *time.Time `json:"retired_at,omitempty"`
 	RetiredReason *string    `json:"retired_reason,omitempty"`
 	RetiredBy     *string    `json:"retired_by,omitempty"`
+	StaleAlert    bool       `json:"stale_alert,omitempty"`
+	MergedInto    *string    `json:"merged_into_device_id,omitempty"`
 	// Detail view only.
 	AgentEnrolledAt *time.Time `json:"agent_enrolled_at,omitempty"`
 	CertExpiresAt   *time.Time `json:"certificate_expires_at,omitempty"`
@@ -111,7 +117,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.retire(w, r, caller)
-	case path == "/internal/devices" || path == "/internal/devices/summary" || path == "/internal/devices/retire":
+	case path == "/internal/devices/duplicates" && r.Method == http.MethodGet:
+		if !caller.Can(apiauth.PermDevicesView) {
+			apiauth.Deny(w, h.log, caller, apiauth.PermDevicesView, r)
+			return
+		}
+		h.duplicates(w, r)
+	case (path == "/internal/devices/duplicates/confirm" || path == "/internal/devices/duplicates/reject") && r.Method == http.MethodPost:
+		if !caller.Can(apiauth.PermDevicesManage) {
+			apiauth.Deny(w, h.log, caller, apiauth.PermDevicesManage, r)
+			return
+		}
+		h.decide(w, r, caller, strings.HasSuffix(path, "/confirm"))
+	case path == "/internal/devices" || path == "/internal/devices/summary" || path == "/internal/devices/retire" ||
+		path == "/internal/devices/duplicates" || path == "/internal/devices/duplicates/confirm" || path == "/internal/devices/duplicates/reject":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
 		http.NotFound(w, r)
@@ -136,6 +155,7 @@ func (h *Handler) thresholds(ctx context.Context) (thresholds, error) {
 
 // stateSQL is the state expression; $1 = online since, $2 = stale before.
 const stateSQL = `CASE
+	WHEN d.merged_into_device_id IS NOT NULL THEN 'merged'
 	WHEN d.status = 'decommissioned' THEN 'retired'
 	WHEN d.status = 'unmanaged' THEN 'unmanaged'
 	WHEN d.last_seen_at >= $1 THEN 'online'
@@ -144,12 +164,18 @@ const stateSQL = `CASE
 
 // stateWhere is the index-friendly filter for one state, same parameters.
 var stateWhere = map[string]string{
-	"retired":   `d.status = 'decommissioned'`,
-	"unmanaged": `d.status = 'unmanaged'`,
-	"online":    `d.status = 'active' AND d.last_seen_at >= $1`,
-	"offline":   `d.status = 'active' AND d.last_seen_at < $1 AND d.last_seen_at >= $2`,
-	"stale":     `d.status = 'active' AND (d.last_seen_at < $2 OR d.last_seen_at IS NULL)`,
+	"retired":     `d.status = 'decommissioned' AND d.merged_into_device_id IS NULL`,
+	"merged":      `d.merged_into_device_id IS NOT NULL`,
+	"stale_alert": staleAlertSQL,
+	"unmanaged":   `d.status = 'unmanaged'`,
+	"online":      `d.status = 'active' AND d.last_seen_at >= $1`,
+	"offline":     `d.status = 'active' AND d.last_seen_at < $1 AND d.last_seen_at >= $2`,
+	"stale":       `d.status = 'active' AND (d.last_seen_at < $2 OR d.last_seen_at IS NULL)`,
 }
+
+// staleAlertSQL flags an active device silent for device.stale_alert_days
+// (never seen: since it was first seen).
+const staleAlertSQL = `(d.status = 'active' AND coalesce(d.last_seen_at, d.first_seen_at) < now() - make_interval(days => setting_int('device.stale_alert_days', 60)))`
 
 // idSQL is the device_id shown; agentless devices have no agent_reported_id.
 const idSQL = `coalesce(d.agent_reported_id, d.id::text)`
@@ -158,6 +184,7 @@ const selectSQL = `
 	SELECT ` + idSQL + `, d.hostname, d.os_family,
 	       CASE WHEN d.os_build IS NULL THEN NULL WHEN d.os_ubr IS NULL THEN d.os_build ELSE d.os_build || '.' || d.os_ubr END,
 	       a.agent_version, ` + stateSQL + `, d.last_seen_at, d.first_seen_at, d.retired_at, d.retired_reason, d.retired_by,
+	       ` + staleAlertSQL + `, (SELECT coalesce(m.agent_reported_id, m.id::text) FROM devices m WHERE m.id = d.merged_into_device_id),
 	       a.enrolled_at, a.cert_not_after
 	FROM devices d
 	LEFT JOIN LATERAL (
@@ -169,7 +196,7 @@ const selectSQL = `
 func scanDevice(row pgx.Row) (*Device, error) {
 	var d Device
 	err := row.Scan(&d.DeviceID, &d.Hostname, &d.OSFamily, &d.OSBuild, &d.AgentVersion, &d.State, &d.LastSeenAt,
-		&d.FirstSeenAt, &d.RetiredAt, &d.RetiredReason, &d.RetiredBy, &d.AgentEnrolledAt, &d.CertExpiresAt)
+		&d.FirstSeenAt, &d.RetiredAt, &d.RetiredReason, &d.RetiredBy, &d.StaleAlert, &d.MergedInto, &d.AgentEnrolledAt, &d.CertExpiresAt)
 	return &d, err
 }
 
@@ -205,7 +232,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	qs := r.URL.Query()
 	state := strings.ToLower(strings.TrimSpace(qs.Get("state")))
 	if state != "" && state != "all" && stateWhere[state] == "" {
-		http.Error(w, "state must be one of "+strings.Join(States, ", ")+" or all", http.StatusUnprocessableEntity)
+		http.Error(w, "state must be one of "+strings.Join(States, ", ")+", stale_alert or all", http.StatusUnprocessableEntity)
 		return
 	}
 	limit := DefaultLimit
@@ -306,7 +333,8 @@ func (h *Handler) summary(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, "devices: thresholds", err)
 		return
 	}
-	rows, err := h.pool.Query(r.Context(), `SELECT `+stateSQL+` AS state, count(*) FROM devices d GROUP BY 1`, th.onlineSince, th.staleBefore)
+	rows, err := h.pool.Query(r.Context(), `SELECT `+stateSQL+` AS state, count(*), count(*) FILTER (WHERE `+staleAlertSQL+`)
+		FROM devices d GROUP BY 1`, th.onlineSince, th.staleBefore)
 	if err != nil {
 		h.fail(w, "devices: summary", err)
 		return
@@ -316,22 +344,23 @@ func (h *Handler) summary(w http.ResponseWriter, r *http.Request) {
 	for _, s := range States {
 		counts[s] = 0
 	}
-	total := 0
+	total, staleAlert := 0, 0
 	for rows.Next() {
 		var s string
-		var n int
-		if err := rows.Scan(&s, &n); err != nil {
+		var n, alert int
+		if err := rows.Scan(&s, &n, &alert); err != nil {
 			h.fail(w, "devices: summary", err)
 			return
 		}
 		counts[s] = n
 		total += n
+		staleAlert += alert
 	}
 	if err := rows.Err(); err != nil {
 		h.fail(w, "devices: summary", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"total": total, "states": counts,
+	writeJSON(w, http.StatusOK, map[string]any{"total": total, "states": counts, "stale_alert": staleAlert,
 		"online_since": th.onlineSince.UTC(), "stale_before": th.staleBefore.UTC()})
 }
 

@@ -66,3 +66,26 @@ func TestStatesHaveFilters(t *testing.T) {
 		}
 	}
 }
+
+func TestUUIDLike(t *testing.T) {
+	for s, want := range map[string]bool{
+		"58a3dbb3-f418-44f4-81ea-5e1dc5a92668": true,
+		"58A3DBB3-F418-44F4-81EA-5E1DC5A92668": true,
+		"58a3dbb3f41844f481ea5e1dc5a92668":     false,
+		"58a3dbb3-f418-44f4-81ea-5e1dc5a9266z": false,
+		"'; DROP TABLE devices; --":            false,
+		"":                                     false,
+	} {
+		if got := uuidLike(s); got != want {
+			t.Errorf("uuidLike(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+func TestStateFilters(t *testing.T) {
+	for _, s := range append(States, "stale_alert") {
+		if stateWhere[s] == "" {
+			t.Errorf("state %q has no filter", s)
+		}
+	}
+}

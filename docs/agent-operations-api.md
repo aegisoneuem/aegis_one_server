@@ -53,17 +53,23 @@ type, because results can hold command output.
 
 | Call | Body / query |
 |---|---|
-| `GET /internal/devices` | `state` (online, offline, stale, retired, unmanaged, all), `q` (hostname prefix or exact device_id), `limit` (1..1000, default 100), `after` (the previous page's `next_after`) |
+| `GET /internal/devices` | `state` (online, offline, stale, stale_alert, retired, merged, unmanaged, all), `q` (hostname prefix or exact device_id), `limit` (1..1000, default 100), `after` (the previous page's `next_after`) |
 | `GET /internal/devices?id=` | one device, plus agent enrollment time and certificate expiry |
-| `GET /internal/devices/summary` | count per state |
+| `GET /internal/devices/summary` | count per state, plus the `stale_alert` count |
 | `POST /internal/devices/retire` | `{"device_ids": [...], "reason": "..."}`; reason is required, at most 256 characters |
+| `GET /internal/devices/duplicates` | possible duplicates; `status` (pending (default), confirmed, rejected, all), `limit` (1..500) |
+| `POST /internal/devices/duplicates/confirm` | `{"id": "...", "reason": "..."}` merges the pair (`devices.manage`) |
+| `POST /internal/devices/duplicates/reject` | `{"id": "...", "reason": "..."}` keeps both records (`devices.manage`) |
 
 - **State:**
   - `online`: last heartbeat within `agent.offline_after_minutes` (default 15).
   - `offline`: older than that, but within `device.stale_after_days` (default 30).
   - `stale`: older than that, or never seen.
   - `retired`: retired by an admin.
-  - Both settings live in `system_settings`. `connected` shows whether the agent has a live stream right now.
+  - `merged`: an admin confirmed this record is the same machine as another one; `merged_into_device_id` names it.
+  - `stale_alert: true`: no heartbeat for `device.stale_alert_days` (default 60). A device is flagged, never deleted.
+  - The settings live in `system_settings`. `connected` shows whether the agent has a live stream right now.
+- **Renames:** a hostname change (heartbeat or enrollment) writes `audit_log` `device.rename` ("Device renamed from X to Y"). Hostname is never used to identify a device.
 - **Retire**, per device:
   - Revokes the agent and its certificates.
   - Fails the device's open commands (`device retired`), so deployments and transfers move on.
@@ -74,6 +80,25 @@ type, because results can hold command output.
   - The device leaves compliance reports and frees its license seat.
   - Nothing is deleted.
 - **Coming back:** only by enrolling again with an enrollment token, which checks the license again. With trust-on-first-use (dev, no enrollment CA), a retired device can't bind a new certificate.
+
+**Returning devices (reimage / reinstall).** Enrollment matches the request to an existing record. The match only picks the record; it never grants trust, which stays with mTLS and signed commands.
+
+| Signal | Result |
+|---|---|
+| TPM EK, or the agent's own device_id | The existing record is reactivated with its history and `computer_id`. Audit `device.reactivate`: "Device reactivated via TPM match - previous status: X". Commands still open for the old install are failed (`device re-enrolled`). |
+| Same, but that record's agent is connected right now (cloned VM, copied identity) | Not reactivated. New record, and a duplicate (`tpm_ek_conflict` / `device_id_conflict`) for review. |
+| SMBIOS UUID or MachineGuid only, matching exactly one record | Never merged automatically. New record, and a duplicate (`system_uuid` / `machine_guid`) for review. Audit `device.duplicate_flagged`. |
+| Nothing | New record. |
+
+- **Confirming a duplicate** moves the new record's agent onto the existing record:
+  - The existing record keeps its history and `computer_id`, and takes over the agent's `device_id` and TPM EK.
+  - The new record becomes `merged` and frees its seat.
+  - The existing record's old agent is revoked, and its open commands are failed.
+  - The agent is disconnected; it reconnects as the existing record and reports again. Data it reported under the new record stays there.
+  - Refused (409) while the existing record's agent is connected.
+  - Audit `device.merge`, with both ids. Other pending duplicates of either record are rejected as superseded.
+- **Rejecting** keeps both records, and writes audit `device.duplicate_rejected`.
+- **Not verified yet:** the TPM EK is the agent's claim, not proven by attestation.
 
 ## Patch push: `/internal/deploy` (`patch.deploy`)
 

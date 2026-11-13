@@ -136,6 +136,9 @@ func main() {
 		os.Exit(1)
 	}
 	agentSrv := grpcserver.New(log, identity.New(pool), ingest.New(pool), cmdStore, enrollSvc)
+	if enrollSvc != nil {
+		enrollSvc.SetLive(agentSrv) // a strong identity match on a connected device is a conflict, not a reactivation
+	}
 	var patches *patchcontent.Store
 	var software *softwaredist.Store
 	var differ *patchdiff.Differ
