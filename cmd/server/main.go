@@ -22,6 +22,7 @@ import (
 	schema "aegis-one/db"
 	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/agentactions"
+	"aegis-one/internal/agentpolicy"
 	"aegis-one/internal/apiauth"
 	"aegis-one/internal/ca"
 	"aegis-one/internal/cabfeed"
@@ -142,7 +143,10 @@ func main() {
 	var patches *patchcontent.Store
 	var software *softwaredist.Store
 	var differ *patchdiff.Differ
+	var dexWriter *ingest.DexWriter
 	if pool != nil {
+		dexWriter = ingest.NewDexWriter(pool, log)
+		agentSrv.EnableDex(dexWriter)
 		patches = patchcontent.New(pool, cfg.ContentDir, log)
 		software = softwaredist.NewStore(pool, cfg.ContentDir, cfg.SoftwareMaxUploadBytes, log)
 		agentSrv.EnableContent(pool, cfg.ContentDir, cfg.ContentMaxStreams, patches)
@@ -195,6 +199,7 @@ func main() {
 	// Remote operations (collect_file, run_command, file_operation, transfers,
 	// shells) share one sender: signed, recorded, online devices only.
 	var remote *remoteOps
+	var policyAPI http.Handler
 	if pool != nil && cmdStore != nil && signingKeyID != "" {
 		sender := &commands.Sender{Store: cmdStore, Disp: agentSrv, Key: signingKey, KeyID: signingKeyID}
 		uploads := remoteops.NewUploads(pool, cfg.ContentDir, log)
@@ -202,13 +207,20 @@ func main() {
 			transfers: remoteops.NewTransfers(pool, uploads, sender, log),
 			shells:    remoteops.NewShells(pool, cfg.ContentDir, sender, log)}
 		agentSrv.EnableRemoteOps(remote.uploads, remote.transfers, remote.shells)
+
+		// Fleet-wide signed agent policy: pushed on connect, on publish, and
+		// again when an agent reports its stored policy tampered with.
+		policyStore := agentpolicy.NewStore(pool)
+		pusher := agentpolicy.NewPusher(ctx, pool, policyStore, sender, agentSrv, log)
+		agentSrv.EnablePolicy(pusher)
+		policyAPI = agentpolicy.NewHandler(policyStore, pusher, log)
 	} else {
 		log.Warn("software deployment disabled (needs a database and a command signing key)")
 	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, deployer, software, swDeployer, remote, cfg.ContentDir, log),
+		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, deployer, software, swDeployer, remote, policyAPI, cfg.ContentDir, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		// net/http logs TLS handshake errors etc. through the std logger; route
 		// them through slog so every server log line stays structured JSON.
@@ -227,6 +239,19 @@ func main() {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
+
+	// The DEX writer outlives ctx: it must keep draining until the gRPC server
+	// has stopped, so it gets its own context, cancelled after GracefulStop.
+	dexCtx, stopDex := context.WithCancel(context.Background())
+	dexDone := make(chan struct{})
+	if dexWriter != nil {
+		go func() {
+			defer close(dexDone)
+			dexWriter.Run(dexCtx)
+		}()
+	} else {
+		close(dexDone)
+	}
 
 	go func() {
 		defer wg.Done()
@@ -322,6 +347,12 @@ func main() {
 		log.Warn("http shutdown error", "error", err.Error())
 	}
 	grpcSrv.GracefulStop()
+	stopDex()
+	<-dexDone
+	if dexWriter != nil {
+		written, dropped := dexWriter.Stats()
+		log.Info("dex writer drained", "rows_written", written, "rows_dropped", dropped)
+	}
 
 	wg.Wait()
 	log.Info("shutdown complete")
@@ -369,7 +400,7 @@ func feedJobs(contentDir, bsdtar string, msrcDocuments int) []feedsched.Job {
 }
 
 func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, deployer *patchdeploy.Deployer,
-	software *softwaredist.Store, swDeployer *softwaredist.Deployer, remote *remoteOps, contentDir string, log *slog.Logger) http.Handler {
+	software *softwaredist.Store, swDeployer *softwaredist.Deployer, remote *remoteOps, policyAPI http.Handler, contentDir string, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -404,6 +435,12 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 		// Each of these checks its own permission per action / route.
 		mux.Handle("/internal/actions", auth.Require("", agentactions.New(pool, remote.sender, log)))
 		mux.Handle("/internal/remote/", auth.Require("", remoteops.NewHandler(pool, remote.sender, remote.uploads, remote.transfers, remote.shells, log)))
+	}
+	if policyAPI != nil {
+		// GET needs devices.view, PUT agent.policy.
+		ph := auth.Require("", policyAPI)
+		mux.Handle("/internal/policy", ph)
+		mux.Handle("/internal/policy/", ph)
 	}
 	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool)))
 	if pool != nil {

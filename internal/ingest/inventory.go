@@ -35,6 +35,8 @@ const (
 // InventorySummary says what one report changed, for the log line.
 type InventorySummary struct {
 	KBs, Apps, AppsAdded, AppsRemoved, Drivers, Appx, Disks, NICs int
+	Identity, DexHealth                                           bool
+	AppFaults                                                     int
 }
 
 var kbRe = regexp.MustCompile(`^KB[0-9]{4,8}$`)
@@ -258,6 +260,20 @@ func (s *Store) FullInventory(ctx context.Context, known *identity.Known, inv *a
 			return sum, fmt.Errorf("copy device_appx_packages: %w", err)
 		}
 		sum.Appx = len(rows)
+	}
+	now := time.Now()
+	if id := inv.GetIdentity(); id != nil {
+		if err := identityInfo(ctx, tx, dev, id, now); err != nil {
+			return sum, fmt.Errorf("identity: %w", err)
+		}
+		sum.Identity = true
+	}
+	if h := inv.GetDexHealth(); h != nil && h.GetWindowDays() > 0 {
+		n, err := dexHealth(ctx, tx, dev, h, reportTime(inv.GetCollectedAt(), now))
+		if err != nil {
+			return sum, fmt.Errorf("dex_health: %w", err)
+		}
+		sum.DexHealth, sum.AppFaults = true, n
 	}
 	if _, err := tx.Exec(ctx, `UPDATE devices SET last_inventory_at = now() WHERE id = $1`, dev); err != nil {
 		return sum, err

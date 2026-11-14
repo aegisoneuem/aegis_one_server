@@ -252,6 +252,35 @@ message FullInventoryReport {
   repeated InstalledApp installed_apps = 5;
   repeated DriverInventory drivers = 6;
   repeated InstalledAppx installed_appx = 7;
+  IdentityInfo identity = 8;
+  DexHealth dex_health = 9;
+}
+
+// Device stability over the last window_days, counted from the Windows event log.
+message DexHealth {
+  int32 unexpected_shutdowns = 1;
+  int32 bugchecks = 2;
+  int32 dirty_power_events = 3;
+  int32 window_days = 4;
+  int64 boot_duration_ms = 5;
+  int32 app_crashes = 6;
+  int32 app_hangs = 7;
+  repeated AppFault app_faults = 8;
+}
+
+message AppFault {
+  string name = 1;
+  int32 crashes = 2;
+  int32 hangs = 3;
+}
+
+// Who is on the machine and its domain state. boot_time is unix seconds.
+message IdentityInfo {
+  string logged_on_user = 1;
+  string machine_domain = 2;
+  bool domain_joined = 3;
+  int64 uptime_seconds = 4;
+  int64 boot_time = 5;
 }
 
 message InstalledAppx {
@@ -349,7 +378,22 @@ message AgentMessage {
     ActionStatus action_status = 8;
     FullInventoryReport full_inventory = 9;
     AuditEvent audit_event = 10;
+    DexTelemetry dex_telemetry = 11;
   }
+}
+
+// One aggregated CPU / memory window (percent, 0-100). collected_at is unix seconds.
+message DexTelemetry {
+  string device_id = 1;
+  int64 collected_at = 2;
+  int32 window_seconds = 3;
+  int32 sample_count = 4;
+  double cpu_avg = 5;
+  double cpu_min = 6;
+  double cpu_max = 7;
+  double mem_used_avg = 8;
+  double mem_used_min = 9;
+  double mem_used_max = 10;
 }
 
 message PatchBaseline {

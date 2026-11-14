@@ -38,6 +38,11 @@ type SendRequest struct {
 	ClientID   string
 	ClientName string
 	Actor      string // Command.actor, e.g. "api_client:ops"
+	// SkipCapabilityCheck sends even if the agent does not advertise Type.
+	// Only for set_policy: an agent in fail-closed safe mode must be able to
+	// receive its policy again, and an agent that doesn't know the type only
+	// answers with a failure.
+	SkipCapabilityCheck bool
 }
 
 // Sent says what happened to one device's command.
@@ -65,9 +70,11 @@ func (s *Sender) Send(ctx context.Context, r SendRequest) (Sent, error) {
 	if err != nil {
 		return out, err
 	}
-	ok, err := s.Store.Supports(ctx, agentUUID, r.Type)
-	if err != nil {
-		return out, err
+	ok := r.SkipCapabilityCheck
+	if !ok {
+		if ok, err = s.Store.Supports(ctx, agentUUID, r.Type); err != nil {
+			return out, err
+		}
 	}
 	if !ok {
 		out.Status, out.Error = "unsupported", "the agent does not advertise "+r.Type

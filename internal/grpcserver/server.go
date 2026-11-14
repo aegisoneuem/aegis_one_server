@@ -51,6 +51,10 @@ type Server struct {
 	baseline *baselineStore
 	// diff is nil until EnablePatchDiff (needs a database).
 	diff *patchdiff.Differ
+	// policy is nil until EnablePolicy (needs a database and the signing key).
+	policy PolicyHooks
+	// dex is nil until EnableDex (needs a database); DexTelemetry is then batched.
+	dex *ingest.DexWriter
 	// remote operations; nil until EnableRemoteOps (needs a database).
 	uploads   *remoteops.Uploads
 	transfers *remoteops.Transfers
@@ -65,6 +69,36 @@ type Server struct {
 
 func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store, cmds *commands.Store, enr *enroll.Service) *Server {
 	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, enroll: enr, clients: make(map[string]chan *aegisonev1.ServerMessage), kicks: make(map[string]map[chan *aegisonev1.ServerMessage]chan struct{})}
+}
+
+// PolicyHooks is the agent policy pusher (internal/agentpolicy).
+type PolicyHooks interface {
+	Connected(ctx context.Context, known *identity.Known)
+	ActionStatus(ctx context.Context, known *identity.Known, st *aegisonev1.ActionStatus)
+	AuditEvent(ctx context.Context, known *identity.Known, ev *aegisonev1.AuditEvent)
+}
+
+// EnablePolicy pushes the agent policy on connect and handles the agent's
+// answers and tamper reports. Call before serving.
+func (s *Server) EnablePolicy(p PolicyHooks) {
+	s.policy = p
+}
+
+// ConnectedDevices returns the device ids with a live stream.
+func (s *Server) ConnectedDevices() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.clients))
+	for id := range s.clients {
+		out = append(out, id)
+	}
+	return out
+}
+
+// EnableDex saves DexTelemetry through w. Call before serving; run w.Run
+// alongside and stop it only after the gRPC server has stopped.
+func (s *Server) EnableDex(w *ingest.DexWriter) {
+	s.dex = w
 }
 
 // EnablePatchDiff turns on the server-side patch diff after each
@@ -305,6 +339,7 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 			ch, kick := s.register(deviceID)
 			registeredCh <- registration{deviceID: deviceID, outbound: ch, kick: kick}
 			s.baselineConnected(ctx, resolved, ch)
+			s.policyConnected(ctx, resolved)
 		}
 		for {
 			msg, err := stream.Recv()
@@ -327,6 +362,7 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 					ch, kick := s.register(deviceID)
 					registeredCh <- registration{deviceID: deviceID, outbound: ch, kick: kick}
 					s.baselineConnected(ctx, resolved, ch)
+					s.policyConnected(ctx, resolved)
 					s.log.Info("agent identified", "device_id", deviceID, "bootstrapped", resolved != nil && known == nil)
 				}
 			} else if dev := deviceIDOf(msg); dev != "" && dev != deviceID {
@@ -370,6 +406,15 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 			}
 		}
 	}
+}
+
+// policyConnected pushes the agent policy in the background, so the database
+// work and signing don't hold up the stream's first messages.
+func (s *Server) policyConnected(ctx context.Context, known *identity.Known) {
+	if s.policy == nil || known == nil {
+		return
+	}
+	go s.policy.Connected(ctx, known)
 }
 
 func peerCert(ctx context.Context) (*x509.Certificate, error) {
@@ -419,6 +464,8 @@ func identityFieldsOf(msg *aegisonev1.AgentMessage) (deviceID, hostname, osFamil
 		return p.AuditEvent.GetDeviceId(), "", "windows", ""
 	case *aegisonev1.AgentMessage_CacheFull:
 		return p.CacheFull.GetDeviceId(), "", "windows", ""
+	case *aegisonev1.AgentMessage_DexTelemetry:
+		return p.DexTelemetry.GetDeviceId(), "", "windows", ""
 	default:
 		return "", "", "", ""
 	}
@@ -476,6 +523,9 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			} else {
 				s.patchNotApplicable(ctx, known, st)
 			}
+			if s.policy != nil {
+				s.policy.ActionStatus(ctx, known, st)
+			}
 		}
 
 	case *aegisonev1.AgentMessage_DeviceState:
@@ -522,7 +572,9 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			"trigger", inv.GetTrigger(),
 			"apps", len(inv.GetInstalledApps()),
 			"drivers", len(inv.GetDrivers()),
-			"appx", len(inv.GetInstalledAppx()))
+			"appx", len(inv.GetInstalledAppx()),
+			"identity", inv.GetIdentity() != nil,
+			"dex_health", inv.GetDexHealth() != nil)
 		if known != nil {
 			sum, err := s.ingest.FullInventory(ctx, known, inv)
 			if err != nil {
@@ -530,8 +582,18 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			} else {
 				s.log.Info("full inventory persisted", "device_id", known.DeviceID,
 					"apps", sum.Apps, "apps_added", sum.AppsAdded, "apps_removed", sum.AppsRemoved,
-					"drivers", sum.Drivers, "appx", sum.Appx, "disks", sum.Disks, "nics", sum.NICs)
+					"drivers", sum.Drivers, "appx", sum.Appx, "disks", sum.Disks, "nics", sum.NICs,
+					"identity", sum.Identity, "dex_health", sum.DexHealth, "app_faults", sum.AppFaults)
 			}
+		}
+
+	case *aegisonev1.AgentMessage_DexTelemetry:
+		// Every 5 minutes from every agent: debug level only, and batched.
+		dt := payload.DexTelemetry
+		s.log.Debug("dex telemetry", "device_id", dt.GetDeviceId(),
+			"samples", dt.GetSampleCount(), "cpu_avg", dt.GetCpuAvg(), "mem_used_avg", dt.GetMemUsedAvg())
+		if known != nil && s.dex != nil {
+			s.dex.Add(known, dt)
 		}
 
 	case *aegisonev1.AgentMessage_AuditEvent:
@@ -547,6 +609,9 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			if _, err := s.ingest.AuditEvent(ctx, known, ev); err != nil {
 				s.log.Error("persist agent audit event failed", "device_id", known.DeviceID,
 					"event_type", ev.GetEventType(), "error", err.Error())
+			}
+			if s.policy != nil {
+				s.policy.AuditEvent(ctx, known, ev)
 			}
 		}
 

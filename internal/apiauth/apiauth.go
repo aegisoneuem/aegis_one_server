@@ -69,6 +69,12 @@ const (
 	// PermDevicesManage retires devices (revokes the agent and its
 	// certificates). Admin-only by default.
 	PermDevicesManage = "devices.manage"
+	// PermAgentPolicy publishes the fleet-wide signed agent policy (module
+	// allow/deny, reboot policy, maintenance window, ...). Admin-only by default.
+	PermAgentPolicy = "agent.policy"
+	// PermAuditView (seeded for auditor) reads audit trails, including an
+	// agent's local audit trace through audit_query.
+	PermAuditView = "audit.view"
 )
 
 type Principal struct {

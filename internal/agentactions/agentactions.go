@@ -13,6 +13,8 @@
 //	                                     agent can find a cumulative update's package
 //	scan_now             devices.view    runs the optional cab scan if the endpoint has a cab
 //	report_device_state  devices.view    forces a DeviceStateReport (and so a patch re-diff)
+//	audit_query          audit.view      {query: {...}} reads the agent's LOCAL audit trace
+//	                                     (max 50 devices); events come back in the result
 //
 // Only online devices get the command (see commands.Sender): these carry no
 // expiry, so nothing is queued for later.
@@ -54,11 +56,12 @@ func New(pool *pgxpool.Pool, sender *commands.Sender, log *slog.Logger) *Handler
 
 // Request is the POST body.
 type Request struct {
-	Action       string   `json:"action"`
-	DeviceIDs    []string `json:"device_ids"`
-	DelaySeconds int32    `json:"delay_seconds,omitempty"` // reboot
-	Message      string   `json:"message,omitempty"`       // reboot
-	KB           string   `json:"kb,omitempty"`            // uninstall_patch
+	Action       string      `json:"action"`
+	DeviceIDs    []string    `json:"device_ids"`
+	DelaySeconds int32       `json:"delay_seconds,omitempty"` // reboot
+	Message      string      `json:"message,omitempty"`       // reboot
+	KB           string      `json:"kb,omitempty"`            // uninstall_patch
+	Query        *AuditQuery `json:"query,omitempty"`         // audit_query
 }
 
 // permFor is the permission an action needs.
@@ -68,6 +71,7 @@ var permFor = map[string]string{
 	"uninstall_patch":     apiauth.PermPatchDeploy,
 	"scan_now":            apiauth.PermDevicesView,
 	"report_device_state": apiauth.PermDevicesView,
+	"audit_query":         apiauth.PermAuditView,
 }
 
 var kbRe = regexp.MustCompile(`^KB[0-9]{4,8}$`)
@@ -99,7 +103,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	req.Action = strings.ToLower(strings.TrimSpace(req.Action))
 	perm, known := permFor[req.Action]
 	if !known {
-		http.Error(w, "action must be one of reboot, cancel_reboot, uninstall_patch, scan_now, report_device_state", http.StatusUnprocessableEntity)
+		http.Error(w, "action must be one of reboot, cancel_reboot, uninstall_patch, scan_now, report_device_state, audit_query", http.StatusUnprocessableEntity)
 		return
 	}
 	if !caller.Can(perm) {
@@ -107,8 +111,12 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	devices := dedupe(req.DeviceIDs)
-	if len(devices) == 0 || len(devices) > MaxDevices {
-		http.Error(w, fmt.Sprintf("device_ids: 1..%d devices", MaxDevices), http.StatusUnprocessableEntity)
+	maxDev := MaxDevices
+	if req.Action == "audit_query" {
+		maxDev = MaxAuditQueryDevices
+	}
+	if len(devices) == 0 || len(devices) > maxDev {
+		http.Error(w, fmt.Sprintf("device_ids: 1..%d devices", maxDev), http.StatusUnprocessableEntity)
 		return
 	}
 	if err := validate(&req); err != nil {
@@ -171,6 +179,14 @@ func validate(req *Request) error {
 	if req.Action != "uninstall_patch" && req.KB != "" {
 		return errors.New("kb is only for uninstall_patch")
 	}
+	if req.Action == "audit_query" {
+		if req.Query == nil {
+			req.Query = &AuditQuery{}
+		}
+		return req.Query.validate()
+	} else if req.Query != nil {
+		return errors.New("query is only for audit_query")
+	}
 	return nil
 }
 
@@ -194,18 +210,27 @@ func (h *Handler) payload(ctx context.Context, req Request, deviceID string) ([]
 		}
 		b, err := proto.Marshal(&aegisonev1.InstallPatchSpec{Kb: req.KB, OsBuild: full})
 		return b, map[string]any{"kb": req.KB, "os_build": full}, err
+	case "audit_query":
+		spec := req.Query.wire()
+		b, err := json.Marshal(spec)
+		var audit map[string]any
+		json.Unmarshal(b, &audit) //nolint:errcheck // just marshalled
+		return b, audit, err
 	default: // cancel_reboot, scan_now, report_device_state: no payload
 		return []byte{}, map[string]any{}, nil
 	}
 }
 
 type statusView struct {
-	CommandID   string          `json:"command_id"`
-	DeviceID    string          `json:"device_id"`
-	Type        string          `json:"type"`
-	Status      string          `json:"status"`
-	Payload     json.RawMessage `json:"payload"`
-	Result      json.RawMessage `json:"result,omitempty"`
+	CommandID string          `json:"command_id"`
+	DeviceID  string          `json:"device_id"`
+	Type      string          `json:"type"`
+	Status    string          `json:"status"`
+	Payload   json.RawMessage `json:"payload"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	// Events is the agent's answer to an audit_query, parsed out of
+	// result.detail (newest first).
+	Events      json.RawMessage `json:"events,omitempty"`
 	IssuedAt    time.Time       `json:"issued_at"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
 }
@@ -240,6 +265,9 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(result) > 0 {
 		v.Result = result
+		if v.Type == "audit_query" {
+			v.Events = auditEvents(result)
+		}
 	}
 	writeJSON(w, http.StatusOK, v)
 }

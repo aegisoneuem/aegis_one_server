@@ -31,6 +31,8 @@ type, because results can hold command output.
 | `files.manage` | admin | `file_operation`, transfers between devices |
 | `agent.command` | admin | `run_command` (runs as SYSTEM) |
 | `agent.shell` | admin | interactive shell (SYSTEM, recorded) |
+| `audit.view` | auditor | `audit_query`: reads the agent's local audit trace |
+| `agent.policy` | admin | publishes the fleet-wide agent policy (`PUT /internal/policy`) |
 
 "admin" means only the admin role (`*`) has it until you grant it to a role.
 
@@ -42,12 +44,26 @@ type, because results can hold command output.
 {"action": "uninstall_patch", "device_ids": ["<DEVICE_ID>"], "kb": "KB5034441"}
 {"action": "scan_now", "device_ids": ["<DEVICE_ID>"]}
 {"action": "report_device_state", "device_ids": ["<DEVICE_ID>"]}
+{"action": "audit_query", "device_ids": ["<DEVICE_ID>"],
+ "query": {"mode": "search", "pattern": "run_command", "since": "2026-11-14T00:00:00Z", "limit": 200}}
 ```
 
 - `delay_seconds`: 0..86400. `message`: at most 512 characters, no double quotes.
 - `cancel_reboot` cancels any pending Windows shutdown, not only one we scheduled. If nothing is pending it returns FAILED.
 - `uninstall_patch`: the device's build is sent so the agent can find a cumulative update's package. Windows refuses to remove some LCU/SSU updates; that comes back as FAILED with the reason.
 - `report_device_state` forces a DeviceStateReport, so the server-side patch diff runs again.
+- `audit_query` reads the audit trace the agent keeps on the device, and only that folder: there is no path field. Use it for forensics, for example events the server never received while the device was offline. Events the agent did stream are already in `agent_audit_events`.
+  - At most 50 devices per request.
+  - Query fields, all optional:
+    - `mode`: `tail` (default), `search` (needs `pattern`) or `since` (needs `since`)
+    - `limit`: 1..1000 events, default 100
+    - `pattern`: case-insensitive text match
+    - `since` / `until`: RFC 3339 times
+    - `event_types`, `decisions`: lists, an event matches if it has any of the values
+    - `include_rotated`: also read the older log files
+  - The agent sends the newest events first. When the answer is over 2 MiB it drops the oldest events and says so in the reason.
+  - `GET /internal/actions?command_id=...` returns the events as an `events` array. Reading it needs `audit.view`.
+  - The agent build from 2026-11-12 does not advertise `audit_query` in its capability list. Until it does, an agent that has sent its list gets `"status": "unsupported"`.
 
 ## Devices: `/internal/devices`
 
@@ -99,6 +115,52 @@ type, because results can hold command output.
   - Audit `device.merge`, with both ids. Other pending duplicates of either record are rejected as superseded.
 - **Rejecting** keeps both records, and writes audit `device.duplicate_rejected`.
 - **Not verified yet:** the TPM EK is the agent's claim, not proven by attestation.
+
+## DEX data (agent 2026-11-12, migration 0024)
+
+No HTTP API yet; the data is in these tables.
+
+| Agent sends | Stored in | Notes |
+|---|---|---|
+| `DexTelemetry`, every 5 min (`AEGIS_DEX_WINDOW`) | `device_dex_metrics` hypertable: `cpu_pct` / `ram_pct` are the window averages, plus the `*_min_pct` / `*_max_pct` columns, `window_seconds` and `sample_count` | Batched in memory and written with COPY (up to 1000 rows or every 2 s). A full queue (20,000 rows) drops rows and logs a warning. A timestamp more than 35 days old or 10 min in the future gets the receive time. |
+| `FullInventoryReport.identity` | `devices.last_logged_on_user`, `domain_name`, `is_domain_joined`, `last_boot_at` | Empty values keep the stored value. The agent resends inventory only when something changes, so `last_boot_at` can lag behind the real boot time. |
+| `FullInventoryReport.dex_health` | `device_dex_health` (latest snapshot per device), `device_app_faults` (replaced on each report, max 500 apps) | The counts cover a rolling window of `window_days`, so they are a snapshot and must not be summed. |
+
+## Agent policy: `/internal/policy` (migration 0025)
+
+One signed policy for the whole fleet. The agent receives it as a `set_policy` command and keeps it. Every published version is stored and never edited.
+
+| Route | Permission | What it does |
+|---|---|---|
+| `GET /internal/policy` | `devices.view` | Returns the current version, fleet counts (`applied`, `pending`, `failed`, `tampered`, `not_pushed`) and the last 20 versions. |
+| `PUT /internal/policy` | `agent.policy` (admin only) | Body: `{"policy": {...}, "note": "..."}`. Publishes a new version and pushes it to the connected agents. |
+| `GET /internal/policy/devices?status=&limit=` | `devices.view` | Returns each agent's state. |
+
+**Policy body.** The policy uses the agent's schema: `security_floor`, `modules` (`allow` / `deny`), `patch`, `inventory`, `transfer`, `maintenance`, `audit`, `logging` and `checkin`. The agent's own doc, `docs/agent-policy-capabilities.md`, says which settings it enforces today.
+
+The server sets `version`, `policy_id` and `issued_at`. Each `issued_at` is strictly higher than the previous one, because the agent refuses any policy that is not newer than the one it has.
+
+**The server refuses (422):**
+- unknown fields, so a misspelt setting is not silently dropped
+- unknown command types in `allow` / `deny`
+- denying `set_policy`
+- day names other than `mon` … `sun`. The agent itself would accept `"monday"`, and that day would then never match.
+- every value the agent's own validation would refuse
+
+**Push.** The current version is pushed:
+- on publish, to the connected agents
+- to an agent when it connects, unless that agent already applied this version
+
+An agent that has not answered is pushed again on its next connect. A refusal (`failed`) is retried only after the agent version changes.
+
+`set_policy` is sent even when the agent's capability list does not name it. The agent build from 2026-11-12 doesn't name it, and an agent in safe mode must still be able to receive its policy.
+
+**Tamper.** The agent can report `policy_tampered`, `policy_safe_mode` or `policy_lockdown`, meaning its stored policy was deleted, edited or rolled back. It then refuses `run_command`, `open_shell`, `file_operation` and `remote_control`. On such a report the server:
+- sets the state to `tampered`
+- opens an alert (`agent_policy_tampered`, severity high; `policy_lockdown` makes it critical)
+- sends the policy again
+
+The agent accepts the same version again and leaves safe mode. The alert stays open with `policy_reapplied_at` added, for an admin to resolve.
 
 ## Patch push: `/internal/deploy` (`patch.deploy`)
 
