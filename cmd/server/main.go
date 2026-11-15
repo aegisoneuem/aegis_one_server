@@ -145,7 +145,7 @@ func main() {
 	var differ *patchdiff.Differ
 	var dexWriter *ingest.DexWriter
 	if pool != nil {
-		dexWriter = ingest.NewDexWriter(pool, log)
+		dexWriter = ingest.NewDexWriter(pool, log, cfg.DexNetworkNames)
 		agentSrv.EnableDex(dexWriter)
 		patches = patchcontent.New(pool, cfg.ContentDir, log)
 		software = softwaredist.NewStore(pool, cfg.ContentDir, cfg.SoftwareMaxUploadBytes, log)

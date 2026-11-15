@@ -89,6 +89,11 @@ type Config struct {
 	// (AEGIS_CAB_ANNOUNCE_SPREAD, e.g. "6h"; default 0 = at once). Agents that
 	// connect meanwhile get the manifest straight away.
 	CabAnnounceSpread time.Duration
+	// DexNetworkNames stores the Wi-Fi network name (SSID) and the ping target
+	// from DEX telemetry (AEGIS_DEX_NETWORK_NAMES=on). Off by default: both can
+	// show where the user is (home / office), which customers may treat as
+	// personal data.
+	DexNetworkNames bool
 
 	LogLevel string // debug | info | warn | error
 
@@ -158,6 +163,7 @@ func Load() Config {
 		FeedScheduler:          !strings.EqualFold(getenv("AEGIS_FEED_SCHEDULER", "on"), "off"),
 		MSRCDocuments:          msrcDocs,
 		CabManifest:            !strings.EqualFold(getenv("AEGIS_CAB_MANIFEST", "on"), "off"),
+		DexNetworkNames:        strings.EqualFold(getenv("AEGIS_DEX_NETWORK_NAMES", "off"), "on"),
 		CabAnnounceSpread:      cabSpread,
 		LogLevel:               getenv("AEGIS_LOG_LEVEL", "info"),
 		ShutdownTimeout:        10 * time.Second,

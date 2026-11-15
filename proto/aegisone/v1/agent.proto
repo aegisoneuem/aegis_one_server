@@ -254,6 +254,22 @@ message FullInventoryReport {
   repeated InstalledAppx installed_appx = 7;
   IdentityInfo identity = 8;
   DexHealth dex_health = 9;
+  // Server-defined custom attributes evaluated by the agent: name -> value.
+  map<string, string> custom_properties = 10;
+}
+
+// One server-defined custom attribute: a read-only, declarative provider
+// (env, file, registry, admin_tag, service_state) and its arguments.
+message CustomAttributeDefinition {
+  string name = 1;
+  string provider = 2;
+  map<string, string> args = 3;
+}
+
+// Payload of the signed set_custom_attributes command (anti-rollback on issued_at).
+message CustomAttributeSpec {
+  repeated CustomAttributeDefinition definitions = 1;
+  int64 issued_at = 2;
 }
 
 // Device stability over the last window_days, counted from the Windows event log.
@@ -394,6 +410,35 @@ message DexTelemetry {
   double mem_used_avg = 8;
   double mem_used_min = 9;
   double mem_used_max = 10;
+  // Disk: PhysicalDisk(_Total) queue length, transfers/s, latency.
+  double disk_queue_avg = 11;
+  double disk_queue_min = 12;
+  double disk_queue_max = 13;
+  double disk_iops_avg = 14;
+  double disk_iops_min = 15;
+  double disk_iops_max = 16;
+  double disk_latency_ms_avg = 17;
+  double disk_latency_ms_min = 18;
+  double disk_latency_ms_max = 19;
+  // Network: ICMP round trip to net_target (default gateway unless configured).
+  double net_rtt_ms_avg = 20;
+  double net_rtt_ms_min = 21;
+  double net_rtt_ms_max = 22;
+  double net_loss_pct = 23;
+  string net_target = 24;
+  // Battery (percent).
+  bool battery_present = 25;
+  bool battery_ac_online = 26;
+  double battery_charge_pct_avg = 27;
+  double battery_charge_pct_min = 28;
+  double battery_charge_pct_max = 29;
+  // Wi-Fi signal quality (0-100) and network name.
+  bool wifi_present = 30;
+  bool wifi_connected = 31;
+  double wifi_signal_pct_avg = 32;
+  double wifi_signal_pct_min = 33;
+  double wifi_signal_pct_max = 34;
+  string wifi_ssid = 35;
 }
 
 message PatchBaseline {

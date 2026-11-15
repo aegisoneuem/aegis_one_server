@@ -45,7 +45,7 @@ func TestDexDB(t *testing.T) {
 	k := dexTestDevice(t, pool)
 
 	// Telemetry: queued, written in one COPY on shutdown drain, in-batch repeat dropped.
-	w := NewDexWriter(pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := NewDexWriter(pool, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { w.Run(runCtx); close(done) }()
@@ -114,5 +114,44 @@ func TestDexDB(t *testing.T) {
 	pool.QueryRow(ctx, `SELECT unexpected_shutdowns FROM device_dex_health WHERE device_id = $1`, k.DeviceUUID).Scan(&shutdowns)
 	if user != `CORP\alice` || domain != "CORP" || !joined || faults != 0 || shutdowns != 0 {
 		t.Errorf("second report: user=%s domain=%s joined=%v faults=%d shutdowns=%d", user, domain, joined, faults, shutdowns)
+	}
+}
+
+func TestDexExtendedDB(t *testing.T) {
+	url := os.Getenv("AEGIS_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("AEGIS_TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	k := dexTestDevice(t, pool)
+
+	w := NewDexWriter(pool, slog.New(slog.NewTextHandler(io.Discard, nil)), true)
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { w.Run(runCtx); close(done) }()
+	at := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	w.Add(k, &aegisonev1.DexTelemetry{CollectedAt: at.Unix(), SampleCount: 20, CpuAvg: 10, MemUsedAvg: 40,
+		DiskQueueAvg: 0.5, DiskIopsAvg: 100, DiskLatencyMsAvg: 3, NetTarget: "192.168.1.1", NetRttMsAvg: 1.5, NetLossPct: 10,
+		BatteryPresent: true, BatteryAcOnline: false, BatteryChargePctAvg: 80, WifiPresent: true, WifiConnected: true,
+		WifiSignalPctAvg: 65, WifiSsid: "CorpWiFi"})
+	stop()
+	<-done
+
+	var iops, rtt, loss, batt, sig float32
+	var bp, ac, wc bool
+	var target, ssid string
+	if err := pool.QueryRow(ctx, `SELECT disk_iops_avg, net_rtt_ms_avg, net_loss_pct, battery_pct_avg, wifi_signal_pct_avg,
+		battery_present, battery_ac_online, wifi_connected, net_target, wifi_ssid
+		FROM device_dex_metrics WHERE device_id = $1`, k.DeviceUUID).
+		Scan(&iops, &rtt, &loss, &batt, &sig, &bp, &ac, &wc, &target, &ssid); err != nil {
+		t.Fatal(err)
+	}
+	if iops != 100 || rtt != 1.5 || loss != 10 || batt != 80 || sig != 65 || !bp || ac || !wc || target != "192.168.1.1" || ssid != "CorpWiFi" {
+		t.Errorf("row: iops=%v rtt=%v loss=%v batt=%v sig=%v bp=%v ac=%v wc=%v target=%s ssid=%s", iops, rtt, loss, batt, sig, bp, ac, wc, target, ssid)
 	}
 }

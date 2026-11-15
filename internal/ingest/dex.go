@@ -9,9 +9,11 @@ package ingest
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,12 +43,26 @@ type DexRow struct {
 	RAMAvg, RAMMin, RAMMax *float32
 	WindowSeconds          *int32
 	SampleCount            *int32
+
+	// Extended telemetry (agent 2026-11-15, migration 0026); nil = not reported.
+	DiskQueueAvg, DiskQueueMin, DiskQueueMax    *float32
+	DiskIOPSAvg, DiskIOPSMin, DiskIOPSMax       *float32
+	DiskLatAvg, DiskLatMin, DiskLatMax          *float32 // ms
+	NetRTTAvg, NetRTTMin, NetRTTMax             *float32 // ms
+	NetLossPct                                  *float32
+	NetTarget                                   *string
+	BatteryPresent, BatteryAC                   *bool
+	BatteryAvg, BatteryMin, BatteryMax          *float32
+	WifiPresent, WifiConnected                  *bool
+	WifiSignalAvg, WifiSignalMin, WifiSignalMax *float32
+	WifiSSID                                    *string
 }
 
 // DexRowFrom validates one report. ok is false for a report with nothing in it.
 // A timestamp outside [now-35d, now+10m] (a wrong endpoint clock) is replaced by
-// the receive time rather than dropping the data.
-func DexRowFrom(deviceUUID string, t *aegisonev1.DexTelemetry, now time.Time) (DexRow, bool) {
+// the receive time rather than dropping the data. networkNames keeps the Wi-Fi
+// SSID and the ping target (see config.DexNetworkNames).
+func DexRowFrom(deviceUUID string, t *aegisonev1.DexTelemetry, now time.Time, networkNames bool) (DexRow, bool) {
 	r := DexRow{
 		DeviceUUID: deviceUUID,
 		CPUAvg:     pct(t.GetCpuAvg()), CPUMin: pct(t.GetCpuMin()), CPUMax: pct(t.GetCpuMax()),
@@ -62,7 +78,67 @@ func DexRowFrom(deviceUUID string, t *aegisonev1.DexTelemetry, now time.Time) (D
 		r.WindowSeconds = &w
 	}
 	r.Time = reportTime(t.GetCollectedAt(), now)
+	extendedDex(&r, t, networkNames)
 	return r, true
+}
+
+// extendedDex fills the disk / network / battery / Wi-Fi columns. The agent
+// fills a section only when it got a reading, but proto3 cannot tell an unset
+// field from zero / false, so:
+//   - disk: kept when any value is non-zero (all zero = no reading)
+//   - network: kept when net_target is set (the agent sets it whenever it
+//     probed); round trip only when not every probe was lost
+//   - battery / Wi-Fi flags: false is only meaningful from an agent that sends
+//     the extended fields at all, so they are kept when the report has a disk,
+//     network or battery reading (or the flag is true); otherwise NULL. An
+//     older agent's report thus stores NULL, not "no battery".
+func extendedDex(r *DexRow, t *aegisonev1.DexTelemetry, networkNames bool) {
+	disk := t.GetDiskQueueAvg() != 0 || t.GetDiskQueueMax() != 0 || t.GetDiskIopsAvg() != 0 || t.GetDiskIopsMax() != 0 ||
+		t.GetDiskLatencyMsAvg() != 0 || t.GetDiskLatencyMsMax() != 0
+	if disk {
+		r.DiskQueueAvg, r.DiskQueueMin, r.DiskQueueMax = nonNegF(t.GetDiskQueueAvg()), nonNegF(t.GetDiskQueueMin()), nonNegF(t.GetDiskQueueMax())
+		r.DiskIOPSAvg, r.DiskIOPSMin, r.DiskIOPSMax = nonNegF(t.GetDiskIopsAvg()), nonNegF(t.GetDiskIopsMin()), nonNegF(t.GetDiskIopsMax())
+		r.DiskLatAvg, r.DiskLatMin, r.DiskLatMax = nonNegF(t.GetDiskLatencyMsAvg()), nonNegF(t.GetDiskLatencyMsMin()), nonNegF(t.GetDiskLatencyMsMax())
+	}
+	net := strings.TrimSpace(t.GetNetTarget()) != ""
+	if net {
+		r.NetLossPct = pct(t.GetNetLossPct())
+		if t.GetNetLossPct() < 100 {
+			r.NetRTTAvg, r.NetRTTMin, r.NetRTTMax = nonNegF(t.GetNetRttMsAvg()), nonNegF(t.GetNetRttMsMin()), nonNegF(t.GetNetRttMsMax())
+		}
+		if networkNames {
+			r.NetTarget = nullableN(t.GetNetTarget(), 255)
+		}
+	}
+	battery := t.GetBatteryPresent() || t.GetBatteryAcOnline() || t.GetBatteryChargePctAvg() > 0
+	extended := disk || net || battery
+	if extended {
+		bp, ac := t.GetBatteryPresent(), t.GetBatteryAcOnline()
+		r.BatteryPresent, r.BatteryAC = &bp, &ac
+		if bp {
+			r.BatteryAvg, r.BatteryMin, r.BatteryMax = pct(t.GetBatteryChargePctAvg()), pct(t.GetBatteryChargePctMin()), pct(t.GetBatteryChargePctMax())
+		}
+	}
+	if extended || t.GetWifiPresent() || t.GetWifiConnected() {
+		wp, wc := t.GetWifiPresent(), t.GetWifiConnected()
+		r.WifiPresent, r.WifiConnected = &wp, &wc
+		if wc {
+			r.WifiSignalAvg, r.WifiSignalMin, r.WifiSignalMax = pct(t.GetWifiSignalPctAvg()), pct(t.GetWifiSignalPctMin()), pct(t.GetWifiSignalPctMax())
+			if networkNames {
+				r.WifiSSID = nullableN(t.GetWifiSsid(), 64)
+			}
+		}
+	}
+}
+
+// nonNegF keeps a non-negative, finite measurement (capped at 1e9); anything
+// else is NULL.
+func nonNegF(v float64) *float32 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return nil
+	}
+	f := float32(math.Min(v, 1e9))
+	return &f
 }
 
 // pct keeps a percentage in 0..100; NaN / Inf become NULL.
@@ -87,18 +163,22 @@ type DexWriter struct {
 	dropped atomic.Int64
 	written atomic.Int64
 
+	networkNames bool
+
 	mu     sync.RWMutex
 	closed bool
 }
 
-func NewDexWriter(pool *pgxpool.Pool, log *slog.Logger) *DexWriter {
-	return &DexWriter{pool: pool, log: log, ch: make(chan DexRow, dexQueueSize)}
+// NewDexWriter: networkNames keeps the Wi-Fi SSID and ping target
+// (config.DexNetworkNames).
+func NewDexWriter(pool *pgxpool.Pool, log *slog.Logger, networkNames bool) *DexWriter {
+	return &DexWriter{pool: pool, log: log, ch: make(chan DexRow, dexQueueSize), networkNames: networkNames}
 }
 
 // Add queues one report without blocking the agent stream. It returns false
 // when the report is empty or the queue is full (counted as dropped).
 func (w *DexWriter) Add(known *identity.Known, t *aegisonev1.DexTelemetry) bool {
-	row, ok := DexRowFrom(known.DeviceUUID, t, time.Now())
+	row, ok := DexRowFrom(known.DeviceUUID, t, time.Now(), w.networkNames)
 	if !ok {
 		return false
 	}
@@ -171,10 +251,29 @@ func (w *DexWriter) Run(ctx context.Context) {
 }
 
 var dexColumns = []string{"time", "device_id", "cpu_pct", "cpu_min_pct", "cpu_max_pct",
-	"ram_pct", "ram_min_pct", "ram_max_pct", "window_seconds", "sample_count"}
+	"ram_pct", "ram_min_pct", "ram_max_pct", "window_seconds", "sample_count",
+	"disk_queue_avg", "disk_queue_min", "disk_queue_max", "disk_iops_avg", "disk_iops_min", "disk_iops_max",
+	"disk_latency_ms_avg", "disk_latency_ms_min", "disk_latency_ms_max",
+	"net_rtt_ms_avg", "net_rtt_ms_min", "net_rtt_ms_max", "net_loss_pct", "net_target",
+	"battery_present", "battery_ac_online", "battery_pct_avg", "battery_pct_min", "battery_pct_max",
+	"wifi_present", "wifi_connected", "wifi_signal_pct_avg", "wifi_signal_pct_min", "wifi_signal_pct_max", "wifi_ssid"}
+
+// dexInsert is the row-by-row fallback statement, built from dexColumns.
+var dexInsert = func() string {
+	ph := make([]string, len(dexColumns))
+	for i := range ph {
+		ph[i] = fmt.Sprintf("$%d", i+1)
+	}
+	return "INSERT INTO device_dex_metrics (" + strings.Join(dexColumns, ", ") + ") VALUES (" + strings.Join(ph, ", ") + ")"
+}()
 
 func (r DexRow) values() []any {
-	return []any{r.Time, r.DeviceUUID, r.CPUAvg, r.CPUMin, r.CPUMax, r.RAMAvg, r.RAMMin, r.RAMMax, r.WindowSeconds, r.SampleCount}
+	return []any{r.Time, r.DeviceUUID, r.CPUAvg, r.CPUMin, r.CPUMax, r.RAMAvg, r.RAMMin, r.RAMMax, r.WindowSeconds, r.SampleCount,
+		r.DiskQueueAvg, r.DiskQueueMin, r.DiskQueueMax, r.DiskIOPSAvg, r.DiskIOPSMin, r.DiskIOPSMax,
+		r.DiskLatAvg, r.DiskLatMin, r.DiskLatMax,
+		r.NetRTTAvg, r.NetRTTMin, r.NetRTTMax, r.NetLossPct, r.NetTarget,
+		r.BatteryPresent, r.BatteryAC, r.BatteryAvg, r.BatteryMin, r.BatteryMax,
+		r.WifiPresent, r.WifiConnected, r.WifiSignalAvg, r.WifiSignalMin, r.WifiSignalMax, r.WifiSSID}
 }
 
 // flush COPYs one batch. A batch fails as a whole (e.g. one device row was
@@ -194,10 +293,7 @@ func (w *DexWriter) flush(ctx context.Context, batch []DexRow) {
 	w.log.Warn("dex telemetry COPY failed; inserting row by row", "rows", len(rows), "error", err.Error())
 	var ok, failed int
 	for _, r := range rows {
-		if _, err := w.pool.Exec(ctx, `
-			INSERT INTO device_dex_metrics (time, device_id, cpu_pct, cpu_min_pct, cpu_max_pct,
-			    ram_pct, ram_min_pct, ram_max_pct, window_seconds, sample_count)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, r.values()...); err != nil {
+		if _, err := w.pool.Exec(ctx, dexInsert, r.values()...); err != nil {
 			failed++
 			continue
 		}

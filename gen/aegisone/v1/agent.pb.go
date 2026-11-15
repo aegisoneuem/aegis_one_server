@@ -1925,8 +1925,10 @@ type FullInventoryReport struct {
 	InstalledAppx []*InstalledAppx       `protobuf:"bytes,7,rep,name=installed_appx,json=installedAppx,proto3" json:"installed_appx,omitempty"`
 	Identity      *IdentityInfo          `protobuf:"bytes,8,opt,name=identity,proto3" json:"identity,omitempty"`
 	DexHealth     *DexHealth             `protobuf:"bytes,9,opt,name=dex_health,json=dexHealth,proto3" json:"dex_health,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Server-defined custom attributes evaluated by the agent: name -> value.
+	CustomProperties map[string]string `protobuf:"bytes,10,rep,name=custom_properties,json=customProperties,proto3" json:"custom_properties,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *FullInventoryReport) Reset() {
@@ -2022,6 +2024,128 @@ func (x *FullInventoryReport) GetDexHealth() *DexHealth {
 	return nil
 }
 
+func (x *FullInventoryReport) GetCustomProperties() map[string]string {
+	if x != nil {
+		return x.CustomProperties
+	}
+	return nil
+}
+
+// One server-defined custom attribute: a read-only, declarative provider
+// (env, file, registry, admin_tag, service_state) and its arguments.
+type CustomAttributeDefinition struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Provider      string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
+	Args          map[string]string      `protobuf:"bytes,3,rep,name=args,proto3" json:"args,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CustomAttributeDefinition) Reset() {
+	*x = CustomAttributeDefinition{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CustomAttributeDefinition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CustomAttributeDefinition) ProtoMessage() {}
+
+func (x *CustomAttributeDefinition) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CustomAttributeDefinition.ProtoReflect.Descriptor instead.
+func (*CustomAttributeDefinition) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *CustomAttributeDefinition) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CustomAttributeDefinition) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *CustomAttributeDefinition) GetArgs() map[string]string {
+	if x != nil {
+		return x.Args
+	}
+	return nil
+}
+
+// Payload of the signed set_custom_attributes command (anti-rollback on issued_at).
+type CustomAttributeSpec struct {
+	state         protoimpl.MessageState       `protogen:"open.v1"`
+	Definitions   []*CustomAttributeDefinition `protobuf:"bytes,1,rep,name=definitions,proto3" json:"definitions,omitempty"`
+	IssuedAt      int64                        `protobuf:"varint,2,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CustomAttributeSpec) Reset() {
+	*x = CustomAttributeSpec{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CustomAttributeSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CustomAttributeSpec) ProtoMessage() {}
+
+func (x *CustomAttributeSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CustomAttributeSpec.ProtoReflect.Descriptor instead.
+func (*CustomAttributeSpec) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *CustomAttributeSpec) GetDefinitions() []*CustomAttributeDefinition {
+	if x != nil {
+		return x.Definitions
+	}
+	return nil
+}
+
+func (x *CustomAttributeSpec) GetIssuedAt() int64 {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return 0
+}
+
 // Device stability over the last window_days, counted from the Windows event log.
 type DexHealth struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
@@ -2039,7 +2163,7 @@ type DexHealth struct {
 
 func (x *DexHealth) Reset() {
 	*x = DexHealth{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2051,7 +2175,7 @@ func (x *DexHealth) String() string {
 func (*DexHealth) ProtoMessage() {}
 
 func (x *DexHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2064,7 +2188,7 @@ func (x *DexHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DexHealth.ProtoReflect.Descriptor instead.
 func (*DexHealth) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *DexHealth) GetUnexpectedShutdowns() int32 {
@@ -2134,7 +2258,7 @@ type AppFault struct {
 
 func (x *AppFault) Reset() {
 	*x = AppFault{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2146,7 +2270,7 @@ func (x *AppFault) String() string {
 func (*AppFault) ProtoMessage() {}
 
 func (x *AppFault) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2159,7 +2283,7 @@ func (x *AppFault) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppFault.ProtoReflect.Descriptor instead.
 func (*AppFault) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{20}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *AppFault) GetName() string {
@@ -2197,7 +2321,7 @@ type IdentityInfo struct {
 
 func (x *IdentityInfo) Reset() {
 	*x = IdentityInfo{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2209,7 +2333,7 @@ func (x *IdentityInfo) String() string {
 func (*IdentityInfo) ProtoMessage() {}
 
 func (x *IdentityInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2222,7 +2346,7 @@ func (x *IdentityInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IdentityInfo.ProtoReflect.Descriptor instead.
 func (*IdentityInfo) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{21}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *IdentityInfo) GetLoggedOnUser() string {
@@ -2277,7 +2401,7 @@ type InstalledAppx struct {
 
 func (x *InstalledAppx) Reset() {
 	*x = InstalledAppx{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2289,7 +2413,7 @@ func (x *InstalledAppx) String() string {
 func (*InstalledAppx) ProtoMessage() {}
 
 func (x *InstalledAppx) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2302,7 +2426,7 @@ func (x *InstalledAppx) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InstalledAppx.ProtoReflect.Descriptor instead.
 func (*InstalledAppx) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{22}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *InstalledAppx) GetDisplayName() string {
@@ -2385,7 +2509,7 @@ type DriverInventory struct {
 
 func (x *DriverInventory) Reset() {
 	*x = DriverInventory{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2397,7 +2521,7 @@ func (x *DriverInventory) String() string {
 func (*DriverInventory) ProtoMessage() {}
 
 func (x *DriverInventory) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2410,7 +2534,7 @@ func (x *DriverInventory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DriverInventory.ProtoReflect.Descriptor instead.
 func (*DriverInventory) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{23}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *DriverInventory) GetDeviceName() string {
@@ -2507,7 +2631,7 @@ type HardwareInventory struct {
 
 func (x *HardwareInventory) Reset() {
 	*x = HardwareInventory{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2519,7 +2643,7 @@ func (x *HardwareInventory) String() string {
 func (*HardwareInventory) ProtoMessage() {}
 
 func (x *HardwareInventory) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2532,7 +2656,7 @@ func (x *HardwareInventory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HardwareInventory.ProtoReflect.Descriptor instead.
 func (*HardwareInventory) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{24}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *HardwareInventory) GetCpuVendor() string {
@@ -2710,7 +2834,7 @@ type DiskInventory struct {
 
 func (x *DiskInventory) Reset() {
 	*x = DiskInventory{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2722,7 +2846,7 @@ func (x *DiskInventory) String() string {
 func (*DiskInventory) ProtoMessage() {}
 
 func (x *DiskInventory) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2735,7 +2859,7 @@ func (x *DiskInventory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiskInventory.ProtoReflect.Descriptor instead.
 func (*DiskInventory) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{25}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *DiskInventory) GetMountPoint() string {
@@ -2794,7 +2918,7 @@ type NetworkInterface struct {
 
 func (x *NetworkInterface) Reset() {
 	*x = NetworkInterface{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2806,7 +2930,7 @@ func (x *NetworkInterface) String() string {
 func (*NetworkInterface) ProtoMessage() {}
 
 func (x *NetworkInterface) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2819,7 +2943,7 @@ func (x *NetworkInterface) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkInterface.ProtoReflect.Descriptor instead.
 func (*NetworkInterface) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{26}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *NetworkInterface) GetName() string {
@@ -2884,7 +3008,7 @@ type AuditEvent struct {
 
 func (x *AuditEvent) Reset() {
 	*x = AuditEvent{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2896,7 +3020,7 @@ func (x *AuditEvent) String() string {
 func (*AuditEvent) ProtoMessage() {}
 
 func (x *AuditEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2909,7 +3033,7 @@ func (x *AuditEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditEvent.ProtoReflect.Descriptor instead.
 func (*AuditEvent) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{27}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *AuditEvent) GetDeviceId() string {
@@ -3016,7 +3140,7 @@ type AgentMessage struct {
 
 func (x *AgentMessage) Reset() {
 	*x = AgentMessage{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3028,7 +3152,7 @@ func (x *AgentMessage) String() string {
 func (*AgentMessage) ProtoMessage() {}
 
 func (x *AgentMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3041,7 +3165,7 @@ func (x *AgentMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentMessage.ProtoReflect.Descriptor instead.
 func (*AgentMessage) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{28}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *AgentMessage) GetPayload() isAgentMessage_Payload {
@@ -3203,13 +3327,42 @@ type DexTelemetry struct {
 	MemUsedAvg    float64                `protobuf:"fixed64,8,opt,name=mem_used_avg,json=memUsedAvg,proto3" json:"mem_used_avg,omitempty"`
 	MemUsedMin    float64                `protobuf:"fixed64,9,opt,name=mem_used_min,json=memUsedMin,proto3" json:"mem_used_min,omitempty"`
 	MemUsedMax    float64                `protobuf:"fixed64,10,opt,name=mem_used_max,json=memUsedMax,proto3" json:"mem_used_max,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Disk: PhysicalDisk(_Total) queue length, transfers/s, latency.
+	DiskQueueAvg     float64 `protobuf:"fixed64,11,opt,name=disk_queue_avg,json=diskQueueAvg,proto3" json:"disk_queue_avg,omitempty"`
+	DiskQueueMin     float64 `protobuf:"fixed64,12,opt,name=disk_queue_min,json=diskQueueMin,proto3" json:"disk_queue_min,omitempty"`
+	DiskQueueMax     float64 `protobuf:"fixed64,13,opt,name=disk_queue_max,json=diskQueueMax,proto3" json:"disk_queue_max,omitempty"`
+	DiskIopsAvg      float64 `protobuf:"fixed64,14,opt,name=disk_iops_avg,json=diskIopsAvg,proto3" json:"disk_iops_avg,omitempty"`
+	DiskIopsMin      float64 `protobuf:"fixed64,15,opt,name=disk_iops_min,json=diskIopsMin,proto3" json:"disk_iops_min,omitempty"`
+	DiskIopsMax      float64 `protobuf:"fixed64,16,opt,name=disk_iops_max,json=diskIopsMax,proto3" json:"disk_iops_max,omitempty"`
+	DiskLatencyMsAvg float64 `protobuf:"fixed64,17,opt,name=disk_latency_ms_avg,json=diskLatencyMsAvg,proto3" json:"disk_latency_ms_avg,omitempty"`
+	DiskLatencyMsMin float64 `protobuf:"fixed64,18,opt,name=disk_latency_ms_min,json=diskLatencyMsMin,proto3" json:"disk_latency_ms_min,omitempty"`
+	DiskLatencyMsMax float64 `protobuf:"fixed64,19,opt,name=disk_latency_ms_max,json=diskLatencyMsMax,proto3" json:"disk_latency_ms_max,omitempty"`
+	// Network: ICMP round trip to net_target (default gateway unless configured).
+	NetRttMsAvg float64 `protobuf:"fixed64,20,opt,name=net_rtt_ms_avg,json=netRttMsAvg,proto3" json:"net_rtt_ms_avg,omitempty"`
+	NetRttMsMin float64 `protobuf:"fixed64,21,opt,name=net_rtt_ms_min,json=netRttMsMin,proto3" json:"net_rtt_ms_min,omitempty"`
+	NetRttMsMax float64 `protobuf:"fixed64,22,opt,name=net_rtt_ms_max,json=netRttMsMax,proto3" json:"net_rtt_ms_max,omitempty"`
+	NetLossPct  float64 `protobuf:"fixed64,23,opt,name=net_loss_pct,json=netLossPct,proto3" json:"net_loss_pct,omitempty"`
+	NetTarget   string  `protobuf:"bytes,24,opt,name=net_target,json=netTarget,proto3" json:"net_target,omitempty"`
+	// Battery (percent).
+	BatteryPresent      bool    `protobuf:"varint,25,opt,name=battery_present,json=batteryPresent,proto3" json:"battery_present,omitempty"`
+	BatteryAcOnline     bool    `protobuf:"varint,26,opt,name=battery_ac_online,json=batteryAcOnline,proto3" json:"battery_ac_online,omitempty"`
+	BatteryChargePctAvg float64 `protobuf:"fixed64,27,opt,name=battery_charge_pct_avg,json=batteryChargePctAvg,proto3" json:"battery_charge_pct_avg,omitempty"`
+	BatteryChargePctMin float64 `protobuf:"fixed64,28,opt,name=battery_charge_pct_min,json=batteryChargePctMin,proto3" json:"battery_charge_pct_min,omitempty"`
+	BatteryChargePctMax float64 `protobuf:"fixed64,29,opt,name=battery_charge_pct_max,json=batteryChargePctMax,proto3" json:"battery_charge_pct_max,omitempty"`
+	// Wi-Fi signal quality (0-100) and network name.
+	WifiPresent      bool    `protobuf:"varint,30,opt,name=wifi_present,json=wifiPresent,proto3" json:"wifi_present,omitempty"`
+	WifiConnected    bool    `protobuf:"varint,31,opt,name=wifi_connected,json=wifiConnected,proto3" json:"wifi_connected,omitempty"`
+	WifiSignalPctAvg float64 `protobuf:"fixed64,32,opt,name=wifi_signal_pct_avg,json=wifiSignalPctAvg,proto3" json:"wifi_signal_pct_avg,omitempty"`
+	WifiSignalPctMin float64 `protobuf:"fixed64,33,opt,name=wifi_signal_pct_min,json=wifiSignalPctMin,proto3" json:"wifi_signal_pct_min,omitempty"`
+	WifiSignalPctMax float64 `protobuf:"fixed64,34,opt,name=wifi_signal_pct_max,json=wifiSignalPctMax,proto3" json:"wifi_signal_pct_max,omitempty"`
+	WifiSsid         string  `protobuf:"bytes,35,opt,name=wifi_ssid,json=wifiSsid,proto3" json:"wifi_ssid,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *DexTelemetry) Reset() {
 	*x = DexTelemetry{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3221,7 +3374,7 @@ func (x *DexTelemetry) String() string {
 func (*DexTelemetry) ProtoMessage() {}
 
 func (x *DexTelemetry) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3234,7 +3387,7 @@ func (x *DexTelemetry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DexTelemetry.ProtoReflect.Descriptor instead.
 func (*DexTelemetry) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{29}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *DexTelemetry) GetDeviceId() string {
@@ -3307,6 +3460,181 @@ func (x *DexTelemetry) GetMemUsedMax() float64 {
 	return 0
 }
 
+func (x *DexTelemetry) GetDiskQueueAvg() float64 {
+	if x != nil {
+		return x.DiskQueueAvg
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetDiskQueueMin() float64 {
+	if x != nil {
+		return x.DiskQueueMin
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetDiskQueueMax() float64 {
+	if x != nil {
+		return x.DiskQueueMax
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetDiskIopsAvg() float64 {
+	if x != nil {
+		return x.DiskIopsAvg
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetDiskIopsMin() float64 {
+	if x != nil {
+		return x.DiskIopsMin
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetDiskIopsMax() float64 {
+	if x != nil {
+		return x.DiskIopsMax
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetDiskLatencyMsAvg() float64 {
+	if x != nil {
+		return x.DiskLatencyMsAvg
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetDiskLatencyMsMin() float64 {
+	if x != nil {
+		return x.DiskLatencyMsMin
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetDiskLatencyMsMax() float64 {
+	if x != nil {
+		return x.DiskLatencyMsMax
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetNetRttMsAvg() float64 {
+	if x != nil {
+		return x.NetRttMsAvg
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetNetRttMsMin() float64 {
+	if x != nil {
+		return x.NetRttMsMin
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetNetRttMsMax() float64 {
+	if x != nil {
+		return x.NetRttMsMax
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetNetLossPct() float64 {
+	if x != nil {
+		return x.NetLossPct
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetNetTarget() string {
+	if x != nil {
+		return x.NetTarget
+	}
+	return ""
+}
+
+func (x *DexTelemetry) GetBatteryPresent() bool {
+	if x != nil {
+		return x.BatteryPresent
+	}
+	return false
+}
+
+func (x *DexTelemetry) GetBatteryAcOnline() bool {
+	if x != nil {
+		return x.BatteryAcOnline
+	}
+	return false
+}
+
+func (x *DexTelemetry) GetBatteryChargePctAvg() float64 {
+	if x != nil {
+		return x.BatteryChargePctAvg
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetBatteryChargePctMin() float64 {
+	if x != nil {
+		return x.BatteryChargePctMin
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetBatteryChargePctMax() float64 {
+	if x != nil {
+		return x.BatteryChargePctMax
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetWifiPresent() bool {
+	if x != nil {
+		return x.WifiPresent
+	}
+	return false
+}
+
+func (x *DexTelemetry) GetWifiConnected() bool {
+	if x != nil {
+		return x.WifiConnected
+	}
+	return false
+}
+
+func (x *DexTelemetry) GetWifiSignalPctAvg() float64 {
+	if x != nil {
+		return x.WifiSignalPctAvg
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetWifiSignalPctMin() float64 {
+	if x != nil {
+		return x.WifiSignalPctMin
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetWifiSignalPctMax() float64 {
+	if x != nil {
+		return x.WifiSignalPctMax
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetWifiSsid() string {
+	if x != nil {
+		return x.WifiSsid
+	}
+	return ""
+}
+
 type PatchBaseline struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Build         string                 `protobuf:"bytes,1,opt,name=build,proto3" json:"build,omitempty"`
@@ -3318,7 +3646,7 @@ type PatchBaseline struct {
 
 func (x *PatchBaseline) Reset() {
 	*x = PatchBaseline{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3330,7 +3658,7 @@ func (x *PatchBaseline) String() string {
 func (*PatchBaseline) ProtoMessage() {}
 
 func (x *PatchBaseline) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3343,7 +3671,7 @@ func (x *PatchBaseline) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PatchBaseline.ProtoReflect.Descriptor instead.
 func (*PatchBaseline) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{30}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *PatchBaseline) GetBuild() string {
@@ -3377,7 +3705,7 @@ type CabManifest struct {
 
 func (x *CabManifest) Reset() {
 	*x = CabManifest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3389,7 +3717,7 @@ func (x *CabManifest) String() string {
 func (*CabManifest) ProtoMessage() {}
 
 func (x *CabManifest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3402,7 +3730,7 @@ func (x *CabManifest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CabManifest.ProtoReflect.Descriptor instead.
 func (*CabManifest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{31}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *CabManifest) GetVersion() string {
@@ -3433,7 +3761,7 @@ type ServerMessage struct {
 
 func (x *ServerMessage) Reset() {
 	*x = ServerMessage{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3445,7 +3773,7 @@ func (x *ServerMessage) String() string {
 func (*ServerMessage) ProtoMessage() {}
 
 func (x *ServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3458,7 +3786,7 @@ func (x *ServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerMessage.ProtoReflect.Descriptor instead.
 func (*ServerMessage) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{32}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ServerMessage) GetPayload() isServerMessage_Payload {
@@ -3529,7 +3857,7 @@ type ContentRequest struct {
 
 func (x *ContentRequest) Reset() {
 	*x = ContentRequest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3541,7 +3869,7 @@ func (x *ContentRequest) String() string {
 func (*ContentRequest) ProtoMessage() {}
 
 func (x *ContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3554,7 +3882,7 @@ func (x *ContentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContentRequest.ProtoReflect.Descriptor instead.
 func (*ContentRequest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{33}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ContentRequest) GetKind() string {
@@ -3594,7 +3922,7 @@ type ContentChunk struct {
 
 func (x *ContentChunk) Reset() {
 	*x = ContentChunk{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3606,7 +3934,7 @@ func (x *ContentChunk) String() string {
 func (*ContentChunk) ProtoMessage() {}
 
 func (x *ContentChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3619,7 +3947,7 @@ func (x *ContentChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContentChunk.ProtoReflect.Descriptor instead.
 func (*ContentChunk) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{34}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ContentChunk) GetData() []byte {
@@ -3649,7 +3977,7 @@ type EnrollRequest struct {
 
 func (x *EnrollRequest) Reset() {
 	*x = EnrollRequest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3661,7 +3989,7 @@ func (x *EnrollRequest) String() string {
 func (*EnrollRequest) ProtoMessage() {}
 
 func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3674,7 +4002,7 @@ func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollRequest.ProtoReflect.Descriptor instead.
 func (*EnrollRequest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{35}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *EnrollRequest) GetEnrollToken() string {
@@ -3774,7 +4102,7 @@ type EnrollResponse struct {
 
 func (x *EnrollResponse) Reset() {
 	*x = EnrollResponse{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3786,7 +4114,7 @@ func (x *EnrollResponse) String() string {
 func (*EnrollResponse) ProtoMessage() {}
 
 func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3799,7 +4127,7 @@ func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollResponse.ProtoReflect.Descriptor instead.
 func (*EnrollResponse) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{36}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *EnrollResponse) GetClientCertPem() string {
@@ -3850,7 +4178,7 @@ type CollectFileSpec struct {
 
 func (x *CollectFileSpec) Reset() {
 	*x = CollectFileSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3862,7 +4190,7 @@ func (x *CollectFileSpec) String() string {
 func (*CollectFileSpec) ProtoMessage() {}
 
 func (x *CollectFileSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3875,7 +4203,7 @@ func (x *CollectFileSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CollectFileSpec.ProtoReflect.Descriptor instead.
 func (*CollectFileSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{37}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *CollectFileSpec) GetPaths() []string {
@@ -3926,7 +4254,7 @@ type UploadChunk struct {
 
 func (x *UploadChunk) Reset() {
 	*x = UploadChunk{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3938,7 +4266,7 @@ func (x *UploadChunk) String() string {
 func (*UploadChunk) ProtoMessage() {}
 
 func (x *UploadChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3951,7 +4279,7 @@ func (x *UploadChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadChunk.ProtoReflect.Descriptor instead.
 func (*UploadChunk) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{38}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *UploadChunk) GetActionId() string {
@@ -4001,7 +4329,7 @@ type UploadAck struct {
 
 func (x *UploadAck) Reset() {
 	*x = UploadAck{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4013,7 +4341,7 @@ func (x *UploadAck) String() string {
 func (*UploadAck) ProtoMessage() {}
 
 func (x *UploadAck) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4026,7 +4354,7 @@ func (x *UploadAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadAck.ProtoReflect.Descriptor instead.
 func (*UploadAck) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{39}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *UploadAck) GetStoredPath() string {
@@ -4066,7 +4394,7 @@ type RenewRequest struct {
 
 func (x *RenewRequest) Reset() {
 	*x = RenewRequest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4078,7 +4406,7 @@ func (x *RenewRequest) String() string {
 func (*RenewRequest) ProtoMessage() {}
 
 func (x *RenewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4091,7 +4419,7 @@ func (x *RenewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewRequest.ProtoReflect.Descriptor instead.
 func (*RenewRequest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{40}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *RenewRequest) GetCsrPem() string {
@@ -4111,7 +4439,7 @@ type RenewResponse struct {
 
 func (x *RenewResponse) Reset() {
 	*x = RenewResponse{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4123,7 +4451,7 @@ func (x *RenewResponse) String() string {
 func (*RenewResponse) ProtoMessage() {}
 
 func (x *RenewResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4136,7 +4464,7 @@ func (x *RenewResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewResponse.ProtoReflect.Descriptor instead.
 func (*RenewResponse) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{41}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *RenewResponse) GetClientCertPem() string {
@@ -4166,7 +4494,7 @@ type OpenShellSpec struct {
 
 func (x *OpenShellSpec) Reset() {
 	*x = OpenShellSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4178,7 +4506,7 @@ func (x *OpenShellSpec) String() string {
 func (*OpenShellSpec) ProtoMessage() {}
 
 func (x *OpenShellSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4191,7 +4519,7 @@ func (x *OpenShellSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenShellSpec.ProtoReflect.Descriptor instead.
 func (*OpenShellSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{42}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *OpenShellSpec) GetSessionId() string {
@@ -4239,7 +4567,7 @@ type ShellInput struct {
 
 func (x *ShellInput) Reset() {
 	*x = ShellInput{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[43]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4251,7 +4579,7 @@ func (x *ShellInput) String() string {
 func (*ShellInput) ProtoMessage() {}
 
 func (x *ShellInput) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[43]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4264,7 +4592,7 @@ func (x *ShellInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShellInput.ProtoReflect.Descriptor instead.
 func (*ShellInput) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{43}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ShellInput) GetStdin() []byte {
@@ -4295,7 +4623,7 @@ type ShellOutput struct {
 
 func (x *ShellOutput) Reset() {
 	*x = ShellOutput{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[44]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4307,7 +4635,7 @@ func (x *ShellOutput) String() string {
 func (*ShellOutput) ProtoMessage() {}
 
 func (x *ShellOutput) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[44]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4320,7 +4648,7 @@ func (x *ShellOutput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShellOutput.ProtoReflect.Descriptor instead.
 func (*ShellOutput) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{44}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ShellOutput) GetSessionId() string {
@@ -4381,7 +4709,7 @@ type RunCommandSpec struct {
 
 func (x *RunCommandSpec) Reset() {
 	*x = RunCommandSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[45]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4393,7 +4721,7 @@ func (x *RunCommandSpec) String() string {
 func (*RunCommandSpec) ProtoMessage() {}
 
 func (x *RunCommandSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[45]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4406,7 +4734,7 @@ func (x *RunCommandSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunCommandSpec.ProtoReflect.Descriptor instead.
 func (*RunCommandSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{45}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *RunCommandSpec) GetCommand() string {
@@ -4482,7 +4810,7 @@ type RunCommandResult struct {
 
 func (x *RunCommandResult) Reset() {
 	*x = RunCommandResult{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[46]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4494,7 +4822,7 @@ func (x *RunCommandResult) String() string {
 func (*RunCommandResult) ProtoMessage() {}
 
 func (x *RunCommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[46]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4507,7 +4835,7 @@ func (x *RunCommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunCommandResult.ProtoReflect.Descriptor instead.
 func (*RunCommandResult) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{46}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *RunCommandResult) GetExitCode() int32 {
@@ -4772,7 +5100,7 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\tcap_bytes\x18\x04 \x01(\x03R\bcapBytes\x12 \n" +
 	"\fin_use_bytes\x18\x05 \x01(\x03R\n" +
 	"inUseBytes\x12\x18\n" +
-	"\amessage\x18\x06 \x01(\tR\amessage\"\xd6\x03\n" +
+	"\amessage\x18\x06 \x01(\tR\amessage\"\x80\x05\n" +
 	"\x13FullInventoryReport\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12!\n" +
 	"\fcollected_at\x18\x02 \x01(\x03R\vcollectedAt\x12\x18\n" +
@@ -4783,7 +5111,22 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\x0einstalled_appx\x18\a \x03(\v2\x1a.aegisone.v1.InstalledAppxR\rinstalledAppx\x125\n" +
 	"\bidentity\x18\b \x01(\v2\x19.aegisone.v1.IdentityInfoR\bidentity\x125\n" +
 	"\n" +
-	"dex_health\x18\t \x01(\v2\x16.aegisone.v1.DexHealthR\tdexHealth\"\xc9\x02\n" +
+	"dex_health\x18\t \x01(\v2\x16.aegisone.v1.DexHealthR\tdexHealth\x12c\n" +
+	"\x11custom_properties\x18\n" +
+	" \x03(\v26.aegisone.v1.FullInventoryReport.CustomPropertiesEntryR\x10customProperties\x1aC\n" +
+	"\x15CustomPropertiesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xca\x01\n" +
+	"\x19CustomAttributeDefinition\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12D\n" +
+	"\x04args\x18\x03 \x03(\v20.aegisone.v1.CustomAttributeDefinition.ArgsEntryR\x04args\x1a7\n" +
+	"\tArgsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"|\n" +
+	"\x13CustomAttributeSpec\x12H\n" +
+	"\vdefinitions\x18\x01 \x03(\v2&.aegisone.v1.CustomAttributeDefinitionR\vdefinitions\x12\x1b\n" +
+	"\tissued_at\x18\x02 \x01(\x03R\bissuedAt\"\xc9\x02\n" +
 	"\tDexHealth\x121\n" +
 	"\x14unexpected_shutdowns\x18\x01 \x01(\x05R\x13unexpectedShutdowns\x12\x1c\n" +
 	"\tbugchecks\x18\x02 \x01(\x05R\tbugchecks\x12,\n" +
@@ -4907,7 +5250,8 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	" \x01(\v2\x17.aegisone.v1.AuditEventH\x00R\n" +
 	"auditEvent\x12@\n" +
 	"\rdex_telemetry\x18\v \x01(\v2\x19.aegisone.v1.DexTelemetryH\x00R\fdexTelemetryB\t\n" +
-	"\apayloadJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"\xc9\x02\n" +
+	"\apayloadJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"\xcc\n" +
+	"\n" +
 	"\fDexTelemetry\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12!\n" +
 	"\fcollected_at\x18\x02 \x01(\x03R\vcollectedAt\x12%\n" +
@@ -4922,7 +5266,34 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"memUsedMin\x12 \n" +
 	"\fmem_used_max\x18\n" +
 	" \x01(\x01R\n" +
-	"memUsedMax\"a\n" +
+	"memUsedMax\x12$\n" +
+	"\x0edisk_queue_avg\x18\v \x01(\x01R\fdiskQueueAvg\x12$\n" +
+	"\x0edisk_queue_min\x18\f \x01(\x01R\fdiskQueueMin\x12$\n" +
+	"\x0edisk_queue_max\x18\r \x01(\x01R\fdiskQueueMax\x12\"\n" +
+	"\rdisk_iops_avg\x18\x0e \x01(\x01R\vdiskIopsAvg\x12\"\n" +
+	"\rdisk_iops_min\x18\x0f \x01(\x01R\vdiskIopsMin\x12\"\n" +
+	"\rdisk_iops_max\x18\x10 \x01(\x01R\vdiskIopsMax\x12-\n" +
+	"\x13disk_latency_ms_avg\x18\x11 \x01(\x01R\x10diskLatencyMsAvg\x12-\n" +
+	"\x13disk_latency_ms_min\x18\x12 \x01(\x01R\x10diskLatencyMsMin\x12-\n" +
+	"\x13disk_latency_ms_max\x18\x13 \x01(\x01R\x10diskLatencyMsMax\x12#\n" +
+	"\x0enet_rtt_ms_avg\x18\x14 \x01(\x01R\vnetRttMsAvg\x12#\n" +
+	"\x0enet_rtt_ms_min\x18\x15 \x01(\x01R\vnetRttMsMin\x12#\n" +
+	"\x0enet_rtt_ms_max\x18\x16 \x01(\x01R\vnetRttMsMax\x12 \n" +
+	"\fnet_loss_pct\x18\x17 \x01(\x01R\n" +
+	"netLossPct\x12\x1d\n" +
+	"\n" +
+	"net_target\x18\x18 \x01(\tR\tnetTarget\x12'\n" +
+	"\x0fbattery_present\x18\x19 \x01(\bR\x0ebatteryPresent\x12*\n" +
+	"\x11battery_ac_online\x18\x1a \x01(\bR\x0fbatteryAcOnline\x123\n" +
+	"\x16battery_charge_pct_avg\x18\x1b \x01(\x01R\x13batteryChargePctAvg\x123\n" +
+	"\x16battery_charge_pct_min\x18\x1c \x01(\x01R\x13batteryChargePctMin\x123\n" +
+	"\x16battery_charge_pct_max\x18\x1d \x01(\x01R\x13batteryChargePctMax\x12!\n" +
+	"\fwifi_present\x18\x1e \x01(\bR\vwifiPresent\x12%\n" +
+	"\x0ewifi_connected\x18\x1f \x01(\bR\rwifiConnected\x12-\n" +
+	"\x13wifi_signal_pct_avg\x18  \x01(\x01R\x10wifiSignalPctAvg\x12-\n" +
+	"\x13wifi_signal_pct_min\x18! \x01(\x01R\x10wifiSignalPctMin\x12-\n" +
+	"\x13wifi_signal_pct_max\x18\" \x01(\x01R\x10wifiSignalPctMax\x12\x1b\n" +
+	"\twifi_ssid\x18# \x01(\tR\bwifiSsid\"a\n" +
 	"\rPatchBaseline\x12\x14\n" +
 	"\x05build\x18\x01 \x01(\tR\x05build\x12\x1d\n" +
 	"\n" +
@@ -5070,66 +5441,70 @@ func file_aegisone_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_aegisone_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_aegisone_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
+var file_aegisone_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 54)
 var file_aegisone_v1_agent_proto_goTypes = []any{
-	(ActionPhase)(0),                // 0: aegisone.v1.ActionPhase
-	(*Heartbeat)(nil),               // 1: aegisone.v1.Heartbeat
-	(*CommandResult)(nil),           // 2: aegisone.v1.CommandResult
-	(*Command)(nil),                 // 3: aegisone.v1.Command
-	(*MissingUpdate)(nil),           // 4: aegisone.v1.MissingUpdate
-	(*PatchScanResult)(nil),         // 5: aegisone.v1.PatchScanResult
-	(*InstallPatchSpec)(nil),        // 6: aegisone.v1.InstallPatchSpec
-	(*RebootSpec)(nil),              // 7: aegisone.v1.RebootSpec
-	(*SoftwareDeploySpec)(nil),      // 8: aegisone.v1.SoftwareDeploySpec
-	(*SoftwareBundle)(nil),          // 9: aegisone.v1.SoftwareBundle
-	(*SoftwareDeploymentSteps)(nil), // 10: aegisone.v1.SoftwareDeploymentSteps
-	(*SoftwareCommandStep)(nil),     // 11: aegisone.v1.SoftwareCommandStep
-	(*SoftwareDetection)(nil),       // 12: aegisone.v1.SoftwareDetection
-	(*SoftwareDetectionRule)(nil),   // 13: aegisone.v1.SoftwareDetectionRule
-	(*SoftwareExecution)(nil),       // 14: aegisone.v1.SoftwareExecution
-	(*ActionStatus)(nil),            // 15: aegisone.v1.ActionStatus
-	(*DeviceStateReport)(nil),       // 16: aegisone.v1.DeviceStateReport
-	(*InstalledApp)(nil),            // 17: aegisone.v1.InstalledApp
-	(*CacheFullReport)(nil),         // 18: aegisone.v1.CacheFullReport
-	(*FullInventoryReport)(nil),     // 19: aegisone.v1.FullInventoryReport
-	(*DexHealth)(nil),               // 20: aegisone.v1.DexHealth
-	(*AppFault)(nil),                // 21: aegisone.v1.AppFault
-	(*IdentityInfo)(nil),            // 22: aegisone.v1.IdentityInfo
-	(*InstalledAppx)(nil),           // 23: aegisone.v1.InstalledAppx
-	(*DriverInventory)(nil),         // 24: aegisone.v1.DriverInventory
-	(*HardwareInventory)(nil),       // 25: aegisone.v1.HardwareInventory
-	(*DiskInventory)(nil),           // 26: aegisone.v1.DiskInventory
-	(*NetworkInterface)(nil),        // 27: aegisone.v1.NetworkInterface
-	(*AuditEvent)(nil),              // 28: aegisone.v1.AuditEvent
-	(*AgentMessage)(nil),            // 29: aegisone.v1.AgentMessage
-	(*DexTelemetry)(nil),            // 30: aegisone.v1.DexTelemetry
-	(*PatchBaseline)(nil),           // 31: aegisone.v1.PatchBaseline
-	(*CabManifest)(nil),             // 32: aegisone.v1.CabManifest
-	(*ServerMessage)(nil),           // 33: aegisone.v1.ServerMessage
-	(*ContentRequest)(nil),          // 34: aegisone.v1.ContentRequest
-	(*ContentChunk)(nil),            // 35: aegisone.v1.ContentChunk
-	(*EnrollRequest)(nil),           // 36: aegisone.v1.EnrollRequest
-	(*EnrollResponse)(nil),          // 37: aegisone.v1.EnrollResponse
-	(*CollectFileSpec)(nil),         // 38: aegisone.v1.CollectFileSpec
-	(*UploadChunk)(nil),             // 39: aegisone.v1.UploadChunk
-	(*UploadAck)(nil),               // 40: aegisone.v1.UploadAck
-	(*RenewRequest)(nil),            // 41: aegisone.v1.RenewRequest
-	(*RenewResponse)(nil),           // 42: aegisone.v1.RenewResponse
-	(*OpenShellSpec)(nil),           // 43: aegisone.v1.OpenShellSpec
-	(*ShellInput)(nil),              // 44: aegisone.v1.ShellInput
-	(*ShellOutput)(nil),             // 45: aegisone.v1.ShellOutput
-	(*RunCommandSpec)(nil),          // 46: aegisone.v1.RunCommandSpec
-	(*RunCommandResult)(nil),        // 47: aegisone.v1.RunCommandResult
-	nil,                             // 48: aegisone.v1.SoftwareDeploySpec.ParametersEntry
-	nil,                             // 49: aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
-	nil,                             // 50: aegisone.v1.RunCommandSpec.ParametersEntry
+	(ActionPhase)(0),                  // 0: aegisone.v1.ActionPhase
+	(*Heartbeat)(nil),                 // 1: aegisone.v1.Heartbeat
+	(*CommandResult)(nil),             // 2: aegisone.v1.CommandResult
+	(*Command)(nil),                   // 3: aegisone.v1.Command
+	(*MissingUpdate)(nil),             // 4: aegisone.v1.MissingUpdate
+	(*PatchScanResult)(nil),           // 5: aegisone.v1.PatchScanResult
+	(*InstallPatchSpec)(nil),          // 6: aegisone.v1.InstallPatchSpec
+	(*RebootSpec)(nil),                // 7: aegisone.v1.RebootSpec
+	(*SoftwareDeploySpec)(nil),        // 8: aegisone.v1.SoftwareDeploySpec
+	(*SoftwareBundle)(nil),            // 9: aegisone.v1.SoftwareBundle
+	(*SoftwareDeploymentSteps)(nil),   // 10: aegisone.v1.SoftwareDeploymentSteps
+	(*SoftwareCommandStep)(nil),       // 11: aegisone.v1.SoftwareCommandStep
+	(*SoftwareDetection)(nil),         // 12: aegisone.v1.SoftwareDetection
+	(*SoftwareDetectionRule)(nil),     // 13: aegisone.v1.SoftwareDetectionRule
+	(*SoftwareExecution)(nil),         // 14: aegisone.v1.SoftwareExecution
+	(*ActionStatus)(nil),              // 15: aegisone.v1.ActionStatus
+	(*DeviceStateReport)(nil),         // 16: aegisone.v1.DeviceStateReport
+	(*InstalledApp)(nil),              // 17: aegisone.v1.InstalledApp
+	(*CacheFullReport)(nil),           // 18: aegisone.v1.CacheFullReport
+	(*FullInventoryReport)(nil),       // 19: aegisone.v1.FullInventoryReport
+	(*CustomAttributeDefinition)(nil), // 20: aegisone.v1.CustomAttributeDefinition
+	(*CustomAttributeSpec)(nil),       // 21: aegisone.v1.CustomAttributeSpec
+	(*DexHealth)(nil),                 // 22: aegisone.v1.DexHealth
+	(*AppFault)(nil),                  // 23: aegisone.v1.AppFault
+	(*IdentityInfo)(nil),              // 24: aegisone.v1.IdentityInfo
+	(*InstalledAppx)(nil),             // 25: aegisone.v1.InstalledAppx
+	(*DriverInventory)(nil),           // 26: aegisone.v1.DriverInventory
+	(*HardwareInventory)(nil),         // 27: aegisone.v1.HardwareInventory
+	(*DiskInventory)(nil),             // 28: aegisone.v1.DiskInventory
+	(*NetworkInterface)(nil),          // 29: aegisone.v1.NetworkInterface
+	(*AuditEvent)(nil),                // 30: aegisone.v1.AuditEvent
+	(*AgentMessage)(nil),              // 31: aegisone.v1.AgentMessage
+	(*DexTelemetry)(nil),              // 32: aegisone.v1.DexTelemetry
+	(*PatchBaseline)(nil),             // 33: aegisone.v1.PatchBaseline
+	(*CabManifest)(nil),               // 34: aegisone.v1.CabManifest
+	(*ServerMessage)(nil),             // 35: aegisone.v1.ServerMessage
+	(*ContentRequest)(nil),            // 36: aegisone.v1.ContentRequest
+	(*ContentChunk)(nil),              // 37: aegisone.v1.ContentChunk
+	(*EnrollRequest)(nil),             // 38: aegisone.v1.EnrollRequest
+	(*EnrollResponse)(nil),            // 39: aegisone.v1.EnrollResponse
+	(*CollectFileSpec)(nil),           // 40: aegisone.v1.CollectFileSpec
+	(*UploadChunk)(nil),               // 41: aegisone.v1.UploadChunk
+	(*UploadAck)(nil),                 // 42: aegisone.v1.UploadAck
+	(*RenewRequest)(nil),              // 43: aegisone.v1.RenewRequest
+	(*RenewResponse)(nil),             // 44: aegisone.v1.RenewResponse
+	(*OpenShellSpec)(nil),             // 45: aegisone.v1.OpenShellSpec
+	(*ShellInput)(nil),                // 46: aegisone.v1.ShellInput
+	(*ShellOutput)(nil),               // 47: aegisone.v1.ShellOutput
+	(*RunCommandSpec)(nil),            // 48: aegisone.v1.RunCommandSpec
+	(*RunCommandResult)(nil),          // 49: aegisone.v1.RunCommandResult
+	nil,                               // 50: aegisone.v1.SoftwareDeploySpec.ParametersEntry
+	nil,                               // 51: aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
+	nil,                               // 52: aegisone.v1.FullInventoryReport.CustomPropertiesEntry
+	nil,                               // 53: aegisone.v1.CustomAttributeDefinition.ArgsEntry
+	nil,                               // 54: aegisone.v1.RunCommandSpec.ParametersEntry
 }
 var file_aegisone_v1_agent_proto_depIdxs = []int32{
 	4,  // 0: aegisone.v1.PatchScanResult.missing:type_name -> aegisone.v1.MissingUpdate
 	4,  // 1: aegisone.v1.PatchScanResult.installed:type_name -> aegisone.v1.MissingUpdate
-	48, // 2: aegisone.v1.SoftwareDeploySpec.parameters:type_name -> aegisone.v1.SoftwareDeploySpec.ParametersEntry
+	50, // 2: aegisone.v1.SoftwareDeploySpec.parameters:type_name -> aegisone.v1.SoftwareDeploySpec.ParametersEntry
 	14, // 3: aegisone.v1.SoftwareDeploySpec.execution:type_name -> aegisone.v1.SoftwareExecution
-	49, // 4: aegisone.v1.SoftwareDeploySpec.secure_parameters:type_name -> aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
+	51, // 4: aegisone.v1.SoftwareDeploySpec.secure_parameters:type_name -> aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
 	9,  // 5: aegisone.v1.SoftwareDeploySpec.bundle:type_name -> aegisone.v1.SoftwareBundle
 	10, // 6: aegisone.v1.SoftwareDeploySpec.steps:type_name -> aegisone.v1.SoftwareDeploymentSteps
 	12, // 7: aegisone.v1.SoftwareDeploySpec.detection:type_name -> aegisone.v1.SoftwareDetection
@@ -5139,45 +5514,48 @@ var file_aegisone_v1_agent_proto_depIdxs = []int32{
 	13, // 11: aegisone.v1.SoftwareDetection.rules:type_name -> aegisone.v1.SoftwareDetectionRule
 	0,  // 12: aegisone.v1.ActionStatus.phase:type_name -> aegisone.v1.ActionPhase
 	17, // 13: aegisone.v1.DeviceStateReport.installed_apps:type_name -> aegisone.v1.InstalledApp
-	25, // 14: aegisone.v1.FullInventoryReport.hardware:type_name -> aegisone.v1.HardwareInventory
+	27, // 14: aegisone.v1.FullInventoryReport.hardware:type_name -> aegisone.v1.HardwareInventory
 	17, // 15: aegisone.v1.FullInventoryReport.installed_apps:type_name -> aegisone.v1.InstalledApp
-	24, // 16: aegisone.v1.FullInventoryReport.drivers:type_name -> aegisone.v1.DriverInventory
-	23, // 17: aegisone.v1.FullInventoryReport.installed_appx:type_name -> aegisone.v1.InstalledAppx
-	22, // 18: aegisone.v1.FullInventoryReport.identity:type_name -> aegisone.v1.IdentityInfo
-	20, // 19: aegisone.v1.FullInventoryReport.dex_health:type_name -> aegisone.v1.DexHealth
-	21, // 20: aegisone.v1.DexHealth.app_faults:type_name -> aegisone.v1.AppFault
-	26, // 21: aegisone.v1.HardwareInventory.disks:type_name -> aegisone.v1.DiskInventory
-	27, // 22: aegisone.v1.HardwareInventory.nics:type_name -> aegisone.v1.NetworkInterface
-	1,  // 23: aegisone.v1.AgentMessage.heartbeat:type_name -> aegisone.v1.Heartbeat
-	2,  // 24: aegisone.v1.AgentMessage.command_result:type_name -> aegisone.v1.CommandResult
-	5,  // 25: aegisone.v1.AgentMessage.patch_scan_result:type_name -> aegisone.v1.PatchScanResult
-	16, // 26: aegisone.v1.AgentMessage.device_state:type_name -> aegisone.v1.DeviceStateReport
-	18, // 27: aegisone.v1.AgentMessage.cache_full:type_name -> aegisone.v1.CacheFullReport
-	15, // 28: aegisone.v1.AgentMessage.action_status:type_name -> aegisone.v1.ActionStatus
-	19, // 29: aegisone.v1.AgentMessage.full_inventory:type_name -> aegisone.v1.FullInventoryReport
-	28, // 30: aegisone.v1.AgentMessage.audit_event:type_name -> aegisone.v1.AuditEvent
-	30, // 31: aegisone.v1.AgentMessage.dex_telemetry:type_name -> aegisone.v1.DexTelemetry
-	3,  // 32: aegisone.v1.ServerMessage.command:type_name -> aegisone.v1.Command
-	31, // 33: aegisone.v1.ServerMessage.patch_baseline:type_name -> aegisone.v1.PatchBaseline
-	32, // 34: aegisone.v1.ServerMessage.cab_manifest:type_name -> aegisone.v1.CabManifest
-	50, // 35: aegisone.v1.RunCommandSpec.parameters:type_name -> aegisone.v1.RunCommandSpec.ParametersEntry
-	29, // 36: aegisone.v1.AgentControlPlane.Connect:input_type -> aegisone.v1.AgentMessage
-	34, // 37: aegisone.v1.AgentControlPlane.FetchContent:input_type -> aegisone.v1.ContentRequest
-	39, // 38: aegisone.v1.AgentControlPlane.UploadContent:input_type -> aegisone.v1.UploadChunk
-	36, // 39: aegisone.v1.AgentControlPlane.Enroll:input_type -> aegisone.v1.EnrollRequest
-	41, // 40: aegisone.v1.AgentControlPlane.Renew:input_type -> aegisone.v1.RenewRequest
-	45, // 41: aegisone.v1.AgentControlPlane.ShellSession:input_type -> aegisone.v1.ShellOutput
-	33, // 42: aegisone.v1.AgentControlPlane.Connect:output_type -> aegisone.v1.ServerMessage
-	35, // 43: aegisone.v1.AgentControlPlane.FetchContent:output_type -> aegisone.v1.ContentChunk
-	40, // 44: aegisone.v1.AgentControlPlane.UploadContent:output_type -> aegisone.v1.UploadAck
-	37, // 45: aegisone.v1.AgentControlPlane.Enroll:output_type -> aegisone.v1.EnrollResponse
-	42, // 46: aegisone.v1.AgentControlPlane.Renew:output_type -> aegisone.v1.RenewResponse
-	44, // 47: aegisone.v1.AgentControlPlane.ShellSession:output_type -> aegisone.v1.ShellInput
-	42, // [42:48] is the sub-list for method output_type
-	36, // [36:42] is the sub-list for method input_type
-	36, // [36:36] is the sub-list for extension type_name
-	36, // [36:36] is the sub-list for extension extendee
-	0,  // [0:36] is the sub-list for field type_name
+	26, // 16: aegisone.v1.FullInventoryReport.drivers:type_name -> aegisone.v1.DriverInventory
+	25, // 17: aegisone.v1.FullInventoryReport.installed_appx:type_name -> aegisone.v1.InstalledAppx
+	24, // 18: aegisone.v1.FullInventoryReport.identity:type_name -> aegisone.v1.IdentityInfo
+	22, // 19: aegisone.v1.FullInventoryReport.dex_health:type_name -> aegisone.v1.DexHealth
+	52, // 20: aegisone.v1.FullInventoryReport.custom_properties:type_name -> aegisone.v1.FullInventoryReport.CustomPropertiesEntry
+	53, // 21: aegisone.v1.CustomAttributeDefinition.args:type_name -> aegisone.v1.CustomAttributeDefinition.ArgsEntry
+	20, // 22: aegisone.v1.CustomAttributeSpec.definitions:type_name -> aegisone.v1.CustomAttributeDefinition
+	23, // 23: aegisone.v1.DexHealth.app_faults:type_name -> aegisone.v1.AppFault
+	28, // 24: aegisone.v1.HardwareInventory.disks:type_name -> aegisone.v1.DiskInventory
+	29, // 25: aegisone.v1.HardwareInventory.nics:type_name -> aegisone.v1.NetworkInterface
+	1,  // 26: aegisone.v1.AgentMessage.heartbeat:type_name -> aegisone.v1.Heartbeat
+	2,  // 27: aegisone.v1.AgentMessage.command_result:type_name -> aegisone.v1.CommandResult
+	5,  // 28: aegisone.v1.AgentMessage.patch_scan_result:type_name -> aegisone.v1.PatchScanResult
+	16, // 29: aegisone.v1.AgentMessage.device_state:type_name -> aegisone.v1.DeviceStateReport
+	18, // 30: aegisone.v1.AgentMessage.cache_full:type_name -> aegisone.v1.CacheFullReport
+	15, // 31: aegisone.v1.AgentMessage.action_status:type_name -> aegisone.v1.ActionStatus
+	19, // 32: aegisone.v1.AgentMessage.full_inventory:type_name -> aegisone.v1.FullInventoryReport
+	30, // 33: aegisone.v1.AgentMessage.audit_event:type_name -> aegisone.v1.AuditEvent
+	32, // 34: aegisone.v1.AgentMessage.dex_telemetry:type_name -> aegisone.v1.DexTelemetry
+	3,  // 35: aegisone.v1.ServerMessage.command:type_name -> aegisone.v1.Command
+	33, // 36: aegisone.v1.ServerMessage.patch_baseline:type_name -> aegisone.v1.PatchBaseline
+	34, // 37: aegisone.v1.ServerMessage.cab_manifest:type_name -> aegisone.v1.CabManifest
+	54, // 38: aegisone.v1.RunCommandSpec.parameters:type_name -> aegisone.v1.RunCommandSpec.ParametersEntry
+	31, // 39: aegisone.v1.AgentControlPlane.Connect:input_type -> aegisone.v1.AgentMessage
+	36, // 40: aegisone.v1.AgentControlPlane.FetchContent:input_type -> aegisone.v1.ContentRequest
+	41, // 41: aegisone.v1.AgentControlPlane.UploadContent:input_type -> aegisone.v1.UploadChunk
+	38, // 42: aegisone.v1.AgentControlPlane.Enroll:input_type -> aegisone.v1.EnrollRequest
+	43, // 43: aegisone.v1.AgentControlPlane.Renew:input_type -> aegisone.v1.RenewRequest
+	47, // 44: aegisone.v1.AgentControlPlane.ShellSession:input_type -> aegisone.v1.ShellOutput
+	35, // 45: aegisone.v1.AgentControlPlane.Connect:output_type -> aegisone.v1.ServerMessage
+	37, // 46: aegisone.v1.AgentControlPlane.FetchContent:output_type -> aegisone.v1.ContentChunk
+	42, // 47: aegisone.v1.AgentControlPlane.UploadContent:output_type -> aegisone.v1.UploadAck
+	39, // 48: aegisone.v1.AgentControlPlane.Enroll:output_type -> aegisone.v1.EnrollResponse
+	44, // 49: aegisone.v1.AgentControlPlane.Renew:output_type -> aegisone.v1.RenewResponse
+	46, // 50: aegisone.v1.AgentControlPlane.ShellSession:output_type -> aegisone.v1.ShellInput
+	45, // [45:51] is the sub-list for method output_type
+	39, // [39:45] is the sub-list for method input_type
+	39, // [39:39] is the sub-list for extension type_name
+	39, // [39:39] is the sub-list for extension extendee
+	0,  // [0:39] is the sub-list for field type_name
 }
 
 func init() { file_aegisone_v1_agent_proto_init() }
@@ -5186,7 +5564,7 @@ func file_aegisone_v1_agent_proto_init() {
 		return
 	}
 	file_aegisone_v1_agent_proto_msgTypes[13].OneofWrappers = []any{}
-	file_aegisone_v1_agent_proto_msgTypes[28].OneofWrappers = []any{
+	file_aegisone_v1_agent_proto_msgTypes[30].OneofWrappers = []any{
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_CommandResult)(nil),
 		(*AgentMessage_PatchScanResult)(nil),
@@ -5197,7 +5575,7 @@ func file_aegisone_v1_agent_proto_init() {
 		(*AgentMessage_AuditEvent)(nil),
 		(*AgentMessage_DexTelemetry)(nil),
 	}
-	file_aegisone_v1_agent_proto_msgTypes[32].OneofWrappers = []any{
+	file_aegisone_v1_agent_proto_msgTypes[34].OneofWrappers = []any{
 		(*ServerMessage_Command)(nil),
 		(*ServerMessage_PatchBaseline)(nil),
 		(*ServerMessage_CabManifest)(nil),
@@ -5208,7 +5586,7 @@ func file_aegisone_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_aegisone_v1_agent_proto_rawDesc), len(file_aegisone_v1_agent_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   50,
+			NumMessages:   54,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
