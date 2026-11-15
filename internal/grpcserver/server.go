@@ -514,7 +514,15 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			"reboot_required", st.GetRebootRequired(),
 			"reason", st.GetReason())
 		// Only actions we issued are tracked in agent_commands; the agent also
-		// reports its own scheduled scans ("scan-<unix>") this way.
+		// reports its own cab scans ("scan-<unix>") this way - kept in
+		// device_patch_scan_runs, failed ones included.
+		if known != nil && !commands.IsCommandID(st.GetActionId()) && ingest.IsScanRun(st) {
+			if err := s.ingest.ScanRun(ctx, known, st); err != nil {
+				s.log.Error("record patch scan run failed", "device_id", known.DeviceID, "action_id", st.GetActionId(), "error", err.Error())
+			} else if st.GetPhase() == aegisonev1.ActionPhase_ACTION_PHASE_FAILED {
+				s.log.Warn("agent cab scan failed", "device_id", known.DeviceID, "action_id", st.GetActionId(), "reason", st.GetReason())
+			}
+		}
 		if known != nil && commands.IsCommandID(st.GetActionId()) {
 			if applied, err := s.commands.ApplyActionStatus(ctx, known.AgentUUID, st); err != nil {
 				s.log.Error("record action status failed", "action_id", st.GetActionId(), "error", err.Error())
@@ -522,6 +530,7 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 				s.log.Warn("action status matched no open command for this agent", "action_id", st.GetActionId())
 			} else {
 				s.patchNotApplicable(ctx, known, st)
+				s.patchStaged(ctx, known, st)
 			}
 			if s.policy != nil {
 				s.policy.ActionStatus(ctx, known, st)
@@ -564,6 +573,11 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 			"needed_bytes", cf.GetNeededBytes(),
 			"cap_bytes", cf.GetCapBytes(),
 			"message", cf.GetMessage())
+		if known != nil {
+			if err := s.ingest.CacheFull(ctx, known, cf); err != nil {
+				s.log.Error("record patch cache full failed", "device_id", known.DeviceID, "error", err.Error())
+			}
+		}
 
 	case *aegisonev1.AgentMessage_FullInventory:
 		inv := payload.FullInventory
@@ -663,7 +677,7 @@ func (s *Server) patchDiff(ctx context.Context, known *identity.Known) {
 // NOT_APPLICABLE back into the diff, so it isn't offered again on this build.
 func (s *Server) patchNotApplicable(ctx context.Context, known *identity.Known, st *aegisonev1.ActionStatus) {
 	if s.diff == nil || st.GetPhase() != aegisonev1.ActionPhase_ACTION_PHASE_NOT_APPLICABLE ||
-		st.GetActionType() != "install_patch" || st.GetKb() == "" {
+		!isPatchInstall(st.GetActionType()) || st.GetKb() == "" {
 		return
 	}
 	ok, err := s.diff.NotApplicable(ctx, known.DeviceUUID, known.AgentUUID, st.GetKb(), st.GetActionId(), st.GetReason())
@@ -673,5 +687,29 @@ func (s *Server) patchNotApplicable(ctx context.Context, known *identity.Known, 
 	}
 	if ok {
 		s.log.Info("patch marked not applicable for this build", "device_id", known.DeviceID, "kb", st.GetKb(), "reason", st.GetReason())
+	}
+}
+
+// isPatchInstall: the agent reports install_patch progress as action_type
+// "patch_install" (agent 2026-11); "install_patch" (the command type) is
+// accepted too in case it is aligned later. NotApplicable still checks that
+// the command itself was an install_patch we issued.
+func isPatchInstall(actionType string) bool {
+	return actionType == "patch_install" || actionType == "install_patch"
+}
+
+// patchStaged: a successful stage_patch means the agent's patch cache has room
+// again, so a "patch cache full" state/alert is cleared.
+func (s *Server) patchStaged(ctx context.Context, known *identity.Known, st *aegisonev1.ActionStatus) {
+	if st.GetActionType() != "stage" || st.GetPhase() != aegisonev1.ActionPhase_ACTION_PHASE_SUCCESS {
+		return
+	}
+	resolved, err := s.ingest.CacheRecovered(ctx, known)
+	if err != nil {
+		s.log.Error("clear patch cache full failed", "device_id", known.DeviceID, "error", err.Error())
+		return
+	}
+	if resolved {
+		s.log.Info("patch cache full alert resolved (a patch staged again)", "device_id", known.DeviceID)
 	}
 }

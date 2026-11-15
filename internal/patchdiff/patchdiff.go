@@ -8,8 +8,9 @@
 // os_fixed_builds) the newest KB for the device's (client|server, arch, build)
 // family is
 //   - installed       when the device's UBR is at or past that KB's UBR,
-//   - pending_reboot  when the KB is in the device's installed set but the UBR
-//     hasn't moved yet and the device reports a pending reboot,
+//   - pending_reboot  when the KB is in the device's installed set (or in the
+//     KBs it reports as waiting for the reboot) but the UBR hasn't moved yet
+//     and the device reports a pending reboot,
 //   - missing         otherwise.
 //
 // Older cumulative KBs are superseded by the newest one, so only that one is
@@ -223,7 +224,11 @@ func (df *Differ) Device(ctx context.Context, deviceUUID string, fresh bool) (Re
 			res.State = "not_applicable"
 		} else {
 			var inSet bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM device_installed_kbs WHERE device_id = $1 AND kb = $2)`,
+			// Installed per the device's update set, or one of the KBs its
+			// DeviceStateReport says waits for the reboot.
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (SELECT 1 FROM device_installed_kbs WHERE device_id = $1 AND kb = $2)
+				    OR EXISTS (SELECT 1 FROM devices WHERE id = $1 AND $2 = ANY(pending_reboot_kbs))`,
 				deviceUUID, latest.KB).Scan(&inSet); err != nil {
 				return res, err
 			}

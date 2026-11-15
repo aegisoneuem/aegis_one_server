@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"aegis-one/internal/apiauth"
@@ -13,6 +14,10 @@ import (
 // Handler serves /internal/deploy (mount behind apiauth.Require(PermPatchDeploy)):
 //
 //	POST /internal/deploy?device_id=X&kb=KB5066835  start a push; 202 + the new ids
+//	     &reboot=no_reboot|if_required|always      reboot after install (default no_reboot)
+//	     &reboot_delay_seconds=900                 grace period before it (0..86400, default 900)
+//	     &reboot_message=...                       text shown to the user (default: a standard notice)
+//	     &mode=stage                               download + stage only, no install (pre-cache)
 //	GET  /internal/deploy?id=<deployment_id>        per-device progress
 type Handler struct {
 	d   *Deployer
@@ -43,7 +48,25 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "device_id and kb are required", http.StatusBadRequest)
 		return
 	}
-	out, err := h.d.Create(r.Context(), Request{DeviceID: q.Get("device_id"), KB: q.Get("kb"), ClientID: caller.ClientID, ClientName: caller.ClientName})
+	req := Request{DeviceID: q.Get("device_id"), KB: q.Get("kb"), ClientID: caller.ClientID, ClientName: caller.ClientName,
+		Reboot: q.Get("reboot"), RebootMessage: q.Get("reboot_message")}
+	switch q.Get("mode") {
+	case "", "install":
+	case "stage":
+		req.StageOnly = true
+	default:
+		http.Error(w, "mode must be install or stage", http.StatusBadRequest)
+		return
+	}
+	if v := q.Get("reboot_delay_seconds"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			http.Error(w, "reboot_delay_seconds must be a number", http.StatusBadRequest)
+			return
+		}
+		req.RebootDelaySeconds = &n
+	}
+	out, err := h.d.Create(r.Context(), req)
 	var ue *UserError
 	if errors.As(err, &ue) {
 		http.Error(w, ue.Error(), http.StatusUnprocessableEntity)
@@ -71,6 +94,8 @@ type resultView struct {
 	FileResults  []any      `json:"file_results,omitempty"`  // one entry per finished file
 	StageCmd     *string    `json:"stage_command_id,omitempty"`
 	InstallCmd   *string    `json:"install_command_id,omitempty"`
+	RebootCmd    *string    `json:"reboot_command_id,omitempty"`
+	RebootResult *string    `json:"reboot_outcome,omitempty"`
 	Error        *string    `json:"error,omitempty"`
 	StartedAt    *time.Time `json:"started_at,omitempty"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
@@ -82,15 +107,19 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id (a deployment_id) is required", http.StatusBadRequest)
 		return
 	}
-	var depStatus string
-	err := h.d.pool.QueryRow(r.Context(), `SELECT status FROM patch_deployments WHERE id = $1`, id).Scan(&depStatus)
+	var depStatus, reboot string
+	var stageOnly bool
+	var rebootDelay *int
+	err := h.d.pool.QueryRow(r.Context(), `SELECT status, stage_only, reboot_behavior, reboot_delay_seconds FROM patch_deployments WHERE id = $1`, id).
+		Scan(&depStatus, &stageOnly, &reboot, &rebootDelay)
 	if err != nil {
 		http.Error(w, "deployment not found", http.StatusNotFound)
 		return
 	}
 	rows, err := h.d.pool.Query(r.Context(), `
 		SELECT r.id, dv.agent_reported_id, p.kb_or_advisory_id, r.status, r.step, pc.file_name, pc.state, r.skipped_files,
-		       r.files, r.file_index, r.file_results, r.stage_command_id::text, r.install_command_id::text, r.error_message, r.started_at, r.completed_at
+		       r.files, r.file_index, r.file_results, r.stage_command_id::text, r.install_command_id::text,
+		       r.reboot_command_id::text, r.reboot_outcome, r.error_message, r.started_at, r.completed_at
 		FROM patch_deployment_results r
 		JOIN devices dv ON dv.id = r.device_id
 		JOIN patch_catalog p ON p.id = r.patch_id
@@ -107,7 +136,8 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		var v resultView
 		var fileIndex int
 		if err := rows.Scan(&v.ResultID, &v.DeviceID, &v.KB, &v.Status, &v.Step, &v.File, &v.Download, &v.SkippedFiles,
-			&v.Files, &fileIndex, &v.FileResults, &v.StageCmd, &v.InstallCmd, &v.Error, &v.StartedAt, &v.CompletedAt); err != nil {
+			&v.Files, &fileIndex, &v.FileResults, &v.StageCmd, &v.InstallCmd,
+			&v.RebootCmd, &v.RebootResult, &v.Error, &v.StartedAt, &v.CompletedAt); err != nil {
 			h.log.Error("patch deploy: status scan", "error", err.Error())
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
@@ -117,7 +147,8 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		}
 		results = append(results, v)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"deployment_id": id, "status": depStatus, "results": results})
+	writeJSON(w, http.StatusOK, map[string]any{"deployment_id": id, "status": depStatus, "stage_only": stageOnly,
+		"reboot": reboot, "reboot_delay_seconds": rebootDelay, "results": results})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

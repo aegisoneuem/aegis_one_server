@@ -598,6 +598,13 @@ func Spec(p *Package, action string, opt SpecOptions) *aegisonev1.SoftwareDeploy
 	if p.Detection != nil {
 		s.Version = "" // the agent refuses detection rules mixed with version-based detection
 	}
+	if action == "uninstall" && FilelessUninstall(p) {
+		// A file in the spec makes the agent re-run the installer (with the
+		// install arguments) instead of removing the product. Without one it
+		// uses msiexec /x {ProductCode} or the app's registered
+		// (Quiet)UninstallString.
+		s.FilePath, s.ContentId, s.ExpectedHash, s.HashAlgorithm = "", "", "", ""
+	}
 	if p.IsBundle {
 		s.Bundle = &aegisonev1.SoftwareBundle{EntryPoint: p.BundleEntryPoint, Command: p.BundleCommand,
 			Destination: p.BundleDestination, Cleanup: p.BundleCleanup}
@@ -611,6 +618,29 @@ func Spec(p *Package, action string, opt SpecOptions) *aegisonev1.SoftwareDeploy
 		s.SecureParameters = opt.SecureParameters
 	}
 	return s
+}
+
+// FilelessUninstall reports whether the agent can remove p without its
+// installer file (agent softdist.go steps 0b/0c, run_windows.go):
+//   - an MSI with a ProductCode: msiexec /x {ProductCode}
+//   - an EXE found by uninstall_key / display_name: the vendor's registered
+//     (Quiet)UninstallString
+//
+// Everything else keeps the file, as before: bundles, packages with steps or
+// detection rules, scripts (the author's script is the uninstaller), an EXE
+// known only by a ProductCode, .inf, and MSIX (the agent sends an MSIX
+// uninstall_key down its registry path, not to DISM - an agent-side fix).
+func FilelessUninstall(p *Package) bool {
+	if p.IsBundle || p.Detection != nil || !p.Steps.empty() {
+		return false
+	}
+	switch p.InstallerType {
+	case "msi":
+		return p.ProductCode != ""
+	case "exe":
+		return p.ProductCode == "" && (p.UninstallKey != "" || p.DisplayName != "")
+	}
+	return false
 }
 
 // send signs and dispatches the package's software_deploy* command. An

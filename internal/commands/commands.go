@@ -196,7 +196,7 @@ func (s *Store) ApplyCommandResult(ctx context.Context, agentUUID string, cr *ae
 	}
 	result, _ := json.Marshal(map[string]any{"status": cr.GetStatus(), "message": cr.GetMessage()})
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE agent_commands SET status = $3, completed_at = now(), result = $4::jsonb
+		UPDATE agent_commands SET status = $3, completed_at = now(), last_status_at = now(), result = $4::jsonb
 		WHERE id = $1::uuid AND agent_id = $2 AND `+nonTerminal,
 		cr.GetCommandId(), agentUUID, status, string(result))
 	if err != nil {
@@ -271,7 +271,7 @@ func (s *Store) ApplyActionStatus(ctx context.Context, agentUUID string, st *aeg
 	})
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE agent_commands
-		SET status = $3, result = $4::jsonb,
+		SET status = $3, result = $4::jsonb, last_status_at = now(),
 		    completed_at = CASE WHEN $5 THEN now() ELSE completed_at END
 		WHERE id = $1::uuid AND agent_id = $2 AND `+nonTerminal,
 		st.GetActionId(), agentUUID, status, string(result), terminal)

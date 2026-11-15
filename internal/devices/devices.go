@@ -1,7 +1,8 @@
 // Package devices is the device lifecycle API:
 //
 //	GET  /internal/devices?state=&q=&limit=&after=   list (devices.view)
-//	GET  /internal/devices?id=<device_id>            one device (devices.view)
+//	GET  /internal/devices?id=<device_id>            one device (devices.view), with its patch block:
+//	                                                 pending-reboot KBs, cab scans, patch cache full
 //	GET  /internal/devices/summary                   count per state (devices.view)
 //	POST /internal/devices/retire                    {"device_ids": [...], "reason": "..."} (devices.manage)
 //	GET  /internal/devices/duplicates?status=         possible duplicates (devices.view)
@@ -83,8 +84,69 @@ type Device struct {
 	StaleAlert    bool       `json:"stale_alert,omitempty"`
 	MergedInto    *string    `json:"merged_into_device_id,omitempty"`
 	// Detail view only.
-	AgentEnrolledAt *time.Time `json:"agent_enrolled_at,omitempty"`
-	CertExpiresAt   *time.Time `json:"certificate_expires_at,omitempty"`
+	AgentEnrolledAt *time.Time   `json:"agent_enrolled_at,omitempty"`
+	CertExpiresAt   *time.Time   `json:"certificate_expires_at,omitempty"`
+	Patch           *PatchStatus `json:"patch,omitempty"`
+}
+
+// PatchStatus is the detail view's patch operations block.
+type PatchStatus struct {
+	PendingReboot       bool       `json:"pending_reboot"`
+	PendingRebootReason *string    `json:"pending_reboot_reason,omitempty"`
+	PendingRebootKBs    []string   `json:"pending_reboot_kbs"`
+	LastDiffAt          *time.Time `json:"last_patch_scan_at,omitempty"` // server-side diff
+	LastDiffStatus      *string    `json:"last_patch_scan_status,omitempty"`
+	LastCabScanAt       *time.Time `json:"last_cab_scan_at,omitempty"` // optional agent cab scan
+	LastCabScanStatus   *string    `json:"last_cab_scan_status,omitempty"`
+	LastCabScanReason   *string    `json:"last_cab_scan_reason,omitempty"`
+	CacheFullAt         *time.Time `json:"patch_cache_full_at,omitempty"` // set while the agent's cache is full
+	CacheNeededBytes    *int64     `json:"patch_cache_needed_bytes,omitempty"`
+	CacheCapBytes       *int64     `json:"patch_cache_cap_bytes,omitempty"`
+	CacheInUseBytes     *int64     `json:"patch_cache_in_use_bytes,omitempty"`
+	RecentScans         []ScanRun  `json:"recent_cab_scans"`
+}
+
+// ScanRun is one agent cab scan (device_patch_scan_runs).
+type ScanRun struct {
+	ActionID   string     `json:"action_id"`
+	Status     string     `json:"status"`
+	Reason     *string    `json:"reason,omitempty"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	ReceivedAt time.Time  `json:"received_at"`
+}
+
+// patchStatus loads the patch block for one device (agent_reported_id or id).
+func (h *Handler) patchStatus(ctx context.Context, id string) (*PatchStatus, error) {
+	var p PatchStatus
+	var uuid string
+	err := h.pool.QueryRow(ctx, `
+		SELECT d.id, d.pending_reboot, d.pending_reboot_reason, d.pending_reboot_kbs, d.last_patch_scan_at, d.last_patch_scan_status,
+		       d.last_cab_scan_at, d.last_cab_scan_status, d.last_cab_scan_reason,
+		       d.patch_cache_full_at, d.patch_cache_needed_bytes, d.patch_cache_cap_bytes, d.patch_cache_in_use_bytes
+		FROM devices d WHERE `+idSQL+` = $1`, id).
+		Scan(&uuid, &p.PendingReboot, &p.PendingRebootReason, &p.PendingRebootKBs, &p.LastDiffAt, &p.LastDiffStatus,
+			&p.LastCabScanAt, &p.LastCabScanStatus, &p.LastCabScanReason,
+			&p.CacheFullAt, &p.CacheNeededBytes, &p.CacheCapBytes, &p.CacheInUseBytes)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := h.pool.Query(ctx, `
+		SELECT action_id, status, reason, started_at, finished_at, received_at FROM device_patch_scan_runs
+		WHERE device_id = $1 ORDER BY received_at DESC LIMIT 10`, uuid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	p.RecentScans = []ScanRun{}
+	for rows.Next() {
+		var r ScanRun
+		if err := rows.Scan(&r.ActionID, &r.Status, &r.Reason, &r.StartedAt, &r.FinishedAt, &r.ReceivedAt); err != nil {
+			return nil, err
+		}
+		p.RecentScans = append(p.RecentScans, r)
+	}
+	return &p, rows.Err()
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +386,10 @@ func (h *Handler) one(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	d.Connected = h.live.Connected(d.DeviceID)
+	if d.Patch, err = h.patchStatus(r.Context(), id); err != nil {
+		h.fail(w, "devices: patch status", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, d)
 }
 

@@ -52,6 +52,9 @@ type, because results can hold command output.
 - `cancel_reboot` cancels any pending Windows shutdown, not only one we scheduled. If nothing is pending it returns FAILED.
 - `uninstall_patch`: the device's build is sent so the agent can find a cumulative update's package. Windows refuses to remove some LCU/SSU updates; that comes back as FAILED with the reason.
 - `report_device_state` forces a DeviceStateReport, so the server-side patch diff runs again.
+- `scan_now`: the agent only answers "triggered", so the command is `succeeded` straight away. `GET /internal/actions?command_id=...` adds what really happened:
+  - `scan_run`: the first cab scan the device reported after the command (`succeeded` or `failed`, with the reason).
+  - `scan_note`, when there is none yet. The agent scans only when it has a scan cab and no install is running. The server-side diff is the main detection.
 - `audit_query` reads the audit trace the agent keeps on the device, and only that folder: there is no path field. Use it for forensics, for example events the server never received while the device was offline. Events the agent did stream are already in `agent_audit_events`.
   - At most 50 devices per request.
   - Query fields, all optional:
@@ -70,7 +73,7 @@ type, because results can hold command output.
 | Call | Body / query |
 |---|---|
 | `GET /internal/devices` | `state` (online, offline, stale, stale_alert, retired, merged, unmanaged, all), `q` (hostname prefix or exact device_id), `limit` (1..1000, default 100), `after` (the previous page's `next_after`) |
-| `GET /internal/devices?id=` | one device, plus agent enrollment time and certificate expiry |
+| `GET /internal/devices?id=` | one device, plus agent enrollment time, certificate expiry and a `patch` block (below) |
 | `GET /internal/devices/summary` | count per state, plus the `stale_alert` count |
 | `POST /internal/devices/retire` | `{"device_ids": [...], "reason": "..."}`; reason is required, at most 256 characters |
 | `GET /internal/devices/duplicates` | possible duplicates; `status` (pending (default), confirmed, rejected, all), `limit` (1..500) |
@@ -85,6 +88,11 @@ type, because results can hold command output.
   - `merged`: an admin confirmed this record is the same machine as another one; `merged_into_device_id` names it.
   - `stale_alert: true`: no heartbeat for `device.stale_alert_days` (default 60). A device is flagged, never deleted.
   - The settings live in `system_settings`. `connected` shows whether the agent has a live stream right now.
+- **`patch` block** (detail view only, migration 0027):
+  - `pending_reboot`, `pending_reboot_reason`, `pending_reboot_kbs`: the KBs the agent says wait for a restart. Their open patch rows become `pending_reboot`.
+  - `last_patch_scan_at` / `_status`: the server-side diff.
+  - `last_cab_scan_at` / `_status` / `_reason` and `recent_cab_scans` (last 10): the agent's optional cab scans, failed ones included. Kept 90 days in `device_patch_scan_runs`.
+  - `patch_cache_full_at` plus the needed, cap and in-use bytes: set while the agent's patch cache is full. A `CacheFullReport` also opens a `patch_cache_full` alert (medium). The next successful `stage_patch` clears both.
 - **Renames:** a hostname change (heartbeat or enrollment) writes `audit_log` `device.rename` ("Device renamed from X to Y"). Hostname is never used to identify a device.
 - **Retire**, per device:
   - Revokes the agent and its certificates.
@@ -127,6 +135,11 @@ No HTTP API yet; the data is in these tables.
 | `FullInventoryReport.dex_health` | `device_dex_health` (latest snapshot per device), `device_app_faults` (replaced on each report, max 500 apps) | The counts cover a rolling window of `window_days`, so they are a snapshot and must not be summed. |
 | `DexTelemetry` extended fields (agent 2026-11-15, migration 0026) | `device_dex_metrics`: `disk_queue_*`, `disk_iops_*`, `disk_latency_ms_*`, `net_rtt_ms_*`, `net_loss_pct`, `battery_present`, `battery_ac_online`, `battery_pct_*`, `wifi_present`, `wifi_connected`, `wifi_signal_pct_*` | Stored in the same row as CPU and memory. NULL means not reported. An older agent's report stores NULL, not "no battery", because proto3 cannot tell `false` from "not sent". The round-trip time is NULL when every ping was lost. `net_target` and `wifi_ssid` are stored only with `AEGIS_DEX_NETWORK_NAMES=on`, because they can show where the user is. |
 
+**Hardware detail (migration 0027).** `HardwareInventory` fields 15-21 were dropped until now. They are stored as follows:
+- `devices`: `cpu_mhz`, `cpu_threads_per_core`, `cpu_architecture` and `os_service_pack`.
+- `device_disks`: `volume_label` and `drive_type`.
+- The OS product name, display version and build fill `os_edition`, `os_version`, `os_build` and `os_ubr` only while they are empty. The DeviceStateReport owns those columns, because it drives the patch diff.
+
 ## Agent policy: `/internal/policy` (migration 0025)
 
 One signed policy for the whole fleet. The agent receives it as a `set_policy` command and keeps it. Every published version is stored and never edited.
@@ -168,12 +181,27 @@ The agent accepts the same version again and leaves safe mode. The alert stays o
 - `POST /internal/deploy?device_id=<DEVICE_ID>&kb=KB5066835` pushes one missing patch to one device.
 - `GET /internal/deploy?id=<deployment_id>` shows progress.
 
+Optional query parameters (migration 0027):
+
+| Parameter | Values | What it does |
+|---|---|---|
+| `reboot` | `no_reboot` (default), `if_required`, `always` | After the last file: `if_required` sends a signed `reboot` when any file reported `reboot_required`; `always` sends one regardless. |
+| `reboot_delay_seconds` | 0..86400, default 900 | Grace period. The agent runs `shutdown /r /t <delay>` and shows the message, so this is the user's deadline. |
+| `reboot_message` | at most 400 characters | Text shown to the user. Default: "Aegis One has installed updates. This computer will restart in N minute(s). Please save your work." |
+| `mode` | `install` (default), `stage` | `stage` downloads and stages every file without installing: pre-cache before a maintenance window. A later push of the same KB finds the files staged and goes straight to install. A stage-only push can't reboot. |
+
+- **Reboot outcome.** The patch result stays `succeeded` whatever happens to the reboot. `reboot_outcome` records it: `reboot scheduled: ...`, `not rebooted: ...` (for example the agent policy has `reboot_policy=never`), `reboot failed: ...`, or no answer.
+- **No user deferral.** The agent has no "postpone" button; the delay is the deadline. `cancel_reboot` (actions API) aborts a scheduled reboot.
+- **Maintenance window.** The agent defers `stage_patch`, `install_patch` and `reboot` outside its policy window and reports QUEUED "deferred to maintenance window". Such a step waits up to 14 days. Any other step fails after 6 hours **without any status** from the agent. The 6 hours count from the last status, not from dispatch.
+- **NOT_APPLICABLE.** The agent reports install progress as `patch_install`. An install it skips as not applicable now reaches the diff, which stops offering that patch on the device's current build. Before this fix the reply was ignored, so the patch was offered again.
+- **Raw push** (`POST /internal/push`): `stage_patch` and `uninstall_patch` now send a proper `InstallPatchSpec` and need `patch.deploy`, like `install_patch`.
+
 **Several files per push.** A 24H2+ cumulative update ships its own `.msu` plus the checkpoint `.msu` file(s) it builds on. The agent installs one file per `install_patch`, so the server takes each file through stage → install in turn:
 - **Order:** checkpoints first, oldest KB first, then the pushed KB.
 - **Where the files come from:** the update the device reported. With the server-side diff (no UpdateID), the update that lists the KB's own file.
 - **Already installed:** a checkpoint the device already has comes back `NOT_APPLICABLE` and the push moves on.
 - **Failure:** any failed file fails the push, and the error names it (`file 1/2 (KB5043080): ...`).
-- **Reboot:** a reboot a file asks for does not stop the next file; it shows in `file_results`.
+- **Reboot:** a reboot a file asks for does not stop the next file; it shows in `file_results` and counts for `reboot=if_required`.
 - **Limit:** at most 6 files per push.
 
 The status shows:
@@ -213,6 +241,11 @@ The status shows:
 - **Secrets:** the password and secure parameter values are kept **in server memory only**, never in the database or logs. The audit shows `<sensitive — secure parameters in use>`. If the server restarts, or 24 hours pass, before a device gets the command, that device fails with a clear reason; create the deployment again. A secret may not appear in any public field (arguments, steps, parameters, names).
 - The agent hands secure parameters to the installer on stdin as JSON: `{"version":1,"secure_parameters":{...}}`.
 - **Requirement:** v2 command types need the agent to run as the LocalSystem service.
+- **Uninstall without the installer file.** For these packages an uninstall now goes out without `file_path`, `content_id` or the hash:
+  - an `msi` with a `product_code`: the agent runs `msiexec /x {ProductCode}`
+  - an `exe` with an `uninstall_key` or `display_name` and no `product_code`: the agent runs the app's registered (Quiet)UninstallString
+
+  Before, the file was always sent, so the agent re-ran the installer with the install arguments. Bundles, packages with steps or detection rules, scripts, `inf`, an `exe` known only by a `product_code`, and `msix` still send the file. MSIX uninstall by package name needs an agent fix first: the agent sends an MSIX `uninstall_key` down its registry path, not to DISM.
 
 ## Remote operations: `/internal/remote/...`
 

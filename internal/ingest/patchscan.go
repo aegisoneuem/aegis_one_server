@@ -20,6 +20,7 @@ type PatchScanSummary struct {
 	MarkedInstalled    int // fallback only: previously-open rows assumed installed
 	NoLongerApplicable int // previously-open rows in neither list (deleted)
 	SLAAssigned        int // open rows that got a policy + sla_due_at this scan
+	SupersedenceLinks  int // agent-reported supersedence added (agent_report KBs only)
 }
 
 // PatchScan applies a PatchScanResult as a full, successful snapshot (the agent
@@ -54,6 +55,17 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 
 	seen := make([]string, 0, len(psr.GetMissing())+len(psr.GetInstalled()))
 	unmatchedSeen := []string{} // report_keys of no-KB missing updates in this scan
+	// UpdateID -> patch_catalog.id for this scan's updates, for supersedence.
+	byUpdateID := map[string]string{}
+	resolved := func(m *aegisonev1.MissingUpdate, patchID string) error {
+		if id := deref(updateIDOf(m)); id != "" {
+			byUpdateID[id] = patchID
+		}
+		if err := enrichAgentPatch(ctx, tx, patchID, m); err != nil {
+			return fmt.Errorf("catalog metadata for update %s: %w", m.GetUpdateId(), err)
+		}
+		return nil
+	}
 
 	for _, m := range psr.GetMissing() {
 		patchID, found, err := resolvePatchID(ctx, tx, m.GetKbArticleIds())
@@ -78,6 +90,9 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 			continue
 		}
 		seen = append(seen, patchID)
+		if err := resolved(m, patchID); err != nil {
+			return summary, err
+		}
 
 		if m.GetSuperseded() {
 			if _, err := tx.Exec(ctx, `
@@ -125,6 +140,9 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 			continue
 		}
 		seen = append(seen, patchID)
+		if err := resolved(inst, patchID); err != nil {
+			return summary, err
+		}
 		// installed_at = when we first saw it installed (the agent doesn't send
 		// the install date); kept across later scans.
 		if _, err := tx.Exec(ctx, `
@@ -138,6 +156,10 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 			return summary, fmt.Errorf("upsert installed patch %s: %w", patchID, err)
 		}
 		summary.InstalledReported++
+	}
+
+	if summary.SupersedenceLinks, err = linkAgentSupersedence(ctx, tx, byUpdateID, append(append([]*aegisonev1.MissingUpdate{}, psr.GetMissing()...), psr.GetInstalled()...)); err != nil {
+		return summary, err
 	}
 
 	// The missing list is a full snapshot, so a no-KB update it no longer

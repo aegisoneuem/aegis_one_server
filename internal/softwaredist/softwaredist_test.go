@@ -88,8 +88,8 @@ func TestSpec(t *testing.T) {
 		SHA256: strings.Repeat("ab", 32), SilentArgs: "/qn", ProductCode: "{23170F69-40C1-2702-2408-000001000000}",
 		SuccessExitCodes: []int32{1}, TimeoutSeconds: 600, RequireSignature: true, storageName: "software/x.msi",
 	}
-	s := Spec(p, "uninstall", SpecOptions{})
-	if s.GetContentId() != p.ID || s.GetPackageId() != p.ID || s.GetAction() != "uninstall" {
+	s := Spec(p, "install", SpecOptions{})
+	if s.GetContentId() != p.ID || s.GetPackageId() != p.ID || s.GetAction() != "install" {
 		t.Errorf("ids/action wrong: %+v", s)
 	}
 	if s.GetExpectedHash() != p.SHA256 || s.GetHashAlgorithm() != "sha256" {
@@ -101,6 +101,48 @@ func TestSpec(t *testing.T) {
 	}
 	if !s.GetRequireSignature() || s.GetTimeoutSeconds() != 600 || s.GetProductCode() != p.ProductCode {
 		t.Errorf("options not carried: %+v", s)
+	}
+
+	// Uninstall of an MSI with a ProductCode: no file, so the agent runs
+	// msiexec /x {ProductCode} instead of re-running the installer.
+	u := Spec(p, "uninstall", SpecOptions{})
+	if u.GetFilePath() != "" || u.GetContentId() != "" || u.GetExpectedHash() != "" || u.GetProductCode() != p.ProductCode {
+		t.Errorf("msi uninstall not fileless: %+v", u)
+	}
+}
+
+func TestFilelessUninstall(t *testing.T) {
+	pc := "{23170F69-40C1-2702-2408-000001000000}"
+	cases := []struct {
+		name string
+		p    Package
+		want bool
+	}{
+		{"msi by product code", Package{InstallerType: "msi", ProductCode: pc}, true},
+		{"msi without product code", Package{InstallerType: "msi", DisplayName: "7-Zip"}, false},
+		{"exe by uninstall key", Package{InstallerType: "exe", UninstallKey: "7-Zip"}, true},
+		{"exe by display name", Package{InstallerType: "exe", DisplayName: "Notepad++"}, true},
+		{"exe by product code only", Package{InstallerType: "exe", ProductCode: pc}, false},
+		{"exe, nothing to find it by", Package{InstallerType: "exe"}, false},
+		{"script", Package{InstallerType: "ps1", DisplayName: "Tool"}, false},
+		{"msix", Package{InstallerType: "msix", UninstallKey: "Pkg_1.0.0.0_x64__abc"}, false},
+		{"inf", Package{InstallerType: "inf", DisplayName: "Driver"}, false},
+		{"bundle", Package{InstallerType: "msi", ProductCode: pc, IsBundle: true}, false},
+		{"detection rules", Package{InstallerType: "exe", Detection: &Detection{}}, false},
+		{"steps", Package{InstallerType: "exe", DisplayName: "X", Steps: &Steps{Before: []Step{{}}}}, false},
+	}
+	for _, c := range cases {
+		if got := FilelessUninstall(&c.p); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+	// An exe uninstall keeps nothing of the installer file; install still pins it.
+	p := &Package{ID: "11111111-2222-3333-4444-555555555555", InstallerType: "exe", DisplayName: "Notepad++", SHA256: strings.Repeat("cd", 32)}
+	if u := Spec(p, "uninstall", SpecOptions{}); u.GetFilePath() != "" || u.GetExpectedHash() != "" || u.GetDisplayName() != "Notepad++" {
+		t.Errorf("exe uninstall spec: %+v", u)
+	}
+	if i := Spec(p, "install", SpecOptions{}); i.GetFilePath() == "" || i.GetExpectedHash() != p.SHA256 {
+		t.Errorf("exe install spec lost its file: %+v", i)
 	}
 }
 

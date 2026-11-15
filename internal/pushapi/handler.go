@@ -1,7 +1,8 @@
 // Package pushapi is a minimal internal HTTP trigger for pushing a signed
 // command to a connected agent (no admin UI exists yet). It must be mounted
-// behind apiauth.Require: install_patch needs 'patch.deploy', any other command
-// type needs 'agent.command' (remote command execution - admin-only by default).
+// behind apiauth.Require: install_patch / stage_patch / uninstall_patch need
+// 'patch.deploy', any other command type needs 'agent.command' (remote command
+// execution - admin-only by default).
 //
 // Every push is recorded in agent_commands (+ audit_log) BEFORE it is sent, and
 // the row's UUID is the wire command_id. A database is therefore required -
@@ -45,6 +46,9 @@ func New(dispatcher Dispatcher, store *commands.Store, signingKey ed25519.Privat
 //
 // Generic command:   ?device_id=X&type=hostname
 // Install a patch:   ?device_id=X&type=install_patch&kb=KB123&file_path=C:\...\patch.msu[&expected_hash=...&hash_algorithm=sha256]
+// Stage a patch:     ?device_id=X&type=stage_patch&kb=KB123&file_path=x.msu&expected_hash=<sha256>  (agent fetches it by hash)
+// Uninstall a patch: ?device_id=X&type=uninstall_patch&kb=KB123
+// (For a tracked push or stage use /internal/deploy; this is the raw trigger.)
 // Optional on both:  &idempotency_key=K  - a repeat with the same key is NOT re-sent.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -74,7 +78,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	needed := apiauth.PermAgentCommand
-	if cmdType == "install_patch" {
+	switch cmdType {
+	case "install_patch", "stage_patch", "uninstall_patch":
 		needed = apiauth.PermPatchDeploy
 	}
 	if !caller.Can(needed) {
@@ -85,16 +90,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var wirePayload []byte
 	var auditPayload map[string]any
 	switch cmdType {
-	case "install_patch":
+	case "install_patch", "stage_patch", "uninstall_patch":
+		// All three take an InstallPatchSpec (protobuf), never a raw string.
 		spec := &aegisonev1.InstallPatchSpec{
 			Kb:            q.Get("kb"),
 			FilePath:      q.Get("file_path"),
 			ExpectedHash:  q.Get("expected_hash"),
 			HashAlgorithm: q.Get("hash_algorithm"),
 		}
-		if spec.Kb == "" || spec.FilePath == "" {
+		switch {
+		case spec.Kb == "":
+			http.Error(w, cmdType+" requires kb", http.StatusBadRequest)
+			return
+		case cmdType == "install_patch" && spec.FilePath == "":
 			http.Error(w, "install_patch requires kb and file_path", http.StatusBadRequest)
 			return
+		case cmdType == "stage_patch" && spec.ExpectedHash == "":
+			http.Error(w, "stage_patch requires kb and expected_hash (the agent fetches the file by its sha256)", http.StatusBadRequest)
+			return
+		}
+		if cmdType == "stage_patch" && spec.HashAlgorithm == "" {
+			spec.HashAlgorithm = "sha256"
 		}
 		marshaled, err := proto.Marshal(spec)
 		if err != nil {

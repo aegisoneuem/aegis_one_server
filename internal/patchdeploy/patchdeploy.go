@@ -20,6 +20,22 @@
 // device already has comes back NOT_APPLICABLE and the push moves on; any
 // failed file fails the push.
 //
+// Reboot (patch_deployments.reboot_behavior): after the last file, if_required
+// sends a signed reboot when any file reported reboot_required, always sends one
+// regardless; no_reboot (the default) never does. The agent schedules it with
+// shutdown.exe after reboot_delay_seconds, showing reboot_message, so the delay
+// is the user's deadline (the agent has no user deferral; cancel_reboot aborts
+// it). The agent's maintenance window gates the reboot like the install.
+//
+// Stage only: download + stage_patch every file (pre-cache ahead of a window),
+// no install. A later push of the same KB finds the files already staged (the
+// agent answers "already staged") and goes straight on to install.
+//
+// Timeouts: a step fails after commandTimeout with no word from the agent
+// (dispatch or its last status). A command the agent deferred to its
+// maintenance window (QUEUED "deferred to maintenance window") waits up to
+// deferredTimeout instead.
+//
 // State lives in patch_deployments / patch_deployment_results; Run polls it, so
 // a server restart resumes where it left off. A device that is offline just
 // waits in its current step. Run assumes a single server instance.
@@ -54,6 +70,16 @@ const (
 	// commandTimeout fails a step whose command got no final answer: the agent
 	// may have lost it (e.g. it restarted mid-fetch) and nothing re-sends it.
 	commandTimeout = 6 * time.Hour
+	// deferredTimeout is how long a command the agent deferred to its
+	// maintenance window may wait for the window (weekly windows + slack).
+	deferredTimeout = 14 * 24 * time.Hour
+	// DefaultRebootDelay is the reboot grace period (seconds) when the caller
+	// gives none.
+	DefaultRebootDelay = 15 * 60
+	// MaxRebootDelay caps it (a day).
+	MaxRebootDelay = 86400
+	// MaxRebootMessage is the longest reboot message (shutdown /c allows 512).
+	MaxRebootMessage = 400
 	// maxPlanFiles caps one push; a cumulative has its own file plus one or
 	// two checkpoints.
 	maxPlanFiles = 6
@@ -94,6 +120,74 @@ type Request struct {
 	KB         string
 	ClientID   string // api_clients.id of the caller
 	ClientName string
+	// Reboot after install: "" / "no_reboot", "if_required" or "always".
+	Reboot string
+	// RebootDelaySeconds is the grace period before the reboot; nil = 15 minutes.
+	RebootDelaySeconds *int
+	// RebootMessage is shown to the logged-on user; "" = a default text.
+	RebootMessage string
+	// StageOnly downloads and stages the files without installing them.
+	StageOnly bool
+}
+
+// rebootOptions validates and normalizes the reboot part of req.
+func (req Request) rebootOptions() (behavior string, delay *int, msg *string, err error) {
+	switch strings.ToLower(strings.TrimSpace(req.Reboot)) {
+	case "", "none", "no_reboot":
+		behavior = "no_reboot"
+	case "if_required":
+		behavior = "if_required"
+	case "always":
+		behavior = "always"
+	default:
+		return "", nil, nil, userErr("reboot must be no_reboot, if_required or always")
+	}
+	m := strings.TrimSpace(req.RebootMessage)
+	if behavior == "no_reboot" {
+		if req.RebootDelaySeconds != nil || m != "" {
+			return "", nil, nil, userErr("reboot_delay_seconds / reboot_message need reboot=if_required or always")
+		}
+		return behavior, nil, nil, nil
+	}
+	if req.StageOnly {
+		return "", nil, nil, userErr("a stage-only push installs nothing, so it can't reboot")
+	}
+	d := DefaultRebootDelay
+	if req.RebootDelaySeconds != nil {
+		d = *req.RebootDelaySeconds
+	}
+	if d < 0 || d > MaxRebootDelay {
+		return "", nil, nil, userErr("reboot_delay_seconds must be 0..%d", MaxRebootDelay)
+	}
+	if len([]rune(m)) > MaxRebootMessage {
+		return "", nil, nil, userErr("reboot_message: at most %d characters", MaxRebootMessage)
+	}
+	for _, r := range m {
+		if r < 0x20 || r == 0x7f {
+			return "", nil, nil, userErr("reboot_message: no control characters")
+		}
+	}
+	if m != "" {
+		msg = &m
+	}
+	return behavior, &d, msg, nil
+}
+
+// rebootMessage is the text the user sees before the reboot.
+func rebootMessage(custom *string, delay int) string {
+	if custom != nil && *custom != "" {
+		return *custom
+	}
+	when := "now"
+	switch {
+	case delay >= 3600 && delay%3600 == 0:
+		when = fmt.Sprintf("in %d hour(s)", delay/3600)
+	case delay >= 60:
+		when = fmt.Sprintf("in %d minute(s)", (delay+59)/60)
+	case delay > 0:
+		when = fmt.Sprintf("in %d second(s)", delay)
+	}
+	return "Aegis One has installed updates. This computer will restart " + when + ". Please save your work."
 }
 
 type Created struct {
@@ -105,6 +199,10 @@ type Created struct {
 	// Files is the install order: checkpoints first, File last.
 	Files      []PlanFile `json:"files"`
 	Downloaded bool       `json:"already_downloaded"`
+	StageOnly  bool       `json:"stage_only,omitempty"`
+	Reboot     string     `json:"reboot"`
+	// RebootDelaySeconds is set when a reboot may follow.
+	RebootDelaySeconds *int `json:"reboot_delay_seconds,omitempty"`
 }
 
 // PlanFile is one file of a push, as stored in patch_deployment_results.files.
@@ -168,9 +266,13 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 	if kb == "" {
 		return nil, userErr("kb is required")
 	}
+	rebootBehavior, rebootDelay, rebootMsg, err := req.rebootOptions()
+	if err != nil {
+		return nil, err
+	}
 	var deviceUUID string
 	var arch *string
-	err := d.pool.QueryRow(ctx, `
+	err = d.pool.QueryRow(ctx, `
 		SELECT d.id, d.architecture FROM devices d JOIN agents a ON a.device_id = d.id AND a.revoked_at IS NULL
 		WHERE d.agent_reported_id = $1`, req.DeviceID).Scan(&deviceUUID, &arch)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -256,16 +358,22 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 	}
 	main := plan[len(plan)-1]
 
-	out := &Created{KB: kb, UpdateID: deref(updateID), File: main.Name, Files: plan, Downloaded: notReady == 0}
+	out := &Created{KB: kb, UpdateID: deref(updateID), File: main.Name, Files: plan, Downloaded: notReady == 0,
+		StageOnly: req.StageOnly, Reboot: rebootBehavior, RebootDelaySeconds: rebootDelay}
+	name := fmt.Sprintf("%s -> %s", kb, req.DeviceID)
+	if req.StageOnly {
+		name = fmt.Sprintf("stage %s -> %s", kb, req.DeviceID)
+	}
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO patch_deployments (name, patch_ids, rollout_strategy, reboot_behavior, status, created_by_api_client_id)
-		VALUES ($1, ARRAY[$2::uuid], 'all_at_once', 'no_reboot', 'running', $3)
-		RETURNING id`, fmt.Sprintf("%s -> %s", kb, req.DeviceID), patchID, req.ClientID).Scan(&out.DeploymentID); err != nil {
+		INSERT INTO patch_deployments (name, patch_ids, rollout_strategy, reboot_behavior, reboot_delay_seconds, reboot_message,
+		                               stage_only, status, created_by_api_client_id)
+		VALUES ($1, ARRAY[$2::uuid], 'all_at_once', $4, $5, $6, $7, 'running', $3)
+		RETURNING id`, name, patchID, req.ClientID, rebootBehavior, rebootDelay, rebootMsg, req.StageOnly).Scan(&out.DeploymentID); err != nil {
 		return nil, fmt.Errorf("insert patch_deployments: %w", err)
 	}
 	err = tx.QueryRow(ctx, `
@@ -275,7 +383,7 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		RETURNING id`, out.DeploymentID, deviceUUID, patchID, updateID, plan[0].Digest, string(planJSON)).Scan(&out.ResultID)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.ConstraintName == "uq_pdr_active_device_patch" {
-		return nil, userErr("%s is already being pushed to this device", kb)
+		return nil, userErr("%s is already being pushed (or staged) to this device", kb)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("insert patch_deployment_results: %w", err)
@@ -283,6 +391,7 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 	details, _ := json.Marshal(map[string]any{
 		"deployment_id": out.DeploymentID, "device_id": req.DeviceID, "kb": kb,
 		"update_id": deref(updateID), "file": main.Name, "files": plan,
+		"stage_only": req.StageOnly, "reboot": rebootBehavior, "reboot_delay_seconds": rebootDelay,
 	})
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_log (actor_type, actor_api_client_id, actor_label, action, target_type, target_id, details)
@@ -294,7 +403,7 @@ func (d *Deployer) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, err
 	}
 	d.log.Info("patch deployment created", "deployment_id", out.DeploymentID, "device_id", req.DeviceID, "kb", kb,
-		"file", main.Name, "files", len(plan), "already_downloaded", out.Downloaded)
+		"file", main.Name, "files", len(plan), "already_downloaded", out.Downloaded, "stage_only", req.StageOnly, "reboot", rebootBehavior)
 	d.kick()
 	return out, nil
 }
@@ -422,9 +531,44 @@ type row struct {
 	stageReason, installReason                    *string
 	installPhase                                  *string
 	installReboot                                 *bool
+	stagePhase                                    *string
 	patchState                                    *string // device_patch_state.state now; nil = row gone (no longer applicable)
 	files                                         []PlanFile
 	fileIndex                                     int
+	fileResults                                   []fileOutcome // finished files so far
+
+	stageOnly      bool
+	rebootBehavior string
+	rebootDelay    *int
+	rebootMsg      *string
+	rebootID       *string
+	rebootStatus   *string
+	rebootAt       *time.Time
+	rebootPhase    *string
+	rebootReason   *string
+}
+
+// fileOutcome is the part of a file_results entry the reboot decision needs.
+type fileOutcome struct {
+	RebootRequired bool `json:"reboot_required"`
+}
+
+// wantsReboot reports whether a reboot follows the last file's install.
+func (x row) wantsReboot() bool {
+	switch x.rebootBehavior {
+	case "always":
+		return true
+	case "if_required":
+		if x.installReboot != nil && *x.installReboot {
+			return true
+		}
+		for _, f := range x.fileResults {
+			if f.RebootRequired {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // fileKB is the KB of the file being worked on (the pushed KB for a one-file
@@ -452,9 +596,15 @@ func (d *Deployer) advanceAll(ctx context.Context) error {
 		       pd.created_by_api_client_id::text,
 		       pc.state, pc.file_name, pc.sha256_hash, pc.last_error,
 		       r.stage_command_id::text, r.install_command_id::text,
-		       sc.status, ic.status, COALESCE(sc.dispatched_at, sc.issued_at), COALESCE(ic.dispatched_at, ic.issued_at),
+		       sc.status, ic.status,
+		       GREATEST(COALESCE(sc.dispatched_at, sc.issued_at), sc.last_status_at),
+		       GREATEST(COALESCE(ic.dispatched_at, ic.issued_at), ic.last_status_at),
 		       sc.result->>'reason', ic.result->>'reason', ic.result->>'phase', (ic.result->>'reboot_required')::boolean,
-		       dps.state, r.files, r.file_index
+		       sc.result->>'phase',
+		       dps.state, r.files, r.file_index, r.file_results,
+		       pd.stage_only, pd.reboot_behavior, pd.reboot_delay_seconds, pd.reboot_message,
+		       r.reboot_command_id::text, rc.status, GREATEST(COALESCE(rc.dispatched_at, rc.issued_at), rc.last_status_at),
+		       rc.result->>'phase', rc.result->>'reason'
 		FROM patch_deployment_results r
 		JOIN patch_deployments pd ON pd.id = r.deployment_id
 		JOIN devices dv ON dv.id = r.device_id
@@ -463,6 +613,7 @@ func (d *Deployer) advanceAll(ctx context.Context) error {
 		LEFT JOIN patch_content pc ON pc.file_digest = r.file_digest
 		LEFT JOIN agent_commands sc ON sc.id = r.stage_command_id
 		LEFT JOIN agent_commands ic ON ic.id = r.install_command_id
+		LEFT JOIN agent_commands rc ON rc.id = r.reboot_command_id
 		LEFT JOIN device_patch_state dps ON dps.device_id = r.device_id AND dps.patch_id = r.patch_id
 		WHERE r.status = 'in_progress' AND r.step IS NOT NULL
 		ORDER BY r.updated_at LIMIT 500`)
@@ -475,7 +626,9 @@ func (d *Deployer) advanceAll(ctx context.Context) error {
 		if err := rows.Scan(&x.id, &x.deploymentID, &x.deviceID, &x.agentID, &x.kb, &x.step, &x.clientID,
 			&x.contentState, &x.fileName, &x.sha256, &x.contentErr, &x.stageID, &x.installID,
 			&x.stageStatus, &x.installStatus, &x.stageAt, &x.installAt, &x.stageReason, &x.installReason,
-			&x.installPhase, &x.installReboot, &x.patchState, &x.files, &x.fileIndex); err != nil {
+			&x.installPhase, &x.installReboot, &x.stagePhase, &x.patchState, &x.files, &x.fileIndex, &x.fileResults,
+			&x.stageOnly, &x.rebootBehavior, &x.rebootDelay, &x.rebootMsg,
+			&x.rebootID, &x.rebootStatus, &x.rebootAt, &x.rebootPhase, &x.rebootReason); err != nil {
 			rows.Close()
 			return err
 		}
@@ -500,7 +653,7 @@ func (d *Deployer) advance(ctx context.Context, x row) error {
 	// Before sending the next command, respect what the device's latest scan
 	// says: only a still-missing patch gets staged/installed. (While
 	// installing, the install command's own result decides.)
-	if x.step != "installing" {
+	if x.step != "installing" && x.step != "rebooting" {
 		switch st := deref(x.patchState); st {
 		case "missing", "failed":
 		case "installed", "pending_reboot":
@@ -524,11 +677,17 @@ func (d *Deployer) advance(ctx context.Context, x row) error {
 	case "staging":
 		switch deref(x.stageStatus) {
 		case "succeeded":
+			if x.stageOnly {
+				if !x.lastFile() {
+					return d.nextFile(ctx, x)
+				}
+				return d.finish(ctx, x, true, "")
+			}
 			return d.sendStep(ctx, x, "install_patch", "installing")
 		case "failed", "rejected_signature", "expired":
 			return d.finish(ctx, x, false, fmt.Sprintf("%sstage_patch %s: %s", x.fileLabel(), deref(x.stageStatus), deref(x.stageReason)))
 		}
-		if timedOut(x.stageAt) {
+		if stepTimedOut(x.stageAt, x.stagePhase, x.stageReason, time.Now()) {
 			return d.finish(ctx, x, false, x.fileLabel()+"no final answer to stage_patch from the agent")
 		}
 		return nil
@@ -539,26 +698,94 @@ func (d *Deployer) advance(ctx context.Context, x row) error {
 			if !x.lastFile() {
 				return d.nextFile(ctx, x)
 			}
+			if x.wantsReboot() {
+				return d.toRebooting(ctx, x)
+			}
 			return d.finish(ctx, x, true, "")
 		case "failed", "rejected_signature", "expired":
 			return d.finish(ctx, x, false, fmt.Sprintf("%sinstall_patch %s: %s", x.fileLabel(), deref(x.installStatus), deref(x.installReason)))
 		}
-		if timedOut(x.installAt) {
+		if stepTimedOut(x.installAt, x.installPhase, x.installReason, time.Now()) {
 			return d.finish(ctx, x, false, x.fileLabel()+"no final answer to install_patch from the agent")
+		}
+
+	case "rebooting":
+		// The patch is installed whatever happens here; the outcome only
+		// records what became of the reboot.
+		if x.rebootID == nil {
+			return d.sendStep(ctx, x, "reboot", "rebooting")
+		}
+		switch deref(x.rebootStatus) {
+		case "succeeded":
+			if deref(x.rebootPhase) == aegisonev1.ActionPhase_ACTION_PHASE_NOT_APPLICABLE.String() {
+				return d.finishWith(ctx, x, true, "", "not rebooted: "+deref(x.rebootReason))
+			}
+			return d.finishWith(ctx, x, true, "", "reboot scheduled: "+deref(x.rebootReason))
+		case "failed", "rejected_signature", "expired":
+			return d.finishWith(ctx, x, true, "", fmt.Sprintf("reboot %s: %s", deref(x.rebootStatus), deref(x.rebootReason)))
+		}
+		if stepTimedOut(x.rebootAt, x.rebootPhase, x.rebootReason, time.Now()) {
+			return d.finishWith(ctx, x, true, "", "no final answer to reboot from the agent")
 		}
 	}
 	return nil
 }
 
-func timedOut(at *time.Time) bool { return at != nil && time.Since(*at) > commandTimeout }
+// stepTimedOut: no word from the agent for commandTimeout since dispatch or
+// its last status - or deferredTimeout when its last status said the command
+// waits for the maintenance window.
+func stepTimedOut(lastActivity *time.Time, phase, reason *string, now time.Time) bool {
+	if lastActivity == nil {
+		return false
+	}
+	limit := commandTimeout
+	if deferredToWindow(phase, reason) {
+		limit = deferredTimeout
+	}
+	return now.Sub(*lastActivity) > limit
+}
+
+// deferredToWindow: the agent's QUEUED "deferred to maintenance window".
+func deferredToWindow(phase, reason *string) bool {
+	return deref(phase) == aegisonev1.ActionPhase_ACTION_PHASE_QUEUED.String() &&
+		strings.Contains(strings.ToLower(deref(reason)), "maintenance window")
+}
+
+// toRebooting records the last file's result and moves x to the reboot step.
+func (d *Deployer) toRebooting(ctx context.Context, x row) error {
+	tag, err := d.pool.Exec(ctx, `
+		UPDATE patch_deployment_results SET
+			file_results = file_results || jsonb_build_array($3::jsonb), step = 'rebooting', updated_at = now()
+		WHERE id = $1 AND file_index = $2 AND step = 'installing' AND status = 'in_progress'`,
+		x.id, x.fileIndex, string(x.fileResult()))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 {
+		d.log.Info("patch deploy: installed, reboot next", "result_id", x.id, "device_id", x.deviceID, "kb", x.kb,
+			"reboot", x.rebootBehavior)
+		d.kick()
+	}
+	return nil
+}
 
 // fileResult is the file_results entry for x's current file, once its
 // install_patch has a final answer; nil before that.
 func (x row) fileResult() []byte {
-	if x.step != "installing" || x.installID == nil || x.fileIndex >= len(x.files) {
+	if x.fileIndex >= len(x.files) {
 		return nil
 	}
 	f := x.files[x.fileIndex]
+	if x.stageOnly && x.step == "staging" && x.stageID != nil {
+		b, _ := json.Marshal(map[string]any{
+			"kb": f.KB, "file": f.Name, "command_id": deref(x.stageID), "status": deref(x.stageStatus),
+			"phase": deref(x.stagePhase), "staged": deref(x.stageStatus) == "succeeded", "reason": deref(x.stageReason),
+		})
+		return b
+	}
+	if x.step != "installing" || x.installID == nil {
+		return nil
+	}
 	b, _ := json.Marshal(map[string]any{
 		"kb": f.KB, "file": f.Name, "command_id": deref(x.installID), "status": deref(x.installStatus),
 		"phase": deref(x.installPhase), "reboot_required": x.installReboot != nil && *x.installReboot,
@@ -602,12 +829,31 @@ func (d *Deployer) sendStep(ctx context.Context, x row, cmdType, nextStep string
 		WHERE id = $1 RETURNING attempt_count`, x.id).Scan(&attempt); err != nil {
 		return err
 	}
-	// file_path only carries the extension (.msu/.cab) the agent keeps for
-	// DISM; the bytes come from its cache, filled by stage_patch.
-	spec := &aegisonev1.InstallPatchSpec{Kb: x.fileKB(), FilePath: deref(x.fileName), ExpectedHash: deref(x.sha256), HashAlgorithm: "sha256"}
-	payload, err := proto.Marshal(spec)
-	if err != nil {
-		return err
+	var payload []byte
+	var audit map[string]any
+	var err error
+	if cmdType == "reboot" {
+		delay := DefaultRebootDelay
+		if x.rebootDelay != nil {
+			delay = *x.rebootDelay
+		}
+		spec := &aegisonev1.RebootSpec{DelaySeconds: int32(delay), Message: rebootMessage(x.rebootMsg, delay)}
+		if payload, err = proto.Marshal(spec); err != nil {
+			return err
+		}
+		audit = map[string]any{"delay_seconds": spec.DelaySeconds, "message": spec.Message, "patch_deployment_id": x.deploymentID,
+			"reason": "patch " + x.kb + " installed (reboot " + x.rebootBehavior + ")"}
+	} else {
+		// file_path only carries the extension (.msu/.cab) the agent keeps for
+		// DISM; the bytes come from its cache, filled by stage_patch.
+		spec := &aegisonev1.InstallPatchSpec{Kb: x.fileKB(), FilePath: deref(x.fileName), ExpectedHash: deref(x.sha256), HashAlgorithm: "sha256"}
+		if payload, err = proto.Marshal(spec); err != nil {
+			return err
+		}
+		audit = map[string]any{
+			"kb": spec.Kb, "file_path": spec.FilePath, "expected_hash": spec.ExpectedHash,
+			"hash_algorithm": spec.HashAlgorithm, "patch_deployment_id": x.deploymentID,
+		}
 	}
 	id, err := commands.NewID()
 	if err != nil {
@@ -616,10 +862,7 @@ func (d *Deployer) sendStep(ctx context.Context, x row, cmdType, nextStep string
 	sig := signing.SignCommand(d.key, cmdType, id, payload)
 	cmdID, existing, err := d.cmds.Create(ctx, commands.Issue{
 		ID: id, AgentUUID: x.agentID, DeviceID: x.deviceID, Type: cmdType,
-		Payload: map[string]any{
-			"kb": spec.Kb, "file_path": spec.FilePath, "expected_hash": spec.ExpectedHash,
-			"hash_algorithm": spec.HashAlgorithm, "patch_deployment_id": x.deploymentID,
-		},
+		Payload:   audit,
 		Signature: sig, SigningKeyID: d.keyID,
 		IdempotencyKey:      fmt.Sprintf("patchdeploy:%s:%d:%s:%d", x.id, x.fileIndex, cmdType, attempt),
 		IssuedByAPIClientID: deref(x.clientID), IssuedByLabel: "patch deployment " + x.deploymentID,
@@ -643,14 +886,17 @@ func (d *Deployer) sendStep(ctx context.Context, x row, cmdType, nextStep string
 		d.log.Error("patch deploy: mark command dispatched", "command_id", cmdID, "error", err.Error())
 	}
 	col := "stage_command_id"
-	if cmdType == "install_patch" {
+	switch cmdType {
+	case "install_patch":
 		col = "install_command_id"
+	case "reboot":
+		col = "reboot_command_id"
 	}
 	if _, err := d.pool.Exec(ctx, `UPDATE patch_deployment_results SET step = $2, `+col+` = $3, updated_at = now() WHERE id = $1`,
 		x.id, nextStep, cmdID); err != nil {
 		return err
 	}
-	d.log.Info("patch deploy: command sent", "result_id", x.id, "device_id", x.deviceID, "kb", x.kb, "file_kb", spec.Kb,
+	d.log.Info("patch deploy: command sent", "result_id", x.id, "device_id", x.deviceID, "kb", x.kb, "file_kb", x.fileKB(),
 		"command", cmdType, "command_id", cmdID)
 	return nil
 }
@@ -658,6 +904,11 @@ func (d *Deployer) sendStep(ctx context.Context, x row, cmdType, nextStep string
 // finish closes a result and, when it was the deployment's last open one, the
 // deployment.
 func (d *Deployer) finish(ctx context.Context, x row, ok bool, reason string) error {
+	return d.finishWith(ctx, x, ok, reason, "")
+}
+
+// finishWith is finish plus what became of the reboot (reboot_outcome).
+func (d *Deployer) finishWith(ctx context.Context, x row, ok bool, reason, rebootOutcome string) error {
 	status := "succeeded"
 	if !ok {
 		status = "failed"
@@ -674,8 +925,9 @@ func (d *Deployer) finish(ctx context.Context, x row, ok bool, reason string) er
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE patch_deployment_results SET status = $2, error_message = NULLIF($3, ''), completed_at = now(), updated_at = now(),
-			file_results = CASE WHEN $4::jsonb IS NULL THEN file_results ELSE file_results || jsonb_build_array($4::jsonb) END
-		WHERE id = $1 AND status = 'in_progress'`, x.id, status, reason, fileResult); err != nil {
+			file_results = CASE WHEN $4::jsonb IS NULL THEN file_results ELSE file_results || jsonb_build_array($4::jsonb) END,
+			reboot_outcome = COALESCE(NULLIF($5, ''), reboot_outcome)
+		WHERE id = $1 AND status = 'in_progress'`, x.id, status, reason, fileResult, clip(rebootOutcome, 500)); err != nil {
 		return err
 	}
 	if !ok {
@@ -699,8 +951,16 @@ func (d *Deployer) finish(ctx context.Context, x row, ok bool, reason string) er
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	d.log.Info("patch deploy: finished", "result_id", x.id, "device_id", x.deviceID, "kb", x.kb, "status", status, "reason", reason)
+	d.log.Info("patch deploy: finished", "result_id", x.id, "device_id", x.deviceID, "kb", x.kb, "status", status, "reason", reason,
+		"stage_only", x.stageOnly, "reboot_outcome", rebootOutcome)
 	return nil
+}
+
+func clip(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }
 
 func deref(s *string) string {

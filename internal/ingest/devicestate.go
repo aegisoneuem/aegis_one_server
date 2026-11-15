@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -12,9 +13,11 @@ import (
 // DeviceState saves the agent's fast-lane report (OS build, UBR,
 // architecture, pending reboot) on the device row, plus the installed update
 // set and installed apps when the report carries them. Fields the agent left
-// empty keep their old value.
+// empty keep their old value. KBs waiting for a reboot are kept on the device
+// and their still-open patch rows become 'pending_reboot'.
 func (s *Store) DeviceState(ctx context.Context, known *identity.Known, ds *aegisonev1.DeviceStateReport) (InventorySummary, error) {
 	var sum InventorySummary
+	pendingKBs := pendingRebootKBs(ds.GetRebootPendingKbs())
 	build, ubr := SplitBuild(ds.GetBuild())
 	var ubrArg *int
 	if ubr >= 0 {
@@ -33,12 +36,19 @@ func (s *Store) DeviceState(ctx context.Context, known *identity.Known, ds *aegi
 		    os_edition     = coalesce($5, os_edition),
 		    os_version     = coalesce($6, os_version),
 		    pending_reboot = $7,
-		    pending_reboot_reason = CASE WHEN $7 THEN coalesce($8, pending_reboot_reason) ELSE NULL END
+		    pending_reboot_reason = CASE WHEN $7 THEN coalesce($8, pending_reboot_reason) ELSE NULL END,
+		    pending_reboot_kbs = CASE WHEN $7 THEN $9::text[] ELSE '{}' END
 		WHERE id = $1`,
 		known.DeviceUUID, nullIfEmpty(build), ubrArg, nullIfEmpty(NormalizeArch(ds.GetArchitecture())),
 		nullIfEmpty(ds.GetProductName()), nullIfEmpty(ds.GetDisplayVersion()),
-		ds.GetRebootPending(), nullIfEmpty(strings.Join(ds.GetRebootPendingSources(), ","))); err != nil {
+		ds.GetRebootPending(), nullIfEmpty(strings.Join(ds.GetRebootPendingSources(), ",")), pendingKBs); err != nil {
 		return sum, err
+	}
+	if ds.GetRebootPending() {
+		if err := markPendingReboot(ctx, tx, known.DeviceUUID, pendingKBs); err != nil {
+			return sum, fmt.Errorf("mark pending reboot: %w", err)
+		}
+		sum.PendingRebootKBs = len(pendingKBs)
 	}
 	if sum.KBs, err = s.installedKBs(ctx, tx, known.DeviceUUID, ds.GetInstalledKbs()); err != nil {
 		return sum, err

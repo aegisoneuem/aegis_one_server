@@ -37,6 +37,7 @@ type InventorySummary struct {
 	KBs, Apps, AppsAdded, AppsRemoved, Drivers, Appx, Disks, NICs int
 	Identity, DexHealth                                           bool
 	AppFaults                                                     int
+	PendingRebootKBs                                              int
 }
 
 var kbRe = regexp.MustCompile(`^KB[0-9]{4,8}$`)
@@ -284,6 +285,11 @@ func (s *Store) FullInventory(ctx context.Context, known *identity.Known, inv *a
 // hardware saves HardwareInventory on the device row (empty fields keep the
 // old value) and replaces its disks and network interfaces.
 func hardware(ctx context.Context, tx pgx.Tx, dev string, hw *aegisonev1.HardwareInventory, sum *InventorySummary) error {
+	osBuild, ubr := SplitBuild(hw.GetOsBuild())
+	var osUBR *int
+	if osBuild != "" && ubr >= 0 {
+		osUBR = &ubr
+	}
 	var ramGB *float64
 	if b := hw.GetMemoryTotalBytes(); b > 0 {
 		v := math.Round(float64(b)/(1<<30)*100) / 100
@@ -305,12 +311,26 @@ func hardware(ctx context.Context, tx pgx.Tx, dev string, hw *aegisonev1.Hardwar
 		    chassis_type       = coalesce($13, chassis_type),
 		    virtualization     = coalesce($14, virtualization),
 		    smbios_uuid        = coalesce($15, smbios_uuid),
+		    cpu_mhz              = coalesce($16, cpu_mhz),
+		    cpu_threads_per_core = coalesce($17, cpu_threads_per_core),
+		    cpu_architecture     = coalesce($18, cpu_architecture),
+		    os_service_pack      = coalesce($19, os_service_pack),
+		    -- The fast-lane DeviceStateReport owns the OS build / UBR / edition /
+		    -- version (it drives the patch diff); the full inventory only fills
+		    -- them in when that report hasn't arrived yet.
+		    os_edition = coalesce(os_edition, $20),
+		    os_version = coalesce(os_version, $21),
+		    os_ubr     = CASE WHEN os_build IS NULL THEN $23 ELSE os_ubr END,
+		    os_build   = coalesce(os_build, $22),
 		    updated_at         = now()
 		WHERE id = $1`,
 		dev, nullable(hw.GetCpuVendor()), nullable(hw.GetCpuModel()), positive(hw.GetCpuPhysicalCores()), positive(hw.GetCpuLogicalCores()),
 		ramGB, nullable(hw.GetBiosVendor()), nullable(hw.GetBiosVersion()), parseDate(hw.GetBiosReleaseDate()),
 		nullable(hw.GetSystemVendor()), nullable(hw.GetSystemProduct()), nullable(hw.GetSystemSerialNumber()),
-		nullable(hw.GetChassisType()), nullable(hw.GetVirtualization()), nullable(hw.GetSystemUuid())); err != nil {
+		nullable(hw.GetChassisType()), nullable(hw.GetVirtualization()), nullable(hw.GetSystemUuid()),
+		boundedMHz(hw.GetCpuMhz()), boundedThreads(hw.GetCpuThreadsPerCore()), nullableN(hw.GetCpuArchitecture(), 64),
+		nullableN(hw.GetOsServicePack(), 128), nullable(hw.GetOsProductName()), nullable(hw.GetOsDisplayVersion()),
+		nullableN(osBuild, 32), osUBR); err != nil {
 		return fmt.Errorf("update device hardware: %w", err)
 	}
 
@@ -329,9 +349,10 @@ func hardware(ctx context.Context, tx pgx.Tx, dev string, hw *aegisonev1.Hardwar
 			}
 			seen[mp] = true
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO device_disks (device_id, mount_point, filesystem, size_gb, free_gb)
-				VALUES ($1, $2, $3, $4, $5)`,
-				dev, mp, nullable(d.GetFileSystem()), gib(d.GetTotalBytes()), gib(d.GetFreeBytes())); err != nil {
+				INSERT INTO device_disks (device_id, mount_point, filesystem, size_gb, free_gb, volume_label, drive_type)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				dev, mp, nullable(d.GetFileSystem()), gib(d.GetTotalBytes()), gib(d.GetFreeBytes()),
+				nullableN(d.GetVolumeLabel(), 128), nullableN(d.GetDriveType(), 32)); err != nil {
 				return fmt.Errorf("insert device_disks: %w", err)
 			}
 			sum.Disks++
@@ -452,6 +473,21 @@ func nullableN(s string, n int) *string {
 		return nil
 	}
 	return &s
+}
+
+// boundedMHz / boundedThreads keep plausible CPU values only.
+func boundedMHz(n int32) *int32 {
+	if n <= 0 || n > 20000 {
+		return nil
+	}
+	return &n
+}
+
+func boundedThreads(n int32) *int32 {
+	if n <= 0 || n > 64 {
+		return nil
+	}
+	return &n
 }
 
 func positive(n int32) *int32 {

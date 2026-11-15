@@ -11,7 +11,8 @@
 //	cancel_reboot        device.reboot   cancels ANY pending OS shutdown (shutdown /a)
 //	uninstall_patch      patch.deploy    {kb}; the device's build is sent so the
 //	                                     agent can find a cumulative update's package
-//	scan_now             devices.view    runs the optional cab scan if the endpoint has a cab
+//	scan_now             devices.view    runs the optional cab scan if the endpoint has a cab;
+//	                                     GET shows the scan it led to (scan_run) or why none
 //	report_device_state  devices.view    forces a DeviceStateReport (and so a patch re-diff)
 //	audit_query          audit.view      {query: {...}} reads the agent's LOCAL audit trace
 //	                                     (max 50 devices); events come back in the result
@@ -230,9 +231,14 @@ type statusView struct {
 	Result    json.RawMessage `json:"result,omitempty"`
 	// Events is the agent's answer to an audit_query, parsed out of
 	// result.detail (newest first).
-	Events      json.RawMessage `json:"events,omitempty"`
-	IssuedAt    time.Time       `json:"issued_at"`
-	CompletedAt *time.Time      `json:"completed_at,omitempty"`
+	Events json.RawMessage `json:"events,omitempty"`
+	// ScanRun is, for scan_now, the first cab scan the device reported after
+	// the command (the agent only answers "triggered"); ScanNote says why
+	// there is none yet.
+	ScanRun     *scanRun   `json:"scan_run,omitempty"`
+	ScanNote    string     `json:"scan_note,omitempty"`
+	IssuedAt    time.Time  `json:"issued_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
@@ -269,7 +275,46 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			v.Events = auditEvents(result)
 		}
 	}
+	if v.Type == "scan_now" {
+		if v.ScanRun, err = h.scanAfter(r.Context(), v.CommandID, v.IssuedAt); err != nil {
+			h.log.Error("agent action: scan run", "error", err.Error())
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		if v.ScanRun == nil {
+			v.ScanNote = "no cab scan reported since this command: the agent scans only when it has a scan cab " +
+				"and no install is running (the server-side diff is the main detection)"
+		}
+	}
 	writeJSON(w, http.StatusOK, v)
+}
+
+type scanRun struct {
+	ActionID   string     `json:"action_id"`
+	Status     string     `json:"status"`
+	Reason     *string    `json:"reason,omitempty"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+// scanAfter is the device's first cab scan that started (or, without a start
+// time, arrived) after the scan_now command was issued.
+func (h *Handler) scanAfter(ctx context.Context, commandID string, issued time.Time) (*scanRun, error) {
+	var sr scanRun
+	err := h.pool.QueryRow(ctx, `
+		SELECT r.action_id, r.status, r.reason, r.started_at, r.finished_at
+		FROM agent_commands c JOIN agents a ON a.id = c.agent_id
+		JOIN device_patch_scan_runs r ON r.device_id = a.device_id
+		WHERE c.id = $1 AND COALESCE(r.started_at, r.received_at) >= $2::timestamptz - interval '5 seconds'
+		ORDER BY COALESCE(r.started_at, r.received_at) LIMIT 1`, commandID, issued).
+		Scan(&sr.ActionID, &sr.Status, &sr.Reason, &sr.StartedAt, &sr.FinishedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &sr, nil
 }
 
 // readPerm is the permission needed to read a command's status and result.
