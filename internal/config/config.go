@@ -47,6 +47,10 @@ type Config struct {
 	// LicenseMaxDevices caps devices that hold a seat (0 = unlimited). Interim:
 	// a signed license file (licenses table) isn't verified yet.
 	LicenseMaxDevices int
+	// SecretsKeyFile is the sealed master key (internal/secretbox) for secrets
+	// the server stores, e.g. per-device agent unprotect passcodes. It opens
+	// with SecretsKeyPassphrase (kept out of this struct, like the CA one).
+	SecretsKeyFile string
 
 	// AllowPrivilegedDB lets the server start even if its DB login is a superuser
 	// or table owner (which can disable audit_log's protections). Local dev ONLY.
@@ -147,6 +151,7 @@ func Load() Config {
 		CAKeyFile:              getenv("AEGIS_CA_KEY_FILE", "certs/ca.key.enc"),
 		AgentCertTTL:           certTTL,
 		LicenseMaxDevices:      licenseMax,
+		SecretsKeyFile:         getenv("AEGIS_SECRETS_KEY_FILE", "secrets/secrets.key.enc"),
 		TLSCertFile:            tlsCert,
 		TLSKeyFile:             tlsKey,
 		HTTPTLS:                !strings.EqualFold(getenv("AEGIS_HTTP_TLS", "on"), "off"),
@@ -181,6 +186,23 @@ func CAKeyPassphrase() (string, error) {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			return "", fmt.Errorf("read AEGIS_CA_KEY_PASSPHRASE_FILE: %w", err)
+		}
+		return strings.TrimRight(string(b), "\r\n"), nil
+	}
+	return "", nil
+}
+
+// SecretsKeyPassphrase returns the secrets master key passphrase from
+// AEGIS_SECRETS_KEY_PASSPHRASE, or from the file named by
+// AEGIS_SECRETS_KEY_PASSPHRASE_FILE. "" when neither is set.
+func SecretsKeyPassphrase() (string, error) {
+	if v := os.Getenv("AEGIS_SECRETS_KEY_PASSPHRASE"); v != "" {
+		return v, nil
+	}
+	if f := strings.TrimSpace(os.Getenv("AEGIS_SECRETS_KEY_PASSPHRASE_FILE")); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return "", fmt.Errorf("read AEGIS_SECRETS_KEY_PASSPHRASE_FILE: %w", err)
 		}
 		return strings.TrimRight(string(b), "\r\n"), nil
 	}

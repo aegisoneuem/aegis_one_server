@@ -77,6 +77,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
+	// These carry state the server tracks (policy version, unprotect passcode)
+	// and secrets: a raw push would bypass that and store the payload in
+	// agent_commands. They have their own endpoints.
+	switch cmdType {
+	case "set_policy":
+		http.Error(w, "use PUT /internal/policy for set_policy", http.StatusUnprocessableEntity)
+		return
+	case "set_unprotect_secret", "stop_agent":
+		http.Error(w, "use /internal/tamper for "+cmdType, http.StatusUnprocessableEntity)
+		return
+	}
 	needed := apiauth.PermAgentCommand
 	switch cmdType {
 	case "install_patch", "stage_patch", "uninstall_patch":

@@ -75,6 +75,12 @@ const (
 	// PermAuditView (seeded for auditor) reads audit trails, including an
 	// agent's local audit trace through audit_query.
 	PermAuditView = "audit.view"
+	// PermAgentTamper changes tamper-protection settings, rotates a device's
+	// unprotect passcode and stops a self-protected agent. Admin-only by default.
+	PermAgentTamper = "agent.tamper"
+	// PermAgentTamperReveal shows a device's unprotect passcode and mints a
+	// break-glass token for it; every use is audited. Admin-only by default.
+	PermAgentTamperReveal = "agent.tamper.reveal"
 )
 
 type Principal struct {

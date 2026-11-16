@@ -47,8 +47,10 @@ import (
 	"aegis-one/internal/patchfeed"
 	"aegis-one/internal/pushapi"
 	"aegis-one/internal/remoteops"
+	"aegis-one/internal/secretbox"
 	"aegis-one/internal/signing"
 	"aegis-one/internal/softwaredist"
+	"aegis-one/internal/tamper"
 	"aegis-one/internal/wucatalog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -199,7 +201,8 @@ func main() {
 	// Remote operations (collect_file, run_command, file_operation, transfers,
 	// shells) share one sender: signed, recorded, online devices only.
 	var remote *remoteOps
-	var policyAPI http.Handler
+	var policyAPI, tamperAPI http.Handler
+	var tamperSvc *tamper.Service
 	if pool != nil && cmdStore != nil && signingKeyID != "" {
 		sender := &commands.Sender{Store: cmdStore, Disp: agentSrv, Key: signingKey, KeyID: signingKeyID}
 		uploads := remoteops.NewUploads(pool, cfg.ContentDir, log)
@@ -214,13 +217,27 @@ func main() {
 		pusher := agentpolicy.NewPusher(ctx, pool, policyStore, sender, agentSrv, log)
 		agentSrv.EnablePolicy(pusher)
 		policyAPI = agentpolicy.NewHandler(policyStore, pusher, log)
+
+		// Tamper protection: per-device unprotect passcodes sealed with the
+		// secrets master key. No key file -> off (logged); a key file that
+		// does not open stops the server.
+		box, err := loadSecretsBox(cfg, log)
+		if err != nil {
+			log.Error("secrets key", "error", err.Error())
+			os.Exit(1)
+		}
+		if box != nil {
+			tamperSvc = tamper.New(ctx, pool, box, sender, agentSrv, log)
+			agentSrv.EnableTamper(tamperSvc)
+			tamperAPI = tamper.NewHandler(tamperSvc, log)
+		}
 	} else {
 		log.Warn("software deployment disabled (needs a database and a command signing key)")
 	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, deployer, software, swDeployer, remote, policyAPI, cfg.ContentDir, log),
+		Handler:           httpMux(pool, agentSrv, cmdStore, signingKey, signingKeyID, deployer, software, swDeployer, remote, policyAPI, tamperAPI, cfg.ContentDir, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		// net/http logs TLS handshake errors etc. through the std logger; route
 		// them through slog so every server log line stays structured JSON.
@@ -324,6 +341,14 @@ func main() {
 		}()
 	}
 
+	if tamperSvc != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tamperSvc.Run(ctx)
+		}()
+	}
+
 	switch {
 	case pool == nil:
 		log.Warn("feed scheduler disabled (no database)")
@@ -400,7 +425,7 @@ func feedJobs(contentDir, bsdtar string, msrcDocuments int) []feedsched.Job {
 }
 
 func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands.Store, signingKey ed25519.PrivateKey, signingKeyID string, deployer *patchdeploy.Deployer,
-	software *softwaredist.Store, swDeployer *softwaredist.Deployer, remote *remoteOps, policyAPI http.Handler, contentDir string, log *slog.Logger) http.Handler {
+	software *softwaredist.Store, swDeployer *softwaredist.Deployer, remote *remoteOps, policyAPI, tamperAPI http.Handler, contentDir string, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -442,6 +467,12 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 		mux.Handle("/internal/policy", ph)
 		mux.Handle("/internal/policy/", ph)
 	}
+	if tamperAPI != nil {
+		// Permissions per route: devices.view, agent.tamper, agent.tamper.reveal.
+		th := auth.Require("", tamperAPI)
+		mux.Handle("/internal/tamper", th)
+		mux.Handle("/internal/tamper/", th)
+	}
 	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool)))
 	if pool != nil {
 		// Checks devices.view / devices.manage per route.
@@ -482,6 +513,33 @@ func setupEnrollment(cfg config.Config, pool *pgxpool.Pool, log *slog.Logger) (*
 	log.Info("enrollment enabled", "ca", authority.Cert.Subject.CommonName, "ca_not_after", authority.Cert.NotAfter,
 		"agent_cert_ttl", cfg.AgentCertTTL.String(), "license_max_devices", cfg.LicenseMaxDevices)
 	return enroll.New(pool, authority, cfg.AgentCertTTL, cfg.LicenseMaxDevices, log), nil
+}
+
+// loadSecretsBox opens the secrets master key (cmd/secretskey). No key file ->
+// nil (tamper protection off). A key file without a working passphrase is a
+// misconfiguration and an error, like the CA key.
+func loadSecretsBox(cfg config.Config, log *slog.Logger) (*secretbox.Box, error) {
+	data, err := os.ReadFile(cfg.SecretsKeyFile)
+	if errors.Is(err, os.ErrNotExist) {
+		log.Warn("tamper protection disabled: no secrets key file (run cmd/secretskey)", "secrets_key_file", cfg.SecretsKeyFile)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	pass, err := config.SecretsKeyPassphrase()
+	if err != nil {
+		return nil, err
+	}
+	if pass == "" {
+		return nil, fmt.Errorf("%s exists but AEGIS_SECRETS_KEY_PASSPHRASE / AEGIS_SECRETS_KEY_PASSPHRASE_FILE is not set", cfg.SecretsKeyFile)
+	}
+	box, err := secretbox.Load(data, pass)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("secrets key loaded; tamper protection available", "key_id", box.KeyID())
+	return box, nil
 }
 
 // remoteOps groups the remote-operation services shared by the gRPC and HTTP sides.

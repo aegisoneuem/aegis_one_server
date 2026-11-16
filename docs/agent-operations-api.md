@@ -33,6 +33,8 @@ type, because results can hold command output.
 | `agent.shell` | admin | interactive shell (SYSTEM, recorded) |
 | `audit.view` | auditor | `audit_query`: reads the agent's local audit trace |
 | `agent.policy` | admin | publishes the fleet-wide agent policy (`PUT /internal/policy`) |
+| `agent.tamper` | admin | tamper-protection settings, rotate a passcode, stop an agent |
+| `agent.tamper.reveal` | admin | show a device's unprotect passcode, issue a break-glass token (both audited) |
 
 "admin" means only the admin role (`*`) has it until you grant it to a role.
 
@@ -175,6 +177,72 @@ An agent that has not answered is pushed again on its next connect. A refusal (`
 - sends the policy again
 
 The agent accepts the same version again and leaves safe mode. The alert stays open with `policy_reapplied_at` added, for an admin to resolve.
+
+## Tamper protection: `/internal/tamper` (migration 0028)
+
+Agent 7dc4487 protects itself once it holds an **unprotect passcode**: `sc stop`, `sc config … disabled`, `sc delete`, regedit `Start=4` and a normal uninstall all fail. To stop or uninstall it you need that passcode, or a token signed with the command key. Credential model (Sam, 2026-11-16): **one random passcode per device**.
+
+| Route | Permission | What it does |
+|---|---|---|
+| `GET /internal/tamper` | `devices.view` | Returns the settings and fleet counts (`applied`, `pending`, `failed`, `cleared`, `not_provisioned`). |
+| `PUT /internal/tamper/settings` | `agent.tamper` | Body: any of `enabled`, `rotation_days` (0–3650, 0 = never), `max_tries` (1–10), `silent_alert_minutes` (5–10080). Turning `enabled` on or off pushes to every connected agent. |
+| `GET /internal/tamper/devices?status=&limit=` | `devices.view` | Returns each agent's state. Never includes a passcode. |
+| `GET /internal/tamper/devices/{device_id}` | `devices.view` | Returns the state, open tamper alerts and the last 20 tamper events from the agent. |
+| `POST /internal/tamper/devices/{device_id}/reveal` | `agent.tamper.reveal` | Returns the passcode. Every call is written to `audit_log` (`agent_tamper.reveal`). |
+| `POST /internal/tamper/devices/{device_id}/token` | `agent.tamper.reveal` | Body `{"ttl_minutes": 60}` (1–1440). Returns a token bound to this device. Audited (`agent_tamper.token`). |
+| `POST /internal/tamper/devices/{device_id}/rotate` | `agent.tamper` | Sends a new passcode now. If the agent is offline, it goes out when the agent connects. |
+| `POST /internal/tamper/devices/{device_id}/stop` | `agent.tamper` | Sends `stop_agent` with a 10-minute token, never the passcode. Answers 409 if the agent is offline. |
+
+**Setup.** Passcodes are stored only encrypted, under a secrets master key:
+```
+AEGIS_SECRETS_KEY_PASSPHRASE=<16+ chars> go run ./cmd/secretskey -out secrets/secrets.key.enc
+```
+- The server reads `AEGIS_SECRETS_KEY_FILE` (default `secrets/secrets.key.enc`) and `AEGIS_SECRETS_KEY_PASSPHRASE` or `AEGIS_SECRETS_KEY_PASSPHRASE_FILE`.
+- With no key file, tamper protection is off and the server logs that. If the key file exists but does not open, the server does not start.
+- `cmd/secretskey` refuses to overwrite an existing key file.
+- Back the key file up with the database and keep the passphrase somewhere else.
+- If the key is lost, the stored passcodes can't be read, but the agents keep working. Use a token to stop an agent, and `rotate` to give it a new passcode.
+
+**Off by default.** `tamper.enabled` is false. When enabled:
+- each agent gets its own random 10-character passcode in a signed `set_unprotect_secret` command. The alphabet has no 0/O/1/I/L.
+- an unanswered passcode is re-sent on connect, and by the scheduler after 15 minutes
+- passcodes rotate every `rotation_days`. Until the agent confirms a new passcode, `reveal` shows the old one as `passcode` and the new one as `pending_passcode`; if the old one is refused, the agent already has the new one.
+
+Disabling sends `mode: clear` to every agent.
+
+**What is stored.**
+- Passcodes are sealed with AES-256-GCM and bound to the agent and `issued_at` (`agent_unprotect_secrets`).
+- `agent_commands.payload` holds only the mode, `issued_at` and `max_tries`.
+- For a stop, only the token's nonce and expiry are stored.
+- `/internal/push` refuses `set_unprotect_secret`, `stop_agent` and `set_policy` (422), so none of these can go out untracked.
+
+**Agent answers.**
+- `SUCCESS` applies the passcode or the clear.
+- `NOT_APPLICABLE` ("not newer") also counts as applied: every `issued_at` comes from this server, so the agent already has it.
+- `FAILED` is retried only after the agent version changes.
+
+**Alerts** (`alert_type = agent_tampered`, one open alert per device per event):
+
+| Agent event | Severity |
+|---|---|
+| `binary_tampered`, `service_tampered`, `unprotect_secret_tampered` | high |
+| `agent_stop_refused` | medium |
+
+`unprotect_secret_tampered` means the agent's passcode store was deleted. The agent stays protected, and the server sends it a new passcode right away.
+
+If a device with an open tamper alert is silent for `silent_alert_minutes`, the scheduler (every 5 minutes) raises the alert to critical once and adds `silent_escalated_at`. That device probably needs a re-deploy.
+
+**Using the credentials at the endpoint:**
+```
+AegisOneClient.exe stop --passcode <PASSCODE>      (or --token <TOKEN>)
+msiexec /x AegisOneClient.msi UNINSTALLPASSCODE=<PASSCODE> /qn
+```
+Add/Remove Programs prompts for the passcode (`max_tries` attempts). A change to `max_tries` reaches each agent with its next passcode.
+
+**Agent gaps found on 2026-11-16 (for Vijay):**
+- a local CLI stop, whether refused or authorized, sends no audit event, so the server sees no alert for it
+- the agent's capability list doesn't name `set_unprotect_secret` or `stop_agent`, so the server sends them without the capability check
+- after `mode: clear`, the agent's anti-rollback floor goes back to 0
 
 ## Patch push: `/internal/deploy` (`patch.deploy`)
 

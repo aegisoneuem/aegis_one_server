@@ -77,7 +77,7 @@ type Issue struct {
 	SigningKeyID   string
 	IdempotencyKey string
 
-	IssuedByAPIClientID string // the authenticated caller (api_clients.id)
+	IssuedByAPIClientID string // the authenticated caller (api_clients.id); "" = the server itself (e.g. a scheduler)
 	IssuedByLabel       string // api_clients.name, for audit_log.actor_label
 
 	// SourceJobType/ID link a command to the job that issued it, e.g.
@@ -112,7 +112,7 @@ func (s *Store) Create(ctx context.Context, in Issue) (id string, existing *Exis
 		INSERT INTO agent_commands
 			(id, agent_id, command_type, payload, idempotency_key, signature_ed25519, signing_key_id, expires_at, issued_by_api_client_id,
 			 source_job_type, source_job_id)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, NULLIF($10, ''), NULLIF($11, '')::uuid)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, NULLIF($9, '')::uuid, NULLIF($10, ''), NULLIF($11, '')::uuid)
 		ON CONFLICT (idempotency_key) DO NOTHING
 		RETURNING id`,
 		in.ID, in.AgentUUID, in.Type, string(payloadJSON), in.IdempotencyKey,
@@ -139,7 +139,7 @@ func (s *Store) Create(ctx context.Context, in Issue) (id string, existing *Exis
 	})
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_log (actor_type, actor_api_client_id, actor_label, action, target_type, target_id, details)
-		VALUES ('api_client', $1, $2, 'agent.command.issue', 'agent', $3, $4::jsonb)`,
+		VALUES (CASE WHEN $1 = '' THEN 'system' ELSE 'api_client' END, NULLIF($1, '')::uuid, $2, 'agent.command.issue', 'agent', $3, $4::jsonb)`,
 		in.IssuedByAPIClientID, in.IssuedByLabel, in.AgentUUID, string(details),
 	); err != nil {
 		return "", nil, fmt.Errorf("insert audit_log: %w", err)

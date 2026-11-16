@@ -51,8 +51,9 @@ type Server struct {
 	baseline *baselineStore
 	// diff is nil until EnablePatchDiff (needs a database).
 	diff *patchdiff.Differ
-	// policy is nil until EnablePolicy (needs a database and the signing key).
-	policy PolicyHooks
+	// hooks: agent policy and tamper protection (EnablePolicy / EnableTamper;
+	// both need a database and the signing key).
+	hooks []PolicyHooks
 	// dex is nil until EnableDex (needs a database); DexTelemetry is then batched.
 	dex *ingest.DexWriter
 	// remote operations; nil until EnableRemoteOps (needs a database).
@@ -71,7 +72,9 @@ func New(log *slog.Logger, idr *identity.Resolver, ing *ingest.Store, cmds *comm
 	return &Server{log: log, identity: idr, ingest: ing, commands: cmds, enroll: enr, clients: make(map[string]chan *aegisonev1.ServerMessage), kicks: make(map[string]map[chan *aegisonev1.ServerMessage]chan struct{})}
 }
 
-// PolicyHooks is the agent policy pusher (internal/agentpolicy).
+// PolicyHooks reacts to an agent's connection, action statuses and audit
+// events: the agent policy pusher (internal/agentpolicy) and tamper
+// protection (internal/tamper).
 type PolicyHooks interface {
 	Connected(ctx context.Context, known *identity.Known)
 	ActionStatus(ctx context.Context, known *identity.Known, st *aegisonev1.ActionStatus)
@@ -81,7 +84,13 @@ type PolicyHooks interface {
 // EnablePolicy pushes the agent policy on connect and handles the agent's
 // answers and tamper reports. Call before serving.
 func (s *Server) EnablePolicy(p PolicyHooks) {
-	s.policy = p
+	s.hooks = append(s.hooks, p)
+}
+
+// EnableTamper provisions unprotect passcodes on connect and handles the
+// agent's answers and tamper events. Call before serving.
+func (s *Server) EnableTamper(t PolicyHooks) {
+	s.hooks = append(s.hooks, t)
 }
 
 // ConnectedDevices returns the device ids with a live stream.
@@ -408,13 +417,15 @@ func (s *Server) Connect(stream aegisonev1.AgentControlPlane_ConnectServer) erro
 	}
 }
 
-// policyConnected pushes the agent policy in the background, so the database
+// policyConnected runs the connect hooks (policy, tamper) in the background, so the database
 // work and signing don't hold up the stream's first messages.
 func (s *Server) policyConnected(ctx context.Context, known *identity.Known) {
-	if s.policy == nil || known == nil {
+	if known == nil {
 		return
 	}
-	go s.policy.Connected(ctx, known)
+	for _, h := range s.hooks {
+		go h.Connected(ctx, known)
+	}
 }
 
 func peerCert(ctx context.Context) (*x509.Certificate, error) {
@@ -532,8 +543,8 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 				s.patchNotApplicable(ctx, known, st)
 				s.patchStaged(ctx, known, st)
 			}
-			if s.policy != nil {
-				s.policy.ActionStatus(ctx, known, st)
+			for _, h := range s.hooks {
+				h.ActionStatus(ctx, known, st)
 			}
 		}
 
@@ -624,8 +635,8 @@ func (s *Server) handleMessage(ctx context.Context, known *identity.Known, msg *
 				s.log.Error("persist agent audit event failed", "device_id", known.DeviceID,
 					"event_type", ev.GetEventType(), "error", err.Error())
 			}
-			if s.policy != nil {
-				s.policy.AuditEvent(ctx, known, ev)
+			for _, h := range s.hooks {
+				h.AuditEvent(ctx, known, ev)
 			}
 		}
 
