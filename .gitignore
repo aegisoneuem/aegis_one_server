@@ -15,3 +15,5 @@
 secrets/
 certs/
 *.zip
+# Linux binaries for the e2e test server (scripts/e2e/build-linux.ps1)
+/dist-linux/
