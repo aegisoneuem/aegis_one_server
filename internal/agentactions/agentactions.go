@@ -16,6 +16,10 @@
 //	report_device_state  devices.view    forces a DeviceStateReport (and so a patch re-diff)
 //	audit_query          audit.view      {query: {...}} reads the agent's LOCAL audit trace
 //	                                     (max 50 devices); events come back in the result
+//	notify_user          user.notify     {notify: {kind info|message|action, title, text, ...}}
+//	                                     shows a balloon, window or prompt to the logged-on
+//	                                     user (see notify.go); on_accept "reboot" also needs
+//	                                     device.reboot. GET shows the user's responses.
 //
 // Only online devices get the command (see commands.Sender): these carry no
 // expiry, so nothing is queued for later.
@@ -63,6 +67,7 @@ type Request struct {
 	Message      string      `json:"message,omitempty"`       // reboot
 	KB           string      `json:"kb,omitempty"`            // uninstall_patch
 	Query        *AuditQuery `json:"query,omitempty"`         // audit_query
+	Notify       *NotifySpec `json:"notify,omitempty"`        // notify_user
 }
 
 // permFor is the permission an action needs.
@@ -73,6 +78,7 @@ var permFor = map[string]string{
 	"scan_now":            apiauth.PermDevicesView,
 	"report_device_state": apiauth.PermDevicesView,
 	"audit_query":         apiauth.PermAuditView,
+	"notify_user":         apiauth.PermUserNotify,
 }
 
 var kbRe = regexp.MustCompile(`^KB[0-9]{4,8}$`)
@@ -104,7 +110,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	req.Action = strings.ToLower(strings.TrimSpace(req.Action))
 	perm, known := permFor[req.Action]
 	if !known {
-		http.Error(w, "action must be one of reboot, cancel_reboot, uninstall_patch, scan_now, report_device_state, audit_query", http.StatusUnprocessableEntity)
+		http.Error(w, "action must be one of reboot, cancel_reboot, uninstall_patch, scan_now, report_device_state, audit_query, notify_user", http.StatusUnprocessableEntity)
 		return
 	}
 	if !caller.Can(perm) {
@@ -124,6 +130,11 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
+	// A prompt whose accept button reboots the device is a reboot.
+	if req.Notify.Reboots() && !caller.Can(apiauth.PermDeviceReboot) {
+		apiauth.Deny(w, h.log, caller, apiauth.PermDeviceReboot, r)
+		return
+	}
 
 	results := make([]commands.Sent, 0, len(devices))
 	counts := map[string]int{}
@@ -137,6 +148,9 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		sent, err := h.sender.Send(r.Context(), commands.SendRequest{
 			DeviceID: dev, Type: req.Action, Wire: wire, Audit: audit,
 			ClientID: caller.ClientID, ClientName: caller.ClientName, Actor: "api_client:" + caller.ClientName,
+			// The agent (449e47c) handles notify_user but does not list it
+			// in its capabilities; one without the handler answers FAILED.
+			SkipCapabilityCheck: req.Action == "notify_user",
 		})
 		if err != nil {
 			h.log.Error("agent action: send", "action", req.Action, "device_id", dev, "error", err.Error())
@@ -188,6 +202,14 @@ func validate(req *Request) error {
 	} else if req.Query != nil {
 		return errors.New("query is only for audit_query")
 	}
+	if req.Action == "notify_user" {
+		if req.Notify == nil {
+			return errors.New("notify is required for notify_user")
+		}
+		return req.Notify.validate(time.Now())
+	} else if req.Notify != nil {
+		return errors.New("notify is only for notify_user")
+	}
 	return nil
 }
 
@@ -217,6 +239,13 @@ func (h *Handler) payload(ctx context.Context, req Request, deviceID string) ([]
 		var audit map[string]any
 		json.Unmarshal(b, &audit) //nolint:errcheck // just marshalled
 		return b, audit, err
+	case "notify_user":
+		// The audit copy is the whole spec: it holds no secrets, and the
+		// console needs the buttons to make sense of the user's choice.
+		b, err := json.Marshal(req.Notify)
+		var audit map[string]any
+		json.Unmarshal(b, &audit) //nolint:errcheck // just marshalled
+		return b, audit, err
 	default: // cancel_reboot, scan_now, report_device_state: no payload
 		return []byte{}, map[string]any{}, nil
 	}
@@ -235,10 +264,13 @@ type statusView struct {
 	// ScanRun is, for scan_now, the first cab scan the device reported after
 	// the command (the agent only answers "triggered"); ScanNote says why
 	// there is none yet.
-	ScanRun     *scanRun   `json:"scan_run,omitempty"`
-	ScanNote    string     `json:"scan_note,omitempty"`
-	IssuedAt    time.Time  `json:"issued_at"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	ScanRun  *scanRun `json:"scan_run,omitempty"`
+	ScanNote string   `json:"scan_note,omitempty"`
+	// Responses are, for notify_user, the user's snoozes and final choice
+	// (user_action_response events, oldest first).
+	Responses   []userResponse `json:"responses,omitempty"`
+	IssuedAt    time.Time      `json:"issued_at"`
+	CompletedAt *time.Time     `json:"completed_at,omitempty"`
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
@@ -273,6 +305,13 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		v.Result = result
 		if v.Type == "audit_query" {
 			v.Events = auditEvents(result)
+		}
+	}
+	if v.Type == "notify_user" {
+		if v.Responses, err = h.userResponses(r.Context(), v.CommandID); err != nil {
+			h.log.Error("agent action: user responses", "error", err.Error())
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
 		}
 	}
 	if v.Type == "scan_now" {

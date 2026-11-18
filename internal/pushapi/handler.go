@@ -87,6 +87,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "set_unprotect_secret", "stop_agent":
 		http.Error(w, "use /internal/tamper for "+cmdType, http.StatusUnprocessableEntity)
 		return
+	case "notify_user":
+		// Validated (and gated by user.notify / device.reboot) there.
+		http.Error(w, "use POST /internal/actions for notify_user", http.StatusUnprocessableEntity)
+		return
 	}
 	needed := apiauth.PermAgentCommand
 	switch cmdType {

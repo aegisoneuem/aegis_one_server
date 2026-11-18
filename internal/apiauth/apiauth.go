@@ -81,6 +81,10 @@ const (
 	// PermAgentTamperReveal shows a device's unprotect passcode and mints a
 	// break-glass token for it; every use is audited. Admin-only by default.
 	PermAgentTamperReveal = "agent.tamper.reveal"
+	// PermUserNotify shows a message or an action prompt to the logged-on user
+	// (notify_user). Admin-only by default; a prompt whose accept button
+	// reboots the device also needs device.reboot.
+	PermUserNotify = "user.notify"
 )
 
 type Principal struct {

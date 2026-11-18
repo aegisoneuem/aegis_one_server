@@ -35,6 +35,7 @@ type, because results can hold command output.
 | `agent.policy` | admin | publishes the fleet-wide agent policy (`PUT /internal/policy`) |
 | `agent.tamper` | admin | tamper-protection settings, rotate a passcode, stop an agent |
 | `agent.tamper.reveal` | admin | show a device's unprotect passcode, issue a break-glass token (both audited) |
+| `user.notify` | admin | `notify_user`: messages and prompts to the logged-on user (a prompt that reboots on accept also needs `device.reboot`) |
 
 "admin" means only the admin role (`*`) has it until you grant it to a role.
 
@@ -48,6 +49,9 @@ type, because results can hold command output.
 {"action": "report_device_state", "device_ids": ["<DEVICE_ID>"]}
 {"action": "audit_query", "device_ids": ["<DEVICE_ID>"],
  "query": {"mode": "search", "pattern": "run_command", "since": "2026-11-14T00:00:00Z", "limit": 200}}
+{"action": "notify_user", "device_ids": ["<DEVICE_ID>"],
+ "notify": {"kind": "action", "title": "Restart Required", "text": "Please restart your computer.",
+            "buttons": ["Restart now", "Later"], "allow_snooze": true, "on_accept": "reboot"}}
 ```
 
 - `delay_seconds`: 0..86400. `message`: at most 512 characters, no double quotes.
@@ -69,6 +73,25 @@ type, because results can hold command output.
   - The agent sends the newest events first. When the answer is over 2 MiB it drops the oldest events and says so in the reason.
   - `GET /internal/actions?command_id=...` returns the events as an `events` array. Reading it needs `audit.view`.
   - The agent build from 2026-11-12 does not advertise `audit_query` in its capability list. Until it does, an agent that has sent its list gets `"status": "unsupported"`.
+- `notify_user` (agent 449e47c, 2026-11-18) shows something to every logged-on user through the agent's tray UI (`AegisOneClientUI.exe`). The `notify` object is signed and sent as is:
+
+  | field | kinds | rule |
+  |---|---|---|
+  | `kind` | all | `info` (default, tray balloon), `message` (window the user closes), `action` (prompt with buttons) |
+  | `title` | all | required, at most 128 characters, one line |
+  | `text` | all | required, at most 2048 characters, newlines allowed |
+  | `detail` | action | at most 512 characters, e.g. which patch a reboot is for |
+  | `buttons` | action | required, 1..4 unique labels of at most 40 characters; the first is the accept button. `snoozed`, `dismissed` and `cancelled` are not allowed, the agent uses them as answers |
+  | `deadline_unix` | action | in the future, at most 30 days ahead. **Display only**, see below |
+  | `allow_snooze`, `snooze_opts` | action | `snooze_opts` (60..86400 seconds, at most 10) needs `allow_snooze`; the agent re-shows the prompt after each snooze |
+  | `confirm_text` | action | the accept button first asks the user to confirm with this text |
+  | `on_accept` | action | empty or `reboot`: the agent reboots (60 s grace) when the user accepts. Needs `device.reboot` as well |
+
+  - Fields that don't belong to the kind are refused (422). A raw `POST /internal/push?type=notify_user` is refused too.
+  - Results: `info`/`message` are `succeeded` once shown. An `action` stays `acknowledged` while it is shown or snoozed and becomes `succeeded` with reason `user chose: <label>` (or `dismissed` / `cancelled`). When no user is logged on, or the tray UI isn't running, it is `failed` with reason `no tray UI connected`.
+  - `GET /internal/actions?command_id=...` adds `responses`: every snooze and the final choice, from the agent's `user_action_response` audit events, oldest first.
+  - The agent build 449e47c handles `notify_user` but does not advertise it, so the server sends it without the capability check. An older agent answers FAILED.
+  - **Not done on the server (open decision):** nothing happens when `deadline_unix` passes, and nothing acts on the user's choice except the agent's own `on_accept` reboot. Following a choice up (install now, reschedule) is the caller's job for now.
 
 ## Devices: `/internal/devices`
 
