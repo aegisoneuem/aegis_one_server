@@ -38,7 +38,12 @@ type InventorySummary struct {
 	Identity, DexHealth                                           bool
 	AppFaults                                                     int
 	PendingRebootKBs                                              int
+	Antivirus                                                     int // agent 2026-11-19 (0031)
 }
+
+// maxAntivirus caps antivirus_products per report; Security Center lists a
+// handful at most.
+const maxAntivirus = 32
 
 var kbRe = regexp.MustCompile(`^KB[0-9]{4,8}$`)
 
@@ -238,6 +243,11 @@ func (s *Store) FullInventory(ctx context.Context, known *identity.Known, inv *a
 			return sum, fmt.Errorf("copy device_drivers: %w", err)
 		}
 		sum.Drivers = len(rows)
+	}
+	if av := inv.GetAntivirusProducts(); len(av) > 0 {
+		if sum.Antivirus, err = antivirus(ctx, tx, dev, av); err != nil {
+			return sum, err
+		}
 	}
 	if appx := inv.GetInstalledAppx(); len(appx) > 0 {
 		if _, err := tx.Exec(ctx, `DELETE FROM device_appx_packages WHERE device_id = $1`, dev); err != nil {
@@ -452,6 +462,64 @@ func (s *Store) AuditEvent(ctx context.Context, known *identity.Known, ev *aegis
 }
 
 // clip trims s and cuts it to maxText bytes on a rune boundary.
+// antivirus replaces the device's installed-AV rows (antivirus_products, agent
+// 2026-11-19, migration 0031) and mirrors the headline into
+// device_security_posture: av_product is the enabled product (the first by
+// name when none is enabled), av_realtime_enabled whether any is enabled. The
+// caller skips an empty list: the agent sends one on Server SKUs / without
+// Security Center, so like every section it means "not collected", not "none".
+func antivirus(ctx context.Context, tx pgx.Tx, dev string, list []*aegisonev1.AntivirusProduct) (int, error) {
+	type av struct {
+		enabled, upToDate bool
+		state             int64
+	}
+	byName := map[string]av{}
+	names := make([]string, 0, len(list))
+	for _, p := range list {
+		name := clipN(p.GetName(), 255)
+		if name == "" {
+			continue
+		}
+		if _, dup := byName[name]; dup {
+			continue
+		}
+		if len(names) >= maxAntivirus {
+			break
+		}
+		byName[name] = av{enabled: p.GetEnabled(), upToDate: p.GetUpToDate(), state: int64(p.GetProductState())}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return 0, nil
+	}
+	sort.Strings(names)
+	if _, err := tx.Exec(ctx, `DELETE FROM device_antivirus_products WHERE device_id = $1`, dev); err != nil {
+		return 0, err
+	}
+	rows := make([][]any, len(names))
+	headline, anyEnabled := names[0], false
+	for i, n := range names {
+		a := byName[n]
+		rows[i] = []any{dev, n, a.enabled, a.upToDate, a.state}
+		if a.enabled && !anyEnabled {
+			headline, anyEnabled = n, true
+		}
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"device_antivirus_products"},
+		[]string{"device_id", "name", "enabled", "up_to_date", "product_state"}, pgx.CopyFromRows(rows)); err != nil {
+		return 0, fmt.Errorf("copy device_antivirus_products: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO device_security_posture (device_id, av_product, av_realtime_enabled)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (device_id) DO UPDATE SET
+		    av_product = EXCLUDED.av_product, av_realtime_enabled = EXCLUDED.av_realtime_enabled, updated_at = now()`,
+		dev, headline, anyEnabled); err != nil {
+		return 0, fmt.Errorf("security posture: %w", err)
+	}
+	return len(rows), nil
+}
+
 func clip(s string) string { return clipN(s, maxText) }
 
 func clipN(s string, n int) string {

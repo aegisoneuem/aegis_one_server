@@ -53,6 +53,8 @@ type DexRow struct {
 	NetTarget                                   *string
 	BatteryPresent, BatteryAC                   *bool
 	BatteryAvg, BatteryMin, BatteryMax          *float32
+	BatteryHealthPct                            *float32 // agent 2026-11-19 (0031): full-charge / designed capacity; nil = unknown
+	BatteryCycleCount                           *int32
 	WifiPresent, WifiConnected                  *bool
 	WifiSignalAvg, WifiSignalMin, WifiSignalMax *float32
 	WifiSSID                                    *string
@@ -110,13 +112,21 @@ func extendedDex(r *DexRow, t *aegisonev1.DexTelemetry, networkNames bool) {
 			r.NetTarget = nullableN(t.GetNetTarget(), 255)
 		}
 	}
-	battery := t.GetBatteryPresent() || t.GetBatteryAcOnline() || t.GetBatteryChargePctAvg() > 0
+	battery := t.GetBatteryPresent() || t.GetBatteryAcOnline() || t.GetBatteryChargePctAvg() > 0 || t.GetBatteryHealthPct() > 0
 	extended := disk || net || battery
 	if extended {
 		bp, ac := t.GetBatteryPresent(), t.GetBatteryAcOnline()
 		r.BatteryPresent, r.BatteryAC = &bp, &ac
 		if bp {
 			r.BatteryAvg, r.BatteryMin, r.BatteryMax = pct(t.GetBatteryChargePctAvg()), pct(t.GetBatteryChargePctMin()), pct(t.GetBatteryChargePctMax())
+		}
+		// Wear and cycles: 0 is the agent's "unknown" (no battery, or the
+		// firmware does not report it). A brand-new pack can read above 100.
+		if hp := t.GetBatteryHealthPct(); hp > 0 {
+			r.BatteryHealthPct = pct(hp)
+		}
+		if c := t.GetBatteryCycleCount(); c > 0 {
+			r.BatteryCycleCount = &c
 		}
 	}
 	if extended || t.GetWifiPresent() || t.GetWifiConnected() {
@@ -256,7 +266,8 @@ var dexColumns = []string{"time", "device_id", "cpu_pct", "cpu_min_pct", "cpu_ma
 	"disk_latency_ms_avg", "disk_latency_ms_min", "disk_latency_ms_max",
 	"net_rtt_ms_avg", "net_rtt_ms_min", "net_rtt_ms_max", "net_loss_pct", "net_target",
 	"battery_present", "battery_ac_online", "battery_pct_avg", "battery_pct_min", "battery_pct_max",
-	"wifi_present", "wifi_connected", "wifi_signal_pct_avg", "wifi_signal_pct_min", "wifi_signal_pct_max", "wifi_ssid"}
+	"wifi_present", "wifi_connected", "wifi_signal_pct_avg", "wifi_signal_pct_min", "wifi_signal_pct_max", "wifi_ssid",
+	"battery_health_pct", "battery_cycle_count"}
 
 // dexInsert is the row-by-row fallback statement, built from dexColumns.
 var dexInsert = func() string {
@@ -273,7 +284,8 @@ func (r DexRow) values() []any {
 		r.DiskLatAvg, r.DiskLatMin, r.DiskLatMax,
 		r.NetRTTAvg, r.NetRTTMin, r.NetRTTMax, r.NetLossPct, r.NetTarget,
 		r.BatteryPresent, r.BatteryAC, r.BatteryAvg, r.BatteryMin, r.BatteryMax,
-		r.WifiPresent, r.WifiConnected, r.WifiSignalAvg, r.WifiSignalMin, r.WifiSignalMax, r.WifiSSID}
+		r.WifiPresent, r.WifiConnected, r.WifiSignalAvg, r.WifiSignalMin, r.WifiSignalMax, r.WifiSSID,
+		r.BatteryHealthPct, r.BatteryCycleCount}
 }
 
 // flush COPYs one batch. A batch fails as a whole (e.g. one device row was
@@ -377,15 +389,33 @@ func dexHealth(ctx context.Context, tx pgx.Tx, dev string, h *aegisonev1.DexHeal
 		return 0, err
 	}
 
-	// Same app reported twice: keep the larger counts.
-	faults := map[string][2]int32{}
+	// Same app reported twice: keep the larger counts and the most recent crash
+	// detail. Module / exception / time of the last crash are agent 2026-11-19
+	// (0031); older agents leave them empty -> NULL.
+	type fault struct {
+		crashes, hangs    int32
+		module, exception *string
+		lastCrash         *time.Time
+	}
+	faults := map[string]*fault{}
 	for _, f := range h.GetAppFaults() {
 		name := clipN(f.GetName(), 255)
 		if name == "" {
 			continue
 		}
 		c := faults[name]
-		faults[name] = [2]int32{max(c[0], nonNeg(f.GetCrashes())), max(c[1], nonNeg(f.GetHangs()))}
+		if c == nil {
+			c = &fault{}
+			faults[name] = c
+		}
+		c.crashes, c.hangs = max(c.crashes, nonNeg(f.GetCrashes())), max(c.hangs, nonNeg(f.GetHangs()))
+		ts := crashTime(f.GetLastCrashUnix())
+		if (ts != nil && (c.lastCrash == nil || ts.After(*c.lastCrash))) || (c.lastCrash == nil && c.module == nil) {
+			c.module, c.exception = nullableN(f.GetLastModule(), 255), nullableN(f.GetLastException(), 64)
+			if ts != nil {
+				c.lastCrash = ts
+			}
+		}
 	}
 	names := make([]string, 0, len(faults))
 	for n := range faults {
@@ -393,8 +423,8 @@ func dexHealth(ctx context.Context, tx pgx.Tx, dev string, h *aegisonev1.DexHeal
 	}
 	sort.Slice(names, func(i, j int) bool { // keep the worst offenders if over the cap
 		a, b := faults[names[i]], faults[names[j]]
-		if a[0]+a[1] != b[0]+b[1] {
-			return a[0]+a[1] > b[0]+b[1]
+		if a.crashes+a.hangs != b.crashes+b.hangs {
+			return a.crashes+a.hangs > b.crashes+b.hangs
 		}
 		return names[i] < names[j]
 	})
@@ -406,13 +436,27 @@ func dexHealth(ctx context.Context, tx pgx.Tx, dev string, h *aegisonev1.DexHeal
 	}
 	rows := make([][]any, len(names))
 	for i, n := range names {
-		rows[i] = []any{dev, n, faults[n][0], faults[n][1]}
+		f := faults[n]
+		rows[i] = []any{dev, n, f.crashes, f.hangs, f.module, f.exception, f.lastCrash}
 	}
 	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"device_app_faults"},
-		[]string{"device_id", "app_name", "crashes", "hangs"}, pgx.CopyFromRows(rows)); err != nil {
+		[]string{"device_id", "app_name", "crashes", "hangs", "last_module", "last_exception", "last_crash_at"}, pgx.CopyFromRows(rows)); err != nil {
 		return 0, err
 	}
 	return len(rows), nil
+}
+
+// crashTime is an AppFault.last_crash_unix as a time when it is plausible
+// (set, after 2000, not in the future beyond clock skew); otherwise nil.
+func crashTime(sec int64) *time.Time {
+	if sec <= 0 {
+		return nil
+	}
+	ts := time.Unix(sec, 0)
+	if ts.Year() < 2000 || ts.After(time.Now().Add(dexMaxClockSkew)) {
+		return nil
+	}
+	return &ts
 }
 
 func nonNeg(n int32) int32 { return max(n, 0) }

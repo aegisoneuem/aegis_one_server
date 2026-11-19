@@ -98,7 +98,7 @@ type, because results can hold command output.
 | Call | Body / query |
 |---|---|
 | `GET /internal/devices` | `state` (online, offline, stale, stale_alert, retired, merged, unmanaged, all), `q` (hostname prefix or exact device_id), `limit` (1..1000, default 100), `after` (the previous page's `next_after`) |
-| `GET /internal/devices?id=` | one device, plus agent enrollment time, certificate expiry and a `patch` block (below) |
+| `GET /internal/devices?id=` | one device, plus agent enrollment time, certificate expiry, a `patch` block (below) and `antivirus` (installed AV products, enabled first; migration 0031) |
 | `GET /internal/devices/summary` | count per state, plus the `stale_alert` count |
 | `POST /internal/devices/retire` | `{"device_ids": [...], "reason": "..."}`; reason is required, at most 256 characters |
 | `GET /internal/devices/duplicates` | possible duplicates; `status` (pending (default), confirmed, rejected, all), `limit` (1..500) |
@@ -216,6 +216,17 @@ An endpoint cab scan can report a KB the MSRC feed does not know. The server sti
 - `GET /internal/compliance?view=patches` and the device missing-patch list return `catalog_source`, so a console can badge these rows "agent-reported, unverified".
 
 Migration 0029 re-rates the `agent_report` rows that already exist to `unrated`. Migration 0030 adds `patch_cves.source`, marks existing links on `agent_report` rows `'agent_report'`, recomputes `has_kev` under the new rule and clears the SLA of open rows on an unrated, non-KEV patch (they were set when an agent's rating or CVE link was still trusted). Links on rows the feed had already taken over before 0030 are kept `'msrc'`; an agent link planted before that takeover cannot be told apart.
+
+## Agent 2026-11-19 (proto d1fed59, migration 0031)
+
+The contract file `proto/aegisone/v1/agent.proto` is now the agent team's `aegis_one_proto` file verbatim (only `go_package` differs); it used to be recovered from the agent binary. New fields the server stores:
+
+- `DexTelemetry.battery_health_pct` / `battery_cycle_count` → `device_dex_metrics.battery_health_pct` (0–100, wear) / `battery_cycle_count`. The agent's 0 = unknown is stored as NULL.
+- `AppFault.last_module` / `last_exception` / `last_crash_unix` → `device_app_faults.last_module` / `last_exception` / `last_crash_at`. When one app is listed twice, the most recent crash's detail is kept.
+- `FullInventoryReport.antivirus_products` → `device_antivirus_products` (name, `enabled` = real-time on, `up_to_date`, raw `product_state`), one row per product, replaced whenever the list is non-empty. The enabled product and the real-time flag are mirrored to `device_security_posture.av_product` / `av_realtime_enabled`. An **empty list leaves the rows alone**: the agent sends one on Server SKUs / without Security Center, so it means "not collected", not "no AV" (open with the agent team: a flag that says "Security Center present, nothing installed").
+- The console should show the AV exclusion list from the agent repo's `docs/av-exclusions.md` (one folder + two processes) next to any third-party product; Windows Defender is excluded by the agent itself.
+
+Also from that agent drop: file transfers fetch their archive as content kind `svsh-file` (was `nsh-file`; the server accepts both), and Windows 11 devices now report their real OS name in inventory (the server never normalised it, so nothing to fix).
 
 ## Tamper protection: `/internal/tamper` (migration 0028)
 

@@ -87,6 +87,39 @@ type Device struct {
 	AgentEnrolledAt *time.Time   `json:"agent_enrolled_at,omitempty"`
 	CertExpiresAt   *time.Time   `json:"certificate_expires_at,omitempty"`
 	Patch           *PatchStatus `json:"patch,omitempty"`
+	Antivirus       []AVProduct  `json:"antivirus,omitempty"` // installed AV (agent 2026-11-19, migration 0031)
+}
+
+// AVProduct is one installed antivirus product (device_antivirus_products),
+// as Windows Security Center reports it.
+type AVProduct struct {
+	Name         string    `json:"name"`
+	Enabled      bool      `json:"enabled"`       // real-time protection on
+	UpToDate     bool      `json:"up_to_date"`    // signatures current
+	ProductState int64     `json:"product_state"` // raw SecurityCenter2 bitmask
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// antivirus loads the installed-AV rows for one device (agent_reported_id or
+// id), enabled products first.
+func (h *Handler) antivirus(ctx context.Context, id string) ([]AVProduct, error) {
+	rows, err := h.pool.Query(ctx, `
+		SELECT a.name, a.enabled, a.up_to_date, a.product_state, a.updated_at
+		FROM device_antivirus_products a JOIN devices d ON d.id = a.device_id
+		WHERE `+idSQL+` = $1 ORDER BY a.enabled DESC, a.name`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AVProduct
+	for rows.Next() {
+		var p AVProduct
+		if err := rows.Scan(&p.Name, &p.Enabled, &p.UpToDate, &p.ProductState, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // PatchStatus is the detail view's patch operations block.
@@ -388,6 +421,10 @@ func (h *Handler) one(w http.ResponseWriter, r *http.Request, id string) {
 	d.Connected = h.live.Connected(d.DeviceID)
 	if d.Patch, err = h.patchStatus(r.Context(), id); err != nil {
 		h.fail(w, "devices: patch status", err)
+		return
+	}
+	if d.Antivirus, err = h.antivirus(r.Context(), id); err != nil {
+		h.fail(w, "devices: antivirus", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
