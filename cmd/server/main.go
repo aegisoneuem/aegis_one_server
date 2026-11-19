@@ -431,17 +431,11 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if pool != nil {
-			if err := pool.Ping(r.Context()); err != nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				w.Write([]byte("database unreachable: " + err.Error()))
-				return
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ready"))
-	})
+	var db dbPinger
+	if pool != nil {
+		db = pool
+	}
+	mux.HandleFunc("/readyz", readyzHandler(db, log))
 	// /healthz and /readyz stay open for orchestrator probes; everything under
 	// /internal requires an API token. Push checks its permission itself (it
 	// depends on the command type).
