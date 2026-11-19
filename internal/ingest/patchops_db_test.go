@@ -15,6 +15,7 @@ import (
 	"time"
 
 	aegisonev1 "aegis-one/gen/aegisone/v1"
+	"aegis-one/internal/kev"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -202,9 +203,36 @@ func TestPatchScanMetadataDB(t *testing.T) {
 		t.Errorf("unrated agent row got an SLA: %v", *sla)
 	}
 	var cves int
-	pool.QueryRow(ctx, `SELECT count(*) FROM patch_cves pc JOIN patch_catalog p ON p.id = pc.patch_id WHERE p.kb_or_advisory_id = $1`, newKB).Scan(&cves)
-	if cves != 1 {
-		t.Errorf("cve links %d, want 1", cves)
+	var linkSource string
+	pool.QueryRow(ctx, `SELECT count(*), max(pc.source) FROM patch_cves pc JOIN patch_catalog p ON p.id = pc.patch_id WHERE p.kb_or_advisory_id = $1`, newKB).Scan(&cves, &linkSource)
+	if cves != 1 || linkSource != "agent_report" {
+		t.Errorf("cve links %d (source %q), want 1 agent_report", cves, linkSource)
+	}
+	// Even if that CVE is on CISA KEV, the agent's link must not make the patch
+	// known-exploited (and so must not give the unrated row the KEV SLA).
+	pool.Exec(ctx, `UPDATE cve_catalog SET is_kev = true, kev_added_at = current_date WHERE cve_id = $1`, cve)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := kev.Apply(ctx, tx); err != nil {
+		t.Fatalf("kev.Apply: %v", err)
+	}
+	if _, err := AssignSLA(ctx, tx, k.DeviceUUID); err != nil {
+		t.Fatalf("AssignSLA: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var hasKEV bool
+	pool.QueryRow(ctx, `SELECT has_kev FROM patch_catalog WHERE kb_or_advisory_id = $1`, newKB).Scan(&hasKEV)
+	if hasKEV {
+		t.Error("agent-reported CVE link flagged the patch has_kev")
+	}
+	pool.QueryRow(ctx, `SELECT s.sla_due_at FROM device_patch_state s JOIN patch_catalog p ON p.id = s.patch_id
+		WHERE s.device_id = $1 AND p.kb_or_advisory_id = $2`, k.DeviceUUID, newKB).Scan(&sla)
+	if sla != nil {
+		t.Errorf("planted KEV link gave the unrated row an SLA: %v", *sla)
 	}
 	var msrcDesc *string
 	var msrcSize *float64

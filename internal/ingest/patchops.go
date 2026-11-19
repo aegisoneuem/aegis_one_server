@@ -219,11 +219,13 @@ func enrichAgentPatch(ctx context.Context, tx pgx.Tx, patchID string, m *aegison
 		return nil
 	}
 	// The CVE may be new to us: a bare cve_catalog row (severity unrated);
-	// the feeds fill in the rest when they carry it.
+	// the feeds fill in the rest when they carry it. The link is recorded as the
+	// agent's claim ('agent_report'): it never drives has_kev, and the MSRC feed
+	// upgrades it to 'msrc' if it confirms it (0030).
 	if _, err := tx.Exec(ctx, `INSERT INTO cve_catalog (cve_id) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING`, cves); err != nil {
 		return fmt.Errorf("add reported CVEs: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO patch_cves (patch_id, cve_id) SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
+	if _, err := tx.Exec(ctx, `INSERT INTO patch_cves (patch_id, cve_id, source) SELECT $1, unnest($2::text[]), 'agent_report' ON CONFLICT DO NOTHING`,
 		patchID, cves); err != nil {
 		return fmt.Errorf("link reported CVEs: %w", err)
 	}

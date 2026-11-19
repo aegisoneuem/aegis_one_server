@@ -123,9 +123,12 @@ func runSync(ctx context.Context, pool *pgxpool.Pool, cves map[string]*CVEDetail
 			summary.PatchesUpdated++
 		}
 
+		// A link an agent reported earlier becomes a feed link once the feed
+		// confirms it - only feed links count for has_kev (kev.Apply).
 		for _, cveID := range kb.CVEIDs {
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO patch_cves (patch_id, cve_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO patch_cves (patch_id, cve_id, source) VALUES ($1, $2, 'msrc')
+				ON CONFLICT (patch_id, cve_id) DO UPDATE SET source = 'msrc' WHERE patch_cves.source <> 'msrc'`,
 				id, cveID); err != nil {
 				return fmt.Errorf("link patch %s to cve %s: %w", kb.KB, cveID, err)
 			}

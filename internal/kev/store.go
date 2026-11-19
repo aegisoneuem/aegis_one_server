@@ -120,6 +120,10 @@ func syncTx(ctx context.Context, pool *pgxpool.Pool, cat *Catalog, s *Summary) e
 // then tightens open SLAs for KEV patches. Called by Sync and at the end of the
 // MSRC patch feed sync (new patch->CVE links can make a patch KEV too).
 //
+// Only links the vendor feed asserted count (patch_cves.source = 'msrc'). An
+// endpoint may link any CVE to a KB it reports; if that could flag the patch
+// known-exploited, one agent would set the fleet's tightest SLA (0030).
+//
 // Tightening rule (not in the schema, a deliberate choice): 0005 fixes an SLA
 // when a patch is first detected missing, but CISA usually lists a CVE on or
 // after release day - after devices have already detected the patch with a
@@ -132,7 +136,7 @@ func Apply(ctx context.Context, tx pgx.Tx) (patchesChanged, deadlinesTightened i
 		FROM (
 			SELECT p2.id, EXISTS (
 				SELECT 1 FROM patch_cves pc JOIN cve_catalog c ON c.cve_id = pc.cve_id
-				WHERE pc.patch_id = p2.id AND c.is_kev) AS kev
+				WHERE pc.patch_id = p2.id AND pc.source = 'msrc' AND c.is_kev) AS kev
 			FROM patch_catalog p2
 		) sub
 		WHERE p.id = sub.id AND p.has_kev IS DISTINCT FROM sub.kev`)
