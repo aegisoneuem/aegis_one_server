@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	aegisonev1 "aegis-one/gen/aegisone/v1"
@@ -31,8 +32,14 @@ type PatchScanSummary struct {
 // below only touches its own 'agent_wua' rows, never the diff's.
 //   - Missing, not superseded -> 'missing' (SLA clock per AssignSLA). A KB not
 //     in the catalog gets a catalog row from the report itself
-//     (catalog_source 'agent_report'); only updates with no KB at all (e.g.
-//     drivers) go to unmatched_patch_reports.
+//     (catalog_source 'agent_report'); only updates with no well-formed KB at
+//     all (e.g. drivers) go to unmatched_patch_reports.
+//     Agent-created rows are UNVERIFIED (security review 2026-11-19): one
+//     compromised endpoint writes them for the whole fleet, so they get
+//     severity 'unrated' (no SLA, not counted as critical; the agent's own
+//     rating is kept in vendor_severity), clipped text, and a KB article URL
+//     only when it points at Microsoft. The MSRC feed takes the row over when
+//     it carries the KB.
 //   - Missing but superseded -> 'superseded': not counted as missing (its
 //     superseding update is reported missing itself), never gets an SLA.
 //   - Installed (the agent's authoritative WUA installed view) -> 'installed'.
@@ -73,8 +80,8 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 			return summary, fmt.Errorf("resolve patch for update %s: %w", m.GetUpdateId(), err)
 		}
 		if !found && firstKB(m) != "" {
-			// The agent's report is the source of truth: a KB the MSRC feed
-			// doesn't know still becomes a catalog row (and so a missing patch).
+			// A KB the MSRC feed doesn't know still becomes a catalog row (and
+			// so a missing patch), marked agent_report / unrated: see above.
 			if patchID, err = upsertAgentReportedPatch(ctx, tx, psr, m); err != nil {
 				return summary, fmt.Errorf("catalog agent-reported update %s: %w", m.GetUpdateId(), err)
 			}
@@ -210,11 +217,11 @@ func (s *Store) PatchScan(ctx context.Context, known *identity.Known, psr *aegis
 	return summary, nil
 }
 
-// resolvePatchID tries every KB the agent reported for one missing update (a
-// cumulative update can list more than one) against patch_catalog.
+// resolvePatchID tries every well-formed KB the agent reported for one missing
+// update (a cumulative update can list more than one) against patch_catalog.
 func resolvePatchID(ctx context.Context, tx pgx.Tx, kbArticleIDs []string) (patchID string, found bool, err error) {
 	for _, kb := range kbArticleIDs {
-		kb = normalizeKB(kb)
+		kb = NormalizeKB(kb)
 		if kb == "" {
 			continue
 		}
@@ -230,22 +237,10 @@ func resolvePatchID(ctx context.Context, tx pgx.Tx, kbArticleIDs []string) (patc
 	return "", false, nil
 }
 
-func normalizeKB(kb string) string {
-	kb = strings.ToUpper(strings.TrimSpace(kb))
-	if kb == "" {
-		return ""
-	}
-	if !strings.HasPrefix(kb, "KB") {
-		kb = "KB" + kb
-	}
-	return kb
-}
-
+// recordUnmatched keeps a missing update that could not be cataloged (no
+// well-formed KB) so an operator can map it by hand.
 func recordUnmatched(ctx context.Context, tx pgx.Tx, deviceUUID string, m *aegisonev1.MissingUpdate) error {
-	kb := ""
-	if len(m.GetKbArticleIds()) > 0 {
-		kb = normalizeKB(m.GetKbArticleIds()[0])
-	}
+	kb := firstKB(m)
 	reportKey := "wua:" + m.GetUpdateId()
 	_, err := tx.Exec(ctx, `
 		INSERT INTO unmatched_patch_reports
@@ -255,13 +250,15 @@ func recordUnmatched(ctx context.Context, tx pgx.Tx, deviceUUID string, m *aegis
 			report_count = unmatched_patch_reports.report_count + 1,
 			last_reported_at = now(),
 			title = EXCLUDED.title`,
-		deviceUUID, reportKey, m.GetUpdateId(), nullIfEmpty(kb), m.GetTitle())
+		deviceUUID, reportKey, clipN(m.GetUpdateId(), 255), nullIfEmpty(kb), clipN(m.GetTitle(), maxText))
 	return err
 }
 
+// firstKB is the first well-formed KB (KBnnnnnnn) the agent listed for the
+// update, "" when there is none.
 func firstKB(m *aegisonev1.MissingUpdate) string {
 	for _, kb := range m.GetKbArticleIds() {
-		if k := normalizeKB(kb); k != "" {
+		if k := NormalizeKB(kb); k != "" {
 			return k
 		}
 	}
@@ -269,17 +266,20 @@ func firstKB(m *aegisonev1.MissingUpdate) string {
 }
 
 // upsertAgentReportedPatch creates the catalog row for a KB only the agent
-// knows about, from its WUA metadata. If the MSRC feed later carries the KB it
-// overwrites these fields and sets catalog_source 'msrc'.
+// knows about, from its WUA metadata, as an unverified row: severity is
+// 'unrated' whatever the agent claims (the claim is kept in vendor_severity),
+// so AssignSLA and the critical counters ignore it until the MSRC feed carries
+// the KB and takes the row over (catalog_source 'msrc', real severity).
 func upsertAgentReportedPatch(ctx context.Context, tx pgx.Tx, psr *aegisonev1.PatchScanResult, m *aegisonev1.MissingUpdate) (string, error) {
 	product := psr.GetProductName()
 	if len(m.GetProducts()) > 0 && m.GetProducts()[0] != "" {
 		product = m.GetProducts()[0]
 	}
+	product = clipN(product, 255)
 	if product == "" {
 		product = "Windows"
 	}
-	title := m.GetTitle()
+	title := clipN(m.GetTitle(), maxText)
 	if title == "" {
 		title = firstKB(m)
 	}
@@ -288,12 +288,42 @@ func upsertAgentReportedPatch(ctx context.Context, tx pgx.Tx, psr *aegisonev1.Pa
 		INSERT INTO patch_catalog
 			(vendor, product, kb_or_advisory_id, title, classification, severity, vendor_severity, os_family,
 			 kb_article_url, catalog_source)
-		VALUES ('microsoft', $1, $2, $3, $4, $5, NULLIF($6, ''), 'windows', NULLIF($7, ''), 'agent_report')
+		VALUES ('microsoft', $1, $2, $3, $4, 'unrated', NULLIF($5, ''), 'windows', NULLIF($6, ''), 'agent_report')
 		ON CONFLICT (vendor, kb_or_advisory_id) DO UPDATE SET kb_or_advisory_id = EXCLUDED.kb_or_advisory_id
 		RETURNING id`,
-		product, firstKB(m), title, classificationOf(m.GetClassification()), severityOf(m.GetMsrcSeverity()),
-		m.GetMsrcSeverity(), m.GetSupportUrl()).Scan(&id)
+		product, firstKB(m), title, classificationOf(m.GetClassification()),
+		clipN(m.GetMsrcSeverity(), 64), agentArticleURL(m.GetSupportUrl())).Scan(&id)
 	return id, err
+}
+
+// articleHosts are the only hosts an agent-supplied KB article link may point
+// at: the link is shown to operators fleet-wide, and the agent is not trusted.
+var articleHosts = map[string]bool{
+	"support.microsoft.com":            true,
+	"catalog.update.microsoft.com":     true,
+	"www.catalog.update.microsoft.com": true,
+	"learn.microsoft.com":              true,
+	"msrc.microsoft.com":               true,
+	"go.microsoft.com":                 true,
+}
+
+// agentArticleURL returns the agent's support URL when it is an https link to
+// a Microsoft documentation host, "" otherwise.
+func agentArticleURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 1024 {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || !articleHosts[strings.ToLower(u.Hostname())] {
+		return ""
+	}
+	for _, c := range raw {
+		if c < 0x21 || c > 0x7e { // whitespace, control or non-ASCII: not a link we'd render
+			return ""
+		}
+	}
+	return raw
 }
 
 // classificationOf maps WUA's update classification names onto
@@ -318,21 +348,6 @@ func classificationOf(c string) string {
 		return "bugfix"
 	}
 	return "enhancement"
-}
-
-// severityOf maps the MSRC rating WUA carries onto patch_catalog.severity.
-func severityOf(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "critical":
-		return "critical"
-	case "important":
-		return "high"
-	case "moderate":
-		return "medium"
-	case "low":
-		return "low"
-	}
-	return "unrated"
 }
 
 // updateIDOf is the reported Windows UpdateID, lowercased to match

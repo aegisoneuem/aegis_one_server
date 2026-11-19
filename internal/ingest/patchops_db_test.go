@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,21 +149,57 @@ func TestPatchScanMetadataDB(t *testing.T) {
 	psr := &aegisonev1.PatchScanResult{ProductName: "Windows 11", Build: "26100.4652", Missing: []*aegisonev1.MissingUpdate{
 		{UpdateId: "new-" + tag, KbArticleIds: []string{newKB}, Title: "New update", Classification: "Security Updates",
 			CveIds: []string{cve, "not-a-cve", cve}, SizeMb: 812.5, RebootRequired: true, RevisionNumber: 3,
-			Description: "Fixes things", SupersededUpdateIds: []string{"OLD-" + tag, "msrc-" + tag}},
-		{UpdateId: "old-" + tag, KbArticleIds: []string{oldKB}, Title: "Old update", Superseded: true},
+			Description: "Fixes things", SupersededUpdateIds: []string{"OLD-" + tag, "msrc-" + tag},
+			// An agent's rating and link are not trusted fleet-wide.
+			MsrcSeverity: "Critical", SupportUrl: "https://attacker.example/" + newKB},
+		{UpdateId: "old-" + tag, KbArticleIds: []string{oldKB}, Title: "Old update", Superseded: true,
+			SupportUrl: "https://support.microsoft.com/help/" + strings.TrimPrefix(oldKB, "KB")},
 		{UpdateId: "msrc-" + tag, KbArticleIds: []string{msrcKB}, Title: "x", Description: "agent text", SizeMb: 5},
+		// Not a KB number: must not become a catalog row, goes to unmatched.
+		{UpdateId: "junk-" + tag, KbArticleIds: []string{"KB" + tag + "-evil"}, Title: strings.Repeat("t", 3000), MsrcSeverity: "Critical"},
 	}}
 	sum, err := s.PatchScan(ctx, k, psr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var desc, reboot string
+	var desc, reboot, severity, source string
+	var vendorSev, articleURL *string
 	var size float64
 	var rev int
-	pool.QueryRow(ctx, `SELECT description, download_size_mb, reboot_behavior, revision FROM patch_catalog WHERE kb_or_advisory_id = $1`, newKB).
-		Scan(&desc, &size, &reboot, &rev)
+	pool.QueryRow(ctx, `SELECT description, download_size_mb, reboot_behavior, revision, severity, coalesce(catalog_source, ''), vendor_severity, kb_article_url
+		FROM patch_catalog WHERE kb_or_advisory_id = $1`, newKB).
+		Scan(&desc, &size, &reboot, &rev, &severity, &source, &vendorSev, &articleURL)
 	if desc != "Fixes things" || size != 812.5 || reboot != "may" || rev != 3 {
 		t.Errorf("agent row: %q %v %s %d", desc, size, reboot, rev)
+	}
+	// Unverified: the claimed "Critical" stays in vendor_severity only, and the
+	// non-Microsoft link is dropped.
+	if severity != "unrated" || source != "agent_report" || vendorSev == nil || *vendorSev != "Critical" || articleURL != nil {
+		t.Errorf("agent row trust: severity %q source %q vendor %v url %v", severity, source, vendorSev, articleURL)
+	}
+	var oldURL *string
+	pool.QueryRow(ctx, `SELECT kb_article_url FROM patch_catalog WHERE kb_or_advisory_id = $1`, oldKB).Scan(&oldURL)
+	if oldURL == nil || !strings.HasPrefix(*oldURL, "https://support.microsoft.com/") {
+		t.Errorf("Microsoft article link dropped: %v", oldURL)
+	}
+	var junkRows, unmatched int
+	var unmatchedKB *string
+	var unmatchedTitle string
+	pool.QueryRow(ctx, `SELECT count(*) FROM patch_catalog WHERE kb_or_advisory_id LIKE 'KB' || $1 || '%'`, strings.ToUpper(tag)).Scan(&junkRows)
+	pool.QueryRow(ctx, `SELECT count(*), max(kb_or_advisory_id), max(title) FROM unmatched_patch_reports WHERE device_id = $1 AND report_key = $2`,
+		k.DeviceUUID, "wua:junk-"+tag).Scan(&unmatched, &unmatchedKB, &unmatchedTitle)
+	if junkRows != 0 || unmatched != 1 || unmatchedKB != nil || len(unmatchedTitle) != 1024 {
+		t.Errorf("junk KB: catalog rows %d unmatched %d kb %v title len %d", junkRows, unmatched, unmatchedKB, len(unmatchedTitle))
+	}
+	if sum.AgentCataloged != 2 || sum.Unmatched != 1 {
+		t.Errorf("summary: cataloged %d unmatched %d", sum.AgentCataloged, sum.Unmatched)
+	}
+	// No SLA for an unverified row, even though the agent said "Critical".
+	var sla *time.Time
+	pool.QueryRow(ctx, `SELECT s.sla_due_at FROM device_patch_state s JOIN patch_catalog p ON p.id = s.patch_id
+		WHERE s.device_id = $1 AND p.kb_or_advisory_id = $2`, k.DeviceUUID, newKB).Scan(&sla)
+	if sla != nil {
+		t.Errorf("unrated agent row got an SLA: %v", *sla)
 	}
 	var cves int
 	pool.QueryRow(ctx, `SELECT count(*) FROM patch_cves pc JOIN patch_catalog p ON p.id = pc.patch_id WHERE p.kb_or_advisory_id = $1`, newKB).Scan(&cves)

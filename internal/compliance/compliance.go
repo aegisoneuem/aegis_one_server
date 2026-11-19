@@ -12,10 +12,14 @@ import (
 // PatchRow is one row of patch_compliance_by_patch: "which patches are hurting
 // us most" - how many devices have each patch missing vs. installed.
 type PatchRow struct {
-	KB               string `json:"kb"`
-	Title            string `json:"title"`
-	Severity         string `json:"severity"`
-	HasKEV           bool   `json:"has_kev"`
+	KB       string `json:"kb"`
+	Title    string `json:"title"`
+	Severity string `json:"severity"`
+	HasKEV   bool   `json:"has_kev"`
+	// Source is patch_catalog.catalog_source: 'msrc' (verified by the feed) or
+	// 'agent_report' (created from one endpoint's scan, unverified, always
+	// 'unrated' - show it as such).
+	Source           string `json:"catalog_source"`
 	DevicesInstalled int    `json:"devices_installed"`
 	DevicesMissing   int    `json:"devices_missing"`
 	DevicesOverdue   int    `json:"devices_overdue"`
@@ -23,7 +27,7 @@ type PatchRow struct {
 
 func ListPatches(ctx context.Context, pool *pgxpool.Pool) ([]PatchRow, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT coalesce(kb_or_advisory_id, ''), title, severity, has_kev,
+		SELECT coalesce(kb_or_advisory_id, ''), title, severity, has_kev, catalog_source,
 		       devices_installed, devices_missing, devices_overdue
 		FROM patch_compliance_by_patch
 		ORDER BY devices_missing DESC, devices_overdue DESC`)
@@ -35,7 +39,7 @@ func ListPatches(ctx context.Context, pool *pgxpool.Pool) ([]PatchRow, error) {
 	var out []PatchRow
 	for rows.Next() {
 		var r PatchRow
-		if err := rows.Scan(&r.KB, &r.Title, &r.Severity, &r.HasKEV, &r.DevicesInstalled, &r.DevicesMissing, &r.DevicesOverdue); err != nil {
+		if err := rows.Scan(&r.KB, &r.Title, &r.Severity, &r.HasKEV, &r.Source, &r.DevicesInstalled, &r.DevicesMissing, &r.DevicesOverdue); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

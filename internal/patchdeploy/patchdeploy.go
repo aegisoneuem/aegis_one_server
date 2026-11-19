@@ -48,6 +48,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -970,6 +971,8 @@ func deref(s *string) string {
 	return *s
 }
 
+// normalizeKB maps "kb5034441" / "5034441" to "KB5034441"; anything that is
+// not a KB number is "" (same rule as ingest.NormalizeKB).
 func normalizeKB(kb string) string {
 	kb = strings.ToUpper(strings.TrimSpace(kb))
 	if kb == "" {
@@ -978,5 +981,10 @@ func normalizeKB(kb string) string {
 	if !strings.HasPrefix(kb, "KB") {
 		kb = "KB" + kb
 	}
+	if !kbRe.MatchString(kb) {
+		return ""
+	}
 	return kb
 }
+
+var kbRe = regexp.MustCompile(`^KB[0-9]{4,8}$`)

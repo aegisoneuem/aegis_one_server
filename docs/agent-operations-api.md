@@ -201,6 +201,18 @@ An agent that has not answered is pushed again on its next connect. A refusal (`
 
 The agent accepts the same version again and leaves safe mode. The alert stays open with `policy_reapplied_at` added, for an admin to resolve.
 
+## Patch catalog trust: agent-reported rows (migration 0029)
+
+An endpoint cab scan can report a KB the MSRC feed does not know. The server still creates a `patch_catalog` row for it (`catalog_source = 'agent_report'`) so the device shows it as missing, but since any enrolled agent can do this for the whole fleet, such a row is **unverified**:
+
+- `severity` is always `unrated` (the agent's own rating is kept in `vendor_severity`), so it gets no SLA and is not counted in `missing_critical`.
+- Only a well-formed KB number (`KB` + 4–8 digits) creates or matches a row; anything else goes to `unmatched_patch_reports`.
+- `kb_article_url` is stored only when it is an `https://` link to a Microsoft documentation host; `title`/`product` are clipped.
+- When the MSRC feed later carries the KB it takes the row over (`catalog_source = 'msrc'`, real severity).
+- `GET /internal/compliance?view=patches` and the device missing-patch list return `catalog_source`, so a console can badge these rows "agent-reported, unverified".
+
+Migration 0029 re-rates the `agent_report` rows that already exist to `unrated`. Still open (needs an architecture decision): CVE links an agent adds to a shared row still count for `has_kev`.
+
 ## Tamper protection: `/internal/tamper` (migration 0028)
 
 Agent 7dc4487 protects itself once it holds an **unprotect passcode**: `sc stop`, `sc config … disabled`, `sc delete`, regedit `Start=4` and a normal uninstall all fail. To stop or uninstall it you need that passcode, or a token signed with the command key. Credential model (Sam, 2026-11-16): **one random passcode per device**.
