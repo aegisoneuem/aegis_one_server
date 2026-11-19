@@ -17,6 +17,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
 
 	aegisonev1 "aegis-one/gen/aegisone/v1"
 	"aegis-one/internal/apiauth"
@@ -45,9 +48,10 @@ func New(dispatcher Dispatcher, store *commands.Store, signingKey ed25519.Privat
 // ServeHTTP handles POST /internal/push.
 //
 // Generic command:   ?device_id=X&type=hostname
-// Install a patch:   ?device_id=X&type=install_patch&kb=KB123&file_path=C:\...\patch.msu[&expected_hash=...&hash_algorithm=sha256]
-// Stage a patch:     ?device_id=X&type=stage_patch&kb=KB123&file_path=x.msu&expected_hash=<sha256>  (agent fetches it by hash)
-// Uninstall a patch: ?device_id=X&type=uninstall_patch&kb=KB123
+// Install a patch:   ?device_id=X&type=install_patch&kb=KB5034441&file_path=C:\...\patch.msu&expected_hash=<sha256>
+// Stage a patch:     ?device_id=X&type=stage_patch&kb=KB5034441&file_path=x.msu&expected_hash=<sha256>  (agent fetches it by hash)
+// Uninstall a patch: ?device_id=X&type=uninstall_patch&kb=KB5034441
+// (expected_hash is required for install and stage; see patchSpec for the rules.)
 // (For a tracked push or stage use /internal/deploy; this is the raw trigger.)
 // Optional on both:  &idempotency_key=K  - a repeat with the same key is NOT re-sent.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -107,25 +111,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch cmdType {
 	case "install_patch", "stage_patch", "uninstall_patch":
 		// All three take an InstallPatchSpec (protobuf), never a raw string.
-		spec := &aegisonev1.InstallPatchSpec{
-			Kb:            q.Get("kb"),
-			FilePath:      q.Get("file_path"),
-			ExpectedHash:  q.Get("expected_hash"),
-			HashAlgorithm: q.Get("hash_algorithm"),
-		}
-		switch {
-		case spec.Kb == "":
-			http.Error(w, cmdType+" requires kb", http.StatusBadRequest)
+		spec, msg := patchSpec(cmdType, q)
+		if msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
 			return
-		case cmdType == "install_patch" && spec.FilePath == "":
-			http.Error(w, "install_patch requires kb and file_path", http.StatusBadRequest)
-			return
-		case cmdType == "stage_patch" && spec.ExpectedHash == "":
-			http.Error(w, "stage_patch requires kb and expected_hash (the agent fetches the file by its sha256)", http.StatusBadRequest)
-			return
-		}
-		if cmdType == "stage_patch" && spec.HashAlgorithm == "" {
-			spec.HashAlgorithm = "sha256"
 		}
 		marshaled, err := proto.Marshal(spec)
 		if err != nil {
@@ -196,6 +185,63 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.log.Info("command pushed", "device_id", deviceID, "command_id", commandID, "type", cmdType, "client", caller.ClientName)
 	fmt.Fprintf(w, "dispatched command_id=%s to device_id=%s\n", commandID, deviceID)
+}
+
+var (
+	kbRe     = regexp.MustCompile(`^KB[0-9]{4,8}$`)
+	sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	// A bare .msu/.cab file name, or an absolute path on a local drive with
+	// backslash separators. No UNC (\\host\share), no forward slashes, no
+	// reserved or control characters in any segment.
+	patchPathRe = regexp.MustCompile(`^(?:[A-Za-z]:\\(?:[^\\/:*?"<>|\x00-\x1f]+\\)*)?[^\\/:*?"<>|\x00-\x1f]+\.(?i:msu|cab)$`)
+)
+
+// patchSpec validates the raw-trigger parameters of install_patch /
+// stage_patch / uninstall_patch. The agent runs wusa/DISM on the file as
+// SYSTEM and, given no expected_hash, skips its integrity check ("dev/test
+// only"), so the server insists on one: content integrity is SHA-256,
+// fail-closed, at every hop. file_path is the name stage_patch cached on the
+// device or a file already on a local drive - never a network path.
+// Returns the spec, or the message for a 400.
+func patchSpec(cmdType string, q url.Values) (*aegisonev1.InstallPatchSpec, string) {
+	spec := &aegisonev1.InstallPatchSpec{
+		Kb:            strings.ToUpper(strings.TrimSpace(q.Get("kb"))),
+		FilePath:      strings.TrimSpace(q.Get("file_path")),
+		ExpectedHash:  strings.ToLower(strings.TrimSpace(q.Get("expected_hash"))),
+		HashAlgorithm: strings.ToLower(strings.TrimSpace(q.Get("hash_algorithm"))),
+	}
+	if !kbRe.MatchString(spec.Kb) {
+		return nil, cmdType + " requires kb in the form KB5034441"
+	}
+	if cmdType == "uninstall_patch" {
+		if spec.FilePath != "" || spec.ExpectedHash != "" || spec.HashAlgorithm != "" {
+			return nil, "uninstall_patch takes only kb"
+		}
+		return spec, ""
+	}
+	if spec.HashAlgorithm == "" {
+		spec.HashAlgorithm = "sha256"
+	}
+	if spec.HashAlgorithm != "sha256" {
+		return nil, "hash_algorithm must be sha256"
+	}
+	if !sha256Re.MatchString(spec.ExpectedHash) {
+		return nil, cmdType + " requires expected_hash, the file's SHA-256 (64 hex digits): without it the agent would install the file unverified"
+	}
+	if cmdType == "install_patch" && spec.FilePath == "" {
+		return nil, "install_patch requires file_path: the .msu/.cab name stage_patch cached, or an absolute local path"
+	}
+	if spec.FilePath != "" {
+		if len(spec.FilePath) > 260 || !patchPathRe.MatchString(spec.FilePath) {
+			return nil, "file_path must be a .msu or .cab file name, or an absolute path on a local drive (backslashes; no UNC)"
+		}
+		for _, seg := range strings.Split(spec.FilePath, `\`) {
+			if seg == "." || seg == ".." {
+				return nil, "file_path must not contain . or .. segments"
+			}
+		}
+	}
+	return spec, ""
 }
 
 func randomKey() (string, error) {

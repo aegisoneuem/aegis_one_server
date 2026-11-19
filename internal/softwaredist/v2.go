@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
 	"regexp"
 	"strconv"
@@ -295,8 +296,11 @@ func ValidateBundle(r io.ReaderAt, size int64) (*BundleInfo, error) {
 		if err := checkMemberPath(name); err != nil {
 			return nil, err
 		}
-		if f.Mode()&0o170000 == 0o120000 { // symlink
-			return nil, userErr("bundle member %q is a link", f.Name)
+		// fs.FileMode keeps the file type in its high bits (ModeSymlink, ...),
+		// never in the Unix 0o170000 field, so test the mode's type bits. Only
+		// files and directories may be members: the agent extracts what it finds.
+		if f.Mode()&fs.ModeType&^fs.ModeDir != 0 {
+			return nil, userErr("bundle member %q is not a regular file or directory (link/device)", f.Name)
 		}
 		if other, dup := lower[strings.ToLower(name)]; dup {
 			return nil, userErr("bundle members %q and %q differ only by case", other, name)

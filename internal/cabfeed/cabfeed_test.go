@@ -36,3 +36,37 @@ func TestSameVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckRedirect(t *testing.T) {
+	req := func(u string) *http.Request {
+		r, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	for _, ok := range []string{
+		"https://download.windowsupdate.com/wsusscn2.cab",
+		"https://catalog.s.download.windowsupdate.com/microsoftupdate/v6/wsusscan/wsusscn2.cab",
+		"https://go.microsoft.com/fwlink/?LinkID=74689",
+		"https://WINDOWSUPDATE.COM/x",
+	} {
+		if err := checkRedirect(req(ok), nil); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"http://download.windowsupdate.com/wsusscn2.cab", // downgrade
+		"https://windowsupdate.com.evil.example/wsusscn2.cab",
+		"https://evilmicrosoft.com/wsusscn2.cab",
+		"https://cdn.example.net/wsusscn2.cab",
+		"ftp://microsoft.com/wsusscn2.cab",
+	} {
+		if err := checkRedirect(req(bad), nil); err == nil {
+			t.Errorf("%s: followed", bad)
+		}
+	}
+	if err := checkRedirect(req("https://download.windowsupdate.com/x"), make([]*http.Request, 5)); err == nil {
+		t.Error("redirect loop followed")
+	}
+}

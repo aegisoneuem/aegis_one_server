@@ -6,6 +6,7 @@ package complianceapi
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"aegis-one/internal/compliance"
@@ -15,10 +16,22 @@ import (
 
 type Handler struct {
 	pool *pgxpool.Pool
+	log  *slog.Logger
 }
 
-func New(pool *pgxpool.Pool) *Handler {
-	return &Handler{pool: pool}
+func New(pool *pgxpool.Pool, log *slog.Logger) *Handler {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Handler{pool: pool, log: log}
+}
+
+// internalError logs the cause and answers with a fixed message: a database
+// error can carry SQL fragments, table names or connection details, which an
+// API client with reports.view has no business seeing.
+func (h *Handler) internalError(w http.ResponseWriter, view string, err error) {
+	h.log.Error("compliance query failed", "view", view, "error", err.Error())
+	http.Error(w, "internal error", http.StatusInternalServerError)
 }
 
 // GET /internal/compliance            -> fleet totals
@@ -36,7 +49,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "patches":
 		rows, err := compliance.ListPatches(ctx, h.pool)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			h.internalError(w, "patches", err)
 			return
 		}
 		writeJSON(w, rows)
@@ -53,7 +66,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			h.internalError(w, "missing", err)
 			return
 		}
 		writeJSON(w, report)
@@ -61,7 +74,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "devices":
 		rows, err := compliance.ListDevices(ctx, h.pool)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			h.internalError(w, "devices", err)
 			return
 		}
 		writeJSON(w, rows)
@@ -69,7 +82,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		totals, err := compliance.FleetTotals(ctx, h.pool)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			h.internalError(w, "totals", err)
 			return
 		}
 		writeJSON(w, totals)

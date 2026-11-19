@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -66,6 +67,38 @@ func TestValidateBundle(t *testing.T) {
 	notZip := bytes.NewReader([]byte("not a zip"))
 	if _, err := ValidateBundle(notZip, notZip.Size()); err == nil {
 		t.Error("non-zip accepted")
+	}
+}
+
+// A member that is a symlink (or any other non-regular file) is refused even
+// when the manifest lists it correctly: the agent would extract it and a later
+// step could follow it out of the install directory.
+func TestValidateBundleRejectsLinks(t *testing.T) {
+	target := `C:\Windows\System32\cmd.exe`
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	hdr := &zip.FileHeader{Name: "setup.exe", Method: zip.Deflate}
+	hdr.SetMode(fs.ModeSymlink | 0o777)
+	w, err := zw.CreateHeader(hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Write([]byte(target))
+	sum := sha256.Sum256([]byte(target))
+	m := manifest{Version: 1}
+	m.Files = append(m.Files, struct {
+		Path      string `json:"path"`
+		Size      int64  `json:"size"`
+		SHA256    string `json:"sha256"`
+		Directory bool   `json:"directory"`
+	}{Path: "setup.exe", Size: int64(len(target)), SHA256: hex.EncodeToString(sum[:])})
+	mb, _ := json.Marshal(m)
+	mw, _ := zw.Create(bundleManifest)
+	mw.Write(mb)
+	zw.Close()
+	r := bytes.NewReader(buf.Bytes())
+	if _, err := ValidateBundle(r, r.Size()); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("symlink member: err = %v", err)
 	}
 }
 

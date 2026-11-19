@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"aegis-one/internal/commands"
 
@@ -281,6 +283,10 @@ func (t *Transfers) pack(ctx context.Context, x transfer) error {
 	if err := json.Unmarshal([]byte(detail), &res); err != nil || len(res.SHA256) != 64 {
 		return t.fail(ctx, x, "pack result has no archive digest")
 	}
+	entries, err := validEntries(res.Entries)
+	if err != nil {
+		return t.fail(ctx, x, "pack result has an invalid manifest: "+err.Error())
+	}
 	// The uploaded archive must be the one the agent says it packed.
 	var uploadID, uploadSHA string
 	err = t.pool.QueryRow(ctx, `SELECT id::text, sha256 FROM agent_uploads WHERE command_id::text = $1 ORDER BY created_at DESC LIMIT 1`,
@@ -298,7 +304,7 @@ func (t *Transfers) pack(ctx context.Context, x transfer) error {
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
 	if _, err := tx.Exec(ctx, `
 		UPDATE file_transfers SET status = 'distributing', upload_id = $2, archive_sha256 = $3, entries = $4::jsonb, updated_at = now()
-		WHERE id = $1`, x.id, uploadID, strings.ToLower(res.SHA256), string(orEmptyArray(res.Entries))); err != nil {
+		WHERE id = $1`, x.id, uploadID, strings.ToLower(res.SHA256), string(entries)); err != nil {
 		return err
 	}
 	// One random content id per destination: FetchContent "nsh-file" serves
@@ -540,11 +546,96 @@ func (t *Transfers) View(ctx context.Context, id string) (*TransferView, error) 
 	return &v, rows.Err()
 }
 
-func orEmptyArray(b json.RawMessage) json.RawMessage {
-	if len(b) == 0 {
-		return json.RawMessage("[]")
+// entry mirrors the agent's fileops.Entry: Source is the absolute path on the
+// source device (remove-manifest re-hashes and deletes it there), Name the
+// archive-relative path every destination unpacks to.
+type entry struct {
+	Source    string `json:"source"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
+	SHA256    string `json:"sha256,omitempty"`
+	Directory bool   `json:"directory,omitempty"`
+}
+
+const (
+	maxTransferEntries       = 10000     // the agent's fileops.DefaultMaxFiles
+	maxTransferBytes   int64 = 500 << 20 // fileops.DefaultMaxBytes: pack is sent without max_bytes
+	maxManifestBytes         = 2 << 20   // fileops.MaxManifestBytes
+)
+
+var sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// validEntries checks the manifest a source agent returned from pack before
+// the server stores it and relays it, signed, to every destination (unpack)
+// and back to the source (remove-manifest). The destination agent has its own
+// checks, but the server must not sign a manifest it has not looked at: a
+// compromised source could otherwise aim traversal names or absurd sizes at
+// other devices. Returns the canonical JSON (known fields only).
+func validEntries(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) > maxManifestBytes {
+		return nil, errors.New("larger than 2 MiB")
 	}
-	return b
+	var list []entry
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, errors.New("not a JSON array of entries")
+	}
+	if len(list) == 0 || len(list) > maxTransferEntries {
+		return nil, fmt.Errorf("%d entries (want 1-%d)", len(list), maxTransferEntries)
+	}
+	var total int64
+	seen := map[string]bool{}
+	for i, e := range list {
+		if err := checkEntryName(e.Name); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+		key := strings.ToLower(strings.ReplaceAll(e.Name, `\`, "/"))
+		if seen[key] {
+			return nil, fmt.Errorf("entry %d: duplicate name %q", i, e.Name)
+		}
+		seen[key] = true
+		if err := checkPath("source", e.Source); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+		if e.Size < 0 || e.Size > maxTransferBytes-total {
+			return nil, fmt.Errorf("entry %d: size out of range", i)
+		}
+		total += e.Size
+		if e.Directory {
+			if e.Size != 0 || e.SHA256 != "" {
+				return nil, fmt.Errorf("entry %d: a directory with a size or digest", i)
+			}
+			continue
+		}
+		// The agent compares digests as lower-case hex strings.
+		if !sha256Re.MatchString(e.SHA256) {
+			return nil, fmt.Errorf("entry %d: file without a sha256", i)
+		}
+	}
+	return json.Marshal(list)
+}
+
+// checkEntryName applies the agent's own archive-path rule (fileops.safeName)
+// plus a length cap: relative, no empty / . / .. segments, no reserved or
+// control characters, no segment ending in a space or dot.
+func checkEntryName(name string) error {
+	if name == "" || len(name) > 1024 {
+		return errors.New("name empty or longer than 1024 bytes")
+	}
+	n := strings.ReplaceAll(name, `\`, "/")
+	if strings.HasPrefix(n, "/") {
+		return fmt.Errorf("absolute archive path %q", name)
+	}
+	for _, p := range strings.Split(n, "/") {
+		if p == "" || p == "." || p == ".." || strings.ContainsAny(p, `<>:"|?*`) || strings.TrimRight(p, " .") != p {
+			return fmt.Errorf("unsafe archive path %q", name)
+		}
+		for _, c := range p {
+			if unicode.IsControl(c) {
+				return fmt.Errorf("control character in archive path %q", name)
+			}
+		}
+	}
+	return nil
 }
 
 func deref(s *string) string {

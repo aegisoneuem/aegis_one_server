@@ -467,7 +467,7 @@ func httpMux(pool *pgxpool.Pool, agentSrv *grpcserver.Server, cmdStore *commands
 		mux.Handle("/internal/tamper", th)
 		mux.Handle("/internal/tamper/", th)
 	}
-	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool)))
+	mux.Handle("/internal/compliance", auth.Require(apiauth.PermReportsView, complianceapi.New(pool, log)))
 	if pool != nil {
 		// Checks devices.view / devices.manage per route.
 		dh := auth.Require("", devices.New(pool, agentSrv, log))

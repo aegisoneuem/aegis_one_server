@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"aegis-one/internal/feedrun"
@@ -93,7 +94,10 @@ func Sync(ctx context.Context, pool *pgxpool.Pool, contentDir string) (Result, e
 		}
 		// No overall client timeout: a 640 MB body can legitimately take many
 		// minutes; the caller's ctx bounds the run instead.
-		client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, ResponseHeaderTimeout: time.Minute}}
+		client := &http.Client{
+			Transport:     &http.Transport{Proxy: http.ProxyFromEnvironment, ResponseHeaderTimeout: time.Minute},
+			CheckRedirect: checkRedirect,
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("cab: request: %w", err)
@@ -123,6 +127,34 @@ func Sync(ctx context.Context, pool *pgxpool.Pool, contentDir string) (Result, e
 		return etag, 1, 0, nil
 	})
 	return res, err
+}
+
+// checkRedirect lets the CDN bounce the request between Microsoft hosts over
+// HTTPS and nowhere else. Go's default follows any redirect, so a redirect to
+// another origin (or to plain http) would make whatever that origin serves the
+// fleet's scan catalog - the MSCF check only proves it is *a* cab. Microsoft
+// does not Authenticode-anchor the cab for us here (see the package comment),
+// so the source host is the integrity anchor we have.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("cab: too many redirects")
+	}
+	if req.URL.Scheme != "https" || !microsoftHost(req.URL.Hostname()) {
+		return fmt.Errorf("cab: refusing redirect to %s://%s", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+// microsoftHost reports whether h is a Microsoft download host: the domain
+// itself or any subdomain, never a look-alike (windowsupdate.com.example).
+func microsoftHost(h string) bool {
+	h = strings.ToLower(h)
+	for _, d := range []string{"windowsupdate.com", "microsoft.com"} {
+		if h == d || strings.HasSuffix(h, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 // sameVersion reports whether a 200 response is the cab we already have: same
