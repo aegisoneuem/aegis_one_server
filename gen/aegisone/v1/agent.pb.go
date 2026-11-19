@@ -1,19 +1,16 @@
 // =====================================================================================
-// AEGIS ONE - Agent <-> Server contract, as implemented by the shipped agent.
+// AEGIS ONE - Agent <-> Server contract (package aegisone.v1).
 //
-// SOURCE OF TRUTH: the agent team's aegis_one_proto module (grpc/agent.proto,
-// owner: Vijay). That source was not available, so this file was RECOVERED from
-// the FileDescriptorProto that protoc-gen-go embeds in the compiled agent
-// (dist/AegisOneClient.exe) and mockserver (dist/mockserver.exe); both binaries
-// carry byte-identical descriptors. It is checked against that descriptor
-// (same package, messages, fields, numbers, types, reserved ranges, service);
-// only the file name and go_package differ, neither of which is on the wire.
-// Replace it with the agent team's real file as soon as that is available, and
-// regenerate.
+// SOURCE OF TRUTH: the agent team's aegis_one_proto module, grpc/agent.proto
+// (owner: Vijay). This file is that file verbatim as of upstream commit d1fed59
+// (2026-11-19) with ONE change: go_package points at this module's gen/ tree.
+// Do not edit anything else here. To change the contract, change it upstream,
+// copy the file again, then run
+//   buf generate --path proto/aegisone/v1/agent.proto
+//   buf breaking --against '.git#branch=main'
 //
-// Last re-verified 2026-11-08 against agent zip 4 (proto commits 88b3709,
-// 2240a16, e1d3d6b): inventory, audit events, resume offset, command
-// attribution, software deploy v2 fields. Normalized descriptors are identical.
+// Until 2026-11-19 this file was recovered from the descriptor embedded in the
+// shipped agent binary; that copy matched the upstream file field for field.
 //
 // Command signatures (Command.signature) are not described by this file: they
 // are Ed25519 over commandsign.CanonicalBytes - see internal/signing.
@@ -42,17 +39,22 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// ActionPhase is the lifecycle stage of ANY server-dispatched action (patch
+// install, stage/pre-cache, scan, reboot, future software deploy). The agent
+// streams an ActionStatus at each transition; SUCCESS, FAILED and NOT_APPLICABLE
+// are terminal. Scheduled/Pending is a SERVER-side state (scheduling is
+// server-driven) — the agent only reports from QUEUED onward.
 type ActionPhase int32
 
 const (
 	ActionPhase_ACTION_PHASE_UNSPECIFIED    ActionPhase = 0
-	ActionPhase_ACTION_PHASE_QUEUED         ActionPhase = 1
-	ActionPhase_ACTION_PHASE_DOWNLOADING    ActionPhase = 2
-	ActionPhase_ACTION_PHASE_VERIFYING      ActionPhase = 3
-	ActionPhase_ACTION_PHASE_RUNNING        ActionPhase = 4
-	ActionPhase_ACTION_PHASE_SUCCESS        ActionPhase = 5
-	ActionPhase_ACTION_PHASE_FAILED         ActionPhase = 6
-	ActionPhase_ACTION_PHASE_NOT_APPLICABLE ActionPhase = 7
+	ActionPhase_ACTION_PHASE_QUEUED         ActionPhase = 1 // accepted, waiting to run
+	ActionPhase_ACTION_PHASE_DOWNLOADING    ActionPhase = 2 // fetching content (peer-cache) into the local cache
+	ActionPhase_ACTION_PHASE_VERIFYING      ActionPhase = 3 // decrypt + integrity/signature check
+	ActionPhase_ACTION_PHASE_RUNNING        ActionPhase = 4 // executing (DISM install, offline scan, reboot schedule, ...)
+	ActionPhase_ACTION_PHASE_SUCCESS        ActionPhase = 5 // completed / fixed (e.g. install exit 0 / 3010)
+	ActionPhase_ACTION_PHASE_FAILED         ActionPhase = 6 // failed (exit_code + reason)
+	ActionPhase_ACTION_PHASE_NOT_APPLICABLE ActionPhase = 7 // nothing to do (already installed / not applicable / skipped)
 )
 
 // Enum value maps for ActionPhase.
@@ -107,17 +109,33 @@ func (ActionPhase) EnumDescriptor() ([]byte, []int) {
 }
 
 type Heartbeat struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	DeviceId          string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	AgentVersion      string                 `protobuf:"bytes,2,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	Os                string                 `protobuf:"bytes,3,opt,name=os,proto3" json:"os,omitempty"`
-	Hostname          string                 `protobuf:"bytes,4,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	Timestamp         int64                  `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	SchemaVersion     string                 `protobuf:"bytes,6,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
-	AgentCapabilities []string               `protobuf:"bytes,7,rep,name=agent_capabilities,json=agentCapabilities,proto3" json:"agent_capabilities,omitempty"`
-	DeviceType        string                 `protobuf:"bytes,8,opt,name=device_type,json=deviceType,proto3" json:"device_type,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	DeviceId     string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	AgentVersion string                 `protobuf:"bytes,2,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	Os           string                 `protobuf:"bytes,3,opt,name=os,proto3" json:"os,omitempty"`
+	Hostname     string                 `protobuf:"bytes,4,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	Timestamp    int64                  `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// schema_version is the stable version of the telemetry contract the
+	// agent speaks ("1" in Phase 1). The server gates feature rollouts on
+	// this, NOT on the free-form agent_version string. Breaking changes
+	// bump this; additive changes do not.
+	SchemaVersion string `protobuf:"bytes,6,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	// agent_capabilities is the list of action types + feature flags this
+	// agent supports — the server dispatches only known-supported types,
+	// which keeps older agents safe when the server adds new task kinds.
+	// Example entries: "software_deploy", "software_deploy_bundle",
+	// "software_deploy_workflow", "install_patch", "stage_patch",
+	// "collect_file", "run_command", "open_shell", "scan_now", "reboot",
+	// "report_device_state", "script_content_audit". Content is informative
+	// and server-tolerant (unknown strings are safely ignored).
+	AgentCapabilities []string `protobuf:"bytes,7,rep,name=agent_capabilities,json=agentCapabilities,proto3" json:"agent_capabilities,omitempty"`
+	// device_type is the agent's role on the fleet. Phase 1: "endpoint"
+	// (laptop/desktop/server). Phase 2 adds "probe" (NMS collector). Set
+	// here so server-side storage and console filters key off a dedicated
+	// field from day one; adding more values later is non-breaking.
+	DeviceType    string `protobuf:"bytes,8,opt,name=device_type,json=deviceType,proto3" json:"device_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -267,14 +285,35 @@ func (x *CommandResult) GetMessage() string {
 }
 
 type Command struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CommandId     string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
-	Payload       []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
-	Signature     []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
-	Actor         string                 `protobuf:"bytes,5,opt,name=actor,proto3" json:"actor,omitempty"`
-	Source        string                 `protobuf:"bytes,6,opt,name=source,proto3" json:"source,omitempty"`
-	IssuedAt      int64                  `protobuf:"varint,7,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	CommandId string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Type      string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	Payload   []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	Signature []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
+	// Attribution — populated by the dispatcher (console / server / mock)
+	// when the command is signed. The agent treats these as advisory for
+	// logging and audit; the signature on fields 1-4 is what proves the
+	// command is authentic. These three fields extend the signed envelope
+	// on servers that implement the Phase-1 FR3 audit requirement; older
+	// dispatchers leave them empty and the agent logs them as unknown.
+	//
+	// actor: the human / system that initiated the command.
+	//   Examples: "nsh:<os-user>@<mock-host>"
+	//             "console:<console-user>@<console-url>"
+	//             "server:api"
+	//             "server:schedule"
+	//             "server:auto" (mock env-var-driven dispatch)
+	Actor string `protobuf:"bytes,5,opt,name=actor,proto3" json:"actor,omitempty"`
+	// source: where the dispatcher ran. Useful when the same actor can
+	// operate from multiple surfaces (web console, CLI, NSH REPL).
+	//   Examples: "mockserver.nsh"
+	//             "console.web"
+	//             "server.scheduler"
+	Source string `protobuf:"bytes,6,opt,name=source,proto3" json:"source,omitempty"`
+	// issued_at: unix seconds at the moment the operator clicked "run" /
+	// typed enter / the scheduler fired. Distinct from the ActionStatus
+	// started_at (which is when the agent began executing).
+	IssuedAt      int64 `protobuf:"varint,7,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -358,25 +397,35 @@ func (x *Command) GetIssuedAt() int64 {
 	return 0
 }
 
+// MissingUpdate is one not-installed update applicable to the device, found by
+// scanning locally against the server-provided wsusscn2.cab (no internet). It
+// carries the full metadata a UEM console (BigFix/ManageEngine/Tanium style)
+// needs to list, filter, categorize and group patches. The agent reports ALL
+// applicable not-installed updates and TAGS each one (see `superseded`); it does
+// NOT drop any — categorization and patch policy are the server/console's job.
 type MissingUpdate struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	UpdateId            string                 `protobuf:"bytes,1,opt,name=update_id,json=updateId,proto3" json:"update_id,omitempty"`
-	KbArticleIds        []string               `protobuf:"bytes,2,rep,name=kb_article_ids,json=kbArticleIds,proto3" json:"kb_article_ids,omitempty"`
-	Title               string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
-	Classification      string                 `protobuf:"bytes,4,opt,name=classification,proto3" json:"classification,omitempty"`
-	Products            []string               `protobuf:"bytes,5,rep,name=products,proto3" json:"products,omitempty"`
-	Type                string                 `protobuf:"bytes,6,opt,name=type,proto3" json:"type,omitempty"`
-	MsrcSeverity        string                 `protobuf:"bytes,7,opt,name=msrc_severity,json=msrcSeverity,proto3" json:"msrc_severity,omitempty"`
-	CveIds              []string               `protobuf:"bytes,8,rep,name=cve_ids,json=cveIds,proto3" json:"cve_ids,omitempty"`
-	SizeMb              float64                `protobuf:"fixed64,9,opt,name=size_mb,json=sizeMb,proto3" json:"size_mb,omitempty"`
-	RebootRequired      bool                   `protobuf:"varint,10,opt,name=reboot_required,json=rebootRequired,proto3" json:"reboot_required,omitempty"`
-	Superseded          bool                   `protobuf:"varint,11,opt,name=superseded,proto3" json:"superseded,omitempty"`
-	SupersededUpdateIds []string               `protobuf:"bytes,12,rep,name=superseded_update_ids,json=supersededUpdateIds,proto3" json:"superseded_update_ids,omitempty"`
-	SecurityBulletinIds []string               `protobuf:"bytes,13,rep,name=security_bulletin_ids,json=securityBulletinIds,proto3" json:"security_bulletin_ids,omitempty"`
-	RevisionNumber      int32                  `protobuf:"varint,14,opt,name=revision_number,json=revisionNumber,proto3" json:"revision_number,omitempty"`
-	SupportUrl          string                 `protobuf:"bytes,15,opt,name=support_url,json=supportUrl,proto3" json:"support_url,omitempty"`
-	Description         string                 `protobuf:"bytes,16,opt,name=description,proto3" json:"description,omitempty"`
-	MinSizeMb           float64                `protobuf:"fixed64,17,opt,name=min_size_mb,json=minSizeMb,proto3" json:"min_size_mb,omitempty"`
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	UpdateId       string                 `protobuf:"bytes,1,opt,name=update_id,json=updateId,proto3" json:"update_id,omitempty"` // WUA Identity.UpdateID (GUID)
+	KbArticleIds   []string               `protobuf:"bytes,2,rep,name=kb_article_ids,json=kbArticleIds,proto3" json:"kb_article_ids,omitempty"`
+	Title          string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	Classification string                 `protobuf:"bytes,4,opt,name=classification,proto3" json:"classification,omitempty"` // "Security Updates" | "Critical Updates" | ...
+	Products       []string               `protobuf:"bytes,5,rep,name=products,proto3" json:"products,omitempty"`
+	Type           string                 `protobuf:"bytes,6,opt,name=type,proto3" json:"type,omitempty"`                                     // "Software" | "Driver"
+	MsrcSeverity   string                 `protobuf:"bytes,7,opt,name=msrc_severity,json=msrcSeverity,proto3" json:"msrc_severity,omitempty"` // "Critical" | "Important" | ...
+	CveIds         []string               `protobuf:"bytes,8,rep,name=cve_ids,json=cveIds,proto3" json:"cve_ids,omitempty"`
+	SizeMb         float64                `protobuf:"fixed64,9,opt,name=size_mb,json=sizeMb,proto3" json:"size_mb,omitempty"` // MaxDownloadSize (upper bound; bundles report the superset max)
+	RebootRequired bool                   `protobuf:"varint,10,opt,name=reboot_required,json=rebootRequired,proto3" json:"reboot_required,omitempty"`
+	// superseded = this update is replaced by a newer update that is ALSO in this
+	// same result set, so it is applicable-but-not-actionable: the console lists
+	// it in its "superseded / no longer required" category and excludes it from
+	// the actionable "missing" count and download-size totals.
+	Superseded          bool     `protobuf:"varint,11,opt,name=superseded,proto3" json:"superseded,omitempty"`
+	SupersededUpdateIds []string `protobuf:"bytes,12,rep,name=superseded_update_ids,json=supersededUpdateIds,proto3" json:"superseded_update_ids,omitempty"` // UpdateIDs this update itself replaces (supersedence chain)
+	SecurityBulletinIds []string `protobuf:"bytes,13,rep,name=security_bulletin_ids,json=securityBulletinIds,proto3" json:"security_bulletin_ids,omitempty"` // legacy MS bulletin IDs (e.g. "MS17-010")
+	RevisionNumber      int32    `protobuf:"varint,14,opt,name=revision_number,json=revisionNumber,proto3" json:"revision_number,omitempty"`                 // WUA Identity.RevisionNumber
+	SupportUrl          string   `protobuf:"bytes,15,opt,name=support_url,json=supportUrl,proto3" json:"support_url,omitempty"`                              // SupportUrl ("more info" link for the console)
+	Description         string   `protobuf:"bytes,16,opt,name=description,proto3" json:"description,omitempty"`                                              // human-readable update description
+	MinSizeMb           float64  `protobuf:"fixed64,17,opt,name=min_size_mb,json=minSizeMb,proto3" json:"min_size_mb,omitempty"`                             // MinDownloadSize (realistic lower bound vs the superset size_mb)
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -530,19 +579,26 @@ func (x *MissingUpdate) GetMinSizeMb() float64 {
 	return 0
 }
 
+// PatchScanResult is what the agent sends after a local scan (Model B, SCCM /
+// BladeLogic style): the device's build/identity plus the list of missing
+// updates it computed from the server-provided catalog. The server stores this
+// and drives remediation; the endpoint never touches the internet.
 type PatchScanResult struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	DeviceId       string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	ProductName    string                 `protobuf:"bytes,2,opt,name=product_name,json=productName,proto3" json:"product_name,omitempty"`
-	DisplayVersion string                 `protobuf:"bytes,3,opt,name=display_version,json=displayVersion,proto3" json:"display_version,omitempty"`
-	Build          string                 `protobuf:"bytes,4,opt,name=build,proto3" json:"build,omitempty"`
-	Architecture   string                 `protobuf:"bytes,5,opt,name=architecture,proto3" json:"architecture,omitempty"`
-	CollectedAt    int64                  `protobuf:"varint,6,opt,name=collected_at,json=collectedAt,proto3" json:"collected_at,omitempty"`
-	Source         string                 `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
+	ProductName    string                 `protobuf:"bytes,2,opt,name=product_name,json=productName,proto3" json:"product_name,omitempty"`          // e.g. "Windows 11 Pro"
+	DisplayVersion string                 `protobuf:"bytes,3,opt,name=display_version,json=displayVersion,proto3" json:"display_version,omitempty"` // e.g. "23H2"
+	Build          string                 `protobuf:"bytes,4,opt,name=build,proto3" json:"build,omitempty"`                                         // e.g. "22631.7517"
+	Architecture   string                 `protobuf:"bytes,5,opt,name=architecture,proto3" json:"architecture,omitempty"`                           // "amd64" | "arm64" | "x86"
+	CollectedAt    int64                  `protobuf:"varint,6,opt,name=collected_at,json=collectedAt,proto3" json:"collected_at,omitempty"`         // unix seconds
+	Source         string                 `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`                                       // "offline-cab" | "online" (traceability)
 	Missing        []*MissingUpdate       `protobuf:"bytes,8,rep,name=missing,proto3" json:"missing,omitempty"`
-	Installed      []*MissingUpdate       `protobuf:"bytes,9,rep,name=installed,proto3" json:"installed,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Authoritative INSTALLED updates (WUA view — what the system/console shows),
+	// with the same rich metadata as `missing`. This is the source of the console's
+	// "installed patches" list (the coarse CBS-registry KB list was dropped).
+	Installed     []*MissingUpdate `protobuf:"bytes,9,rep,name=installed,proto3" json:"installed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PatchScanResult) Reset() {
@@ -638,13 +694,23 @@ func (x *PatchScanResult) GetInstalled() []*MissingUpdate {
 	return nil
 }
 
+// InstallPatchSpec is the structured payload the server puts inside a signed
+// Command of type "install_patch". The server delivers the patch file to the
+// endpoint out-of-band (peer-cache) and names its LOCAL path here; the agent
+// only ever touches that local file — never the network. The signature on the
+// enclosing Command covers the serialized bytes of this message.
 type InstallPatchSpec struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kb            string                 `protobuf:"bytes,1,opt,name=kb,proto3" json:"kb,omitempty"`
-	FilePath      string                 `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
-	ExpectedHash  string                 `protobuf:"bytes,3,opt,name=expected_hash,json=expectedHash,proto3" json:"expected_hash,omitempty"`
-	HashAlgorithm string                 `protobuf:"bytes,4,opt,name=hash_algorithm,json=hashAlgorithm,proto3" json:"hash_algorithm,omitempty"`
-	OsBuild       string                 `protobuf:"bytes,5,opt,name=os_build,json=osBuild,proto3" json:"os_build,omitempty"`
+	Kb            string                 `protobuf:"bytes,1,opt,name=kb,proto3" json:"kb,omitempty"`                                            // e.g. "KB5126052" (reporting / correlation)
+	FilePath      string                 `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`                // LOCAL path where the server delivered the file
+	ExpectedHash  string                 `protobuf:"bytes,3,opt,name=expected_hash,json=expectedHash,proto3" json:"expected_hash,omitempty"`    // integrity check (hex-encoded digest)
+	HashAlgorithm string                 `protobuf:"bytes,4,opt,name=hash_algorithm,json=hashAlgorithm,proto3" json:"hash_algorithm,omitempty"` // "sha256" (default) | "sha512" | ... (configurable)
+	// os_build is the OS build this KB produces (e.g. "22621.7584"), from the server
+	// catalog. Used on UNINSTALL to find the cumulative update's CBS package
+	// (Package_for_RollupFix~...~<build>...) — LCU package names carry the build, not
+	// the KB. Standalone KBs (Package_for_KB<n>~...) are matched by KB and don't need
+	// it. Optional; without it an LCU uninstall falls back to the WUA path.
+	OsBuild       string `protobuf:"bytes,5,opt,name=os_build,json=osBuild,proto3" json:"os_build,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -714,6 +780,9 @@ func (x *InstallPatchSpec) GetOsBuild() string {
 	return ""
 }
 
+// RebootSpec is the payload of a signed "reboot" command: the server decides
+// when a device reboots (e.g. a maintenance window). delay_seconds is the grace
+// period; message is shown to any logged-in users.
 type RebootSpec struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DelaySeconds  int32                  `protobuf:"varint,1,opt,name=delay_seconds,json=delaySeconds,proto3" json:"delay_seconds,omitempty"`
@@ -766,35 +835,107 @@ func (x *RebootSpec) GetMessage() string {
 	return ""
 }
 
+// SoftwareDeploySpec is the payload of a signed "software_deploy" command: the
+// server tells the agent to install (or uninstall) a catalog package. The agent
+// runs ANY installer the payload names (msi/exe/ps1/bat) — executing a PAYLOAD
+// is not the agent using PowerShell for its own logic. Targeting, scheduling and
+// rollout are SERVER/console side; the agent only executes one signed deploy and
+// reports an ActionStatus (action_type = "software_deploy").
 type SoftwareDeploySpec struct {
-	state                  protoimpl.MessageState   `protogen:"open.v1"`
-	PackageId              string                   `protobuf:"bytes,1,opt,name=package_id,json=packageId,proto3" json:"package_id,omitempty"`
-	Name                   string                   `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Version                string                   `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
-	Action                 string                   `protobuf:"bytes,4,opt,name=action,proto3" json:"action,omitempty"`
-	InstallerType          string                   `protobuf:"bytes,5,opt,name=installer_type,json=installerType,proto3" json:"installer_type,omitempty"`
-	FilePath               string                   `protobuf:"bytes,6,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
-	ExpectedHash           string                   `protobuf:"bytes,7,opt,name=expected_hash,json=expectedHash,proto3" json:"expected_hash,omitempty"`
-	HashAlgorithm          string                   `protobuf:"bytes,8,opt,name=hash_algorithm,json=hashAlgorithm,proto3" json:"hash_algorithm,omitempty"`
-	SilentArgs             string                   `protobuf:"bytes,9,opt,name=silent_args,json=silentArgs,proto3" json:"silent_args,omitempty"`
-	SuccessExitCodes       []int32                  `protobuf:"varint,10,rep,packed,name=success_exit_codes,json=successExitCodes,proto3" json:"success_exit_codes,omitempty"`
-	TimeoutSeconds         int32                    `protobuf:"varint,11,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
-	ContentId              string                   `protobuf:"bytes,12,opt,name=content_id,json=contentId,proto3" json:"content_id,omitempty"`
-	RequireAcPower         bool                     `protobuf:"varint,25,opt,name=require_ac_power,json=requireAcPower,proto3" json:"require_ac_power,omitempty"`
-	RequireSignature       bool                     `protobuf:"varint,13,opt,name=require_signature,json=requireSignature,proto3" json:"require_signature,omitempty"`
-	ProductCode            string                   `protobuf:"bytes,14,opt,name=product_code,json=productCode,proto3" json:"product_code,omitempty"`
-	UninstallKey           string                   `protobuf:"bytes,15,opt,name=uninstall_key,json=uninstallKey,proto3" json:"uninstall_key,omitempty"`
-	DisplayName            string                   `protobuf:"bytes,16,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	Parameters             map[string]string        `protobuf:"bytes,17,rep,name=parameters,proto3" json:"parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Execution              *SoftwareExecution       `protobuf:"bytes,18,opt,name=execution,proto3" json:"execution,omitempty"`
-	SecureParameters       map[string]string        `protobuf:"bytes,19,rep,name=secure_parameters,json=secureParameters,proto3" json:"secure_parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Bundle                 *SoftwareBundle          `protobuf:"bytes,20,opt,name=bundle,proto3" json:"bundle,omitempty"`
-	Steps                  *SoftwareDeploymentSteps `protobuf:"bytes,21,opt,name=steps,proto3" json:"steps,omitempty"`
-	Detection              *SoftwareDetection       `protobuf:"bytes,22,opt,name=detection,proto3" json:"detection,omitempty"`
-	MaxFetchBytesPerSecond int64                    `protobuf:"varint,23,opt,name=max_fetch_bytes_per_second,json=maxFetchBytesPerSecond,proto3" json:"max_fetch_bytes_per_second,omitempty"`
-	CaptureScriptContent   bool                     `protobuf:"varint,24,opt,name=capture_script_content,json=captureScriptContent,proto3" json:"capture_script_content,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	PackageId        string                 `protobuf:"bytes,1,opt,name=package_id,json=packageId,proto3" json:"package_id,omitempty"`                                 // console catalog id (correlation key)
+	Name             string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`                                                            // "Google Chrome" (reporting/logging)
+	Version          string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`                                                      // "145.0.2" (reporting)
+	Action           string                 `protobuf:"bytes,4,opt,name=action,proto3" json:"action,omitempty"`                                                        // "install" (default) | "uninstall"
+	InstallerType    string                 `protobuf:"bytes,5,opt,name=installer_type,json=installerType,proto3" json:"installer_type,omitempty"`                     // "msi" | "exe" | "ps1" | "bat" | "auto" (infer from extension)
+	FilePath         string                 `protobuf:"bytes,6,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`                                    // LOCAL path the server delivered, OR the fetch target name
+	ExpectedHash     string                 `protobuf:"bytes,7,opt,name=expected_hash,json=expectedHash,proto3" json:"expected_hash,omitempty"`                        // integrity check (hex-encoded digest)
+	HashAlgorithm    string                 `protobuf:"bytes,8,opt,name=hash_algorithm,json=hashAlgorithm,proto3" json:"hash_algorithm,omitempty"`                     // "sha256" (default) | "sha512" | ...
+	SilentArgs       string                 `protobuf:"bytes,9,opt,name=silent_args,json=silentArgs,proto3" json:"silent_args,omitempty"`                              // silent/unattended args, e.g. "/qn /norestart" (msi) | "/S"
+	SuccessExitCodes []int32                `protobuf:"varint,10,rep,packed,name=success_exit_codes,json=successExitCodes,proto3" json:"success_exit_codes,omitempty"` // extra codes to treat as success beyond {0,3010,1641}
+	TimeoutSeconds   int32                  `protobuf:"varint,11,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`                // kill the installer after this many seconds; 0 = config default
+	// content_id names the installer blob in the server catalog. When set (and the
+	// file is not already cached), the agent STREAMS the bytes from the server via
+	// FetchContent (kind="package") — the real-UEM delivery path, no internet. The
+	// fetched file is stored encrypted at rest and verified against expected_hash.
+	// file_path (above) stays supported for a pre-staged/local installer (dev or an
+	// admin-dropped file); file_path wins when it exists, else content_id is fetched.
+	ContentId string `protobuf:"bytes,12,opt,name=content_id,json=contentId,proto3" json:"content_id,omitempty"`
+	// require_ac_power, when true, makes the agent REFUSE the deploy if the
+	// machine is on battery (not AC/mains). The safety gate for a BIOS/firmware
+	// flash — power loss mid-flash can brick the device. Deeper flash safety
+	// (BitLocker suspend, multi-reboot sequencing) is owned by the vendor flash
+	// utility, so the agent only enforces the power precondition. Agent maps it
+	// to Params.RequireACPower.
+	RequireAcPower bool `protobuf:"varint,25,opt,name=require_ac_power,json=requireAcPower,proto3" json:"require_ac_power,omitempty"`
+	// require_signature, when true, makes the agent verify the installer's
+	// Authenticode digital signature (trusted publisher) before running it and
+	// REFUSE if it is unsigned/untrusted — the standard-UEM publisher check. Left
+	// false for internally-built/unsigned installers.
+	RequireSignature bool `protobuf:"varint,13,opt,name=require_signature,json=requireSignature,proto3" json:"require_signature,omitempty"`
+	// product_code is the MSI ProductCode GUID (e.g.
+	// "{23170F69-40C1-2702-2409-000001000000}"). When set, the agent checks whether
+	// that product is ALREADY installed before acting (idempotency / detection rule):
+	// install of an already-present product is skipped (NOT_APPLICABLE), and an
+	// uninstall of an absent product is skipped. Level-1 detection (MSI only); richer
+	// detection rules (registry/file/version) come later.
+	ProductCode string `protobuf:"bytes,14,opt,name=product_code,json=productCode,proto3" json:"product_code,omitempty"`
+	// uninstall_key identifies a non-MSI (EXE/script-installed) product in the Windows
+	// registry Uninstall hive — either the exact subkey name under
+	// HKLM\...\CurrentVersion\Uninstall (and its WOW6432Node mirror), or matched by
+	// display_name below. When set on an uninstall, the agent reads the product's
+	// QuietUninstallString (preferred — vendor-silent) or UninstallString + silent_args
+	// and runs it directly: no installer file needed. It also enables idempotency for
+	// non-MSI apps (uninstall of an absent app is skipped; install of a present one is
+	// skipped). The agent is a faithful executor — it runs the registered/admin-given
+	// command, it does not guess silent switches.
+	UninstallKey string `protobuf:"bytes,15,opt,name=uninstall_key,json=uninstallKey,proto3" json:"uninstall_key,omitempty"`
+	// display_name is the product's registry DisplayName (e.g. "7-Zip 26.04"), used to
+	// locate the app when uninstall_key is empty (substring match, case-insensitive).
+	DisplayName string `protobuf:"bytes,16,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	// parameters are author-supplied name→value pairs substituted into silent_args and
+	// (for the "command" type) the command, written as ${name}. There is NO fixed set
+	// — any key the package author defines is usable. The agent also provides built-in
+	// RUNTIME variables resolved on the endpoint (e.g. ${hostname}, ${device_id},
+	// ${download_dir}, ${temp_dir}, ${arch}); author parameters override a built-in of
+	// the same name. All parameters are also exported to child scripts as environment
+	// variables AEGIS_PARAM_<NAME>. This gives BigFix-style static + dynamic packaging.
+	Parameters map[string]string `protobuf:"bytes,17,rep,name=parameters,proto3" json:"parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Explicit execution settings/secrets require v2, bundle or workflow task types.
+	// Older agents reject that task type instead of silently executing as SYSTEM.
+	Execution *SoftwareExecution `protobuf:"bytes,18,opt,name=execution,proto3" json:"execution,omitempty"`
+	// Values are carried only within signed mTLS commands. NEVER persist/log this
+	// message in plaintext. Delivered only through a child stdin JSON pipe, never
+	// command arguments or environment. Server must encrypt durable job storage.
+	SecureParameters map[string]string `protobuf:"bytes,19,rep,name=secure_parameters,json=secureParameters,proto3" json:"secure_parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// ZIP bundle jobs MUST use signed command.type=software_deploy_bundle.
+	Bundle *SoftwareBundle `protobuf:"bytes,20,opt,name=bundle,proto3" json:"bundle,omitempty"`
+	// Pre/post commands REQUIRE software_deploy_workflow (no legacy fallback).
+	Steps *SoftwareDeploymentSteps `protobuf:"bytes,21,opt,name=steps,proto3" json:"steps,omitempty"`
+	// Advanced detection REQUIRES software_deploy_detect, even with bundle/steps.
+	Detection *SoftwareDetection `protobuf:"bytes,22,opt,name=detection,proto3" json:"detection,omitempty"`
+	// Per-task fetch rate cap in bytes per second for the server-to-agent
+	// content stream (bundle/installer download). 0 = no per-task cap. The
+	// agent applies BigFix-style "lower wins": the effective rate is min of
+	// this and the agent's config cap (AEGIS_FETCH_MAX_BYTES_PER_SECOND).
+	// The signed command cannot bypass the agent's admin-set cap. Server-
+	// side cumulative throttle is enforced independently by the server.
+	MaxFetchBytesPerSecond int64 `protobuf:"varint,23,opt,name=max_fetch_bytes_per_second,json=maxFetchBytesPerSecond,proto3" json:"max_fetch_bytes_per_second,omitempty"`
+	// capture_script_content, when true, writes the FULL script bytes
+	// (payload .ps1/.bat/.cmd/.vbs/.py or bundle entry_point script) into
+	// the agent's local softdist transcript at
+	// <SKVC>\logs\softdist\<action_id>.transcript. Default (false) still
+	// captures a tamper-evident audit record: SHA-256 digest + size + first
+	// 500 B + last 500 B of each script executed. Full capture is for
+	// compliance / forensic deployments where the admin requires end-to-end
+	// visibility of what ran. The endpoint policy AEGIS_LOG_SCRIPT_CONTENT
+	// ("enabled" default | "disabled" force-off | "always" force-on) can
+	// override this per-task flag; the flag is the per-deploy hint, not the
+	// final say. SecureParameters values are NEVER substituted into the
+	// transcript — they are delivered via child stdin only.
+	CaptureScriptContent bool `protobuf:"varint,24,opt,name=capture_script_content,json=captureScriptContent,proto3" json:"capture_script_content,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *SoftwareDeploySpec) Reset() {
@@ -1002,12 +1143,14 @@ func (x *SoftwareDeploySpec) GetCaptureScriptContent() bool {
 	return false
 }
 
+// The ZIP contains aegis-package.json v1 and a SHA256/size entry for every file.
+// expected_hash above pins the entire ZIP; entry_point pins execution to a member.
 type SoftwareBundle struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	EntryPoint    string                 `protobuf:"bytes,1,opt,name=entry_point,json=entryPoint,proto3" json:"entry_point,omitempty"`
-	Command       string                 `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`
-	Destination   string                 `protobuf:"bytes,3,opt,name=destination,proto3" json:"destination,omitempty"`
-	Cleanup       string                 `protobuf:"bytes,4,opt,name=cleanup,proto3" json:"cleanup,omitempty"`
+	EntryPoint    string                 `protobuf:"bytes,1,opt,name=entry_point,json=entryPoint,proto3" json:"entry_point,omitempty"` // relative installer/script path; empty with command
+	Command       string                 `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`                         // external command, only with installer_type=command
+	Destination   string                 `protobuf:"bytes,3,opt,name=destination,proto3" json:"destination,omitempty"`                 // optional absolute NEW directory; never merge/overwrite
+	Cleanup       string                 `protobuf:"bytes,4,opt,name=cleanup,proto3" json:"cleanup,omitempty"`                         // empty=default: managed directory removed, custom retained;
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1070,11 +1213,18 @@ func (x *SoftwareBundle) GetCleanup() string {
 	return ""
 }
 
+// Ordered commands around one deployment, not dependency-package orchestration.
+// This first workflow version requires a verified bundle. No implicit shell.
 type SoftwareDeploymentSteps struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Before        []*SoftwareCommandStep `protobuf:"bytes,1,rep,name=before,proto3" json:"before,omitempty"`
-	After         []*SoftwareCommandStep `protobuf:"bytes,2,rep,name=after,proto3" json:"after,omitempty"`
-	Rollback      []*SoftwareCommandStep `protobuf:"bytes,3,rep,name=rollback,proto3" json:"rollback,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Before []*SoftwareCommandStep `protobuf:"bytes,1,rep,name=before,proto3" json:"before,omitempty"` // max 8; failure prevents main action
+	After  []*SoftwareCommandStep `protobuf:"bytes,2,rep,name=after,proto3" json:"after,omitempty"`   // max 8; only after main success
+	// rollback commands run ONLY on failure (pre-step failure after reaching the
+	// extracting state, main-action failure, or any after-step failure). They
+	// run in order; a rollback step's own failure is reported but does NOT stop
+	// the remaining rollback commands — rollback is best-effort cleanup. The
+	// signed admin owns the sequence; the agent never guesses undo operations.
+	Rollback      []*SoftwareCommandStep `protobuf:"bytes,3,rep,name=rollback,proto3" json:"rollback,omitempty"` // max 8; executed only on failure
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1132,12 +1282,12 @@ func (x *SoftwareDeploymentSteps) GetRollback() []*SoftwareCommandStep {
 
 type SoftwareCommandStep struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
-	Name                string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Command             string                 `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`
-	Arguments           string                 `protobuf:"bytes,3,opt,name=arguments,proto3" json:"arguments,omitempty"`
-	TimeoutSeconds      int32                  `protobuf:"varint,4,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
-	SuccessExitCodes    []int32                `protobuf:"varint,5,rep,packed,name=success_exit_codes,json=successExitCodes,proto3" json:"success_exit_codes,omitempty"`
-	UseSecureParameters bool                   `protobuf:"varint,6,opt,name=use_secure_parameters,json=useSecureParameters,proto3" json:"use_secure_parameters,omitempty"`
+	Name                string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`                                                             // non-secret operator label, max 128 bytes
+	Command             string                 `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`                                                       // executable; same token, package cwd and ordinary params
+	Arguments           string                 `protobuf:"bytes,3,opt,name=arguments,proto3" json:"arguments,omitempty"`                                                   // Windows arguments; explicit cmd.exe /D /C for shell syntax
+	TimeoutSeconds      int32                  `protobuf:"varint,4,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`                  // 0=300; max 3600 per step
+	SuccessExitCodes    []int32                `protobuf:"varint,5,rep,packed,name=success_exit_codes,json=successExitCodes,proto3" json:"success_exit_codes,omitempty"`   // additional success codes
+	UseSecureParameters bool                   `protobuf:"varint,6,opt,name=use_secure_parameters,json=useSecureParameters,proto3" json:"use_secure_parameters,omitempty"` // opt in to job stdin JSON; never argv/env
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -1214,9 +1364,10 @@ func (x *SoftwareCommandStep) GetUseSecureParameters() bool {
 	return false
 }
 
+// Positive installed-state rules, evaluated before and after a deployment.
 type SoftwareDetection struct {
 	state         protoimpl.MessageState   `protogen:"open.v1"`
-	Mode          string                   `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`
+	Mode          string                   `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"` // all (default) | any; flat list of 1-32 rules
 	Rules         []*SoftwareDetectionRule `protobuf:"bytes,2,rep,name=rules,proto3" json:"rules,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1268,15 +1419,15 @@ func (x *SoftwareDetection) GetRules() []*SoftwareDetectionRule {
 
 type SoftwareDetectionRule struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
-	Kind           string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
-	Path           string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
-	MinimumVersion string                 `protobuf:"bytes,3,opt,name=minimum_version,json=minimumVersion,proto3" json:"minimum_version,omitempty"`
-	Hive           string                 `protobuf:"bytes,4,opt,name=hive,proto3" json:"hive,omitempty"`
-	Key            string                 `protobuf:"bytes,5,opt,name=key,proto3" json:"key,omitempty"`
-	View           string                 `protobuf:"bytes,6,opt,name=view,proto3" json:"view,omitempty"`
-	ValueName      string                 `protobuf:"bytes,7,opt,name=value_name,json=valueName,proto3" json:"value_name,omitempty"`
-	ValueType      string                 `protobuf:"bytes,8,opt,name=value_type,json=valueType,proto3" json:"value_type,omitempty"`
-	ExpectedValue  string                 `protobuf:"bytes,9,opt,name=expected_value,json=expectedValue,proto3" json:"expected_value,omitempty"`
+	Kind           string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`                                           // file_exists | file_version | registry_key | registry_value
+	Path           string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`                                           // local absolute file path; ordinary runtime variables allowed
+	MinimumVersion string                 `protobuf:"bytes,3,opt,name=minimum_version,json=minimumVersion,proto3" json:"minimum_version,omitempty"` // file_version: numeric 1-4 components
+	Hive           string                 `protobuf:"bytes,4,opt,name=hive,proto3" json:"hive,omitempty"`                                           // registry: HKLM or HKCU (selected user's loaded profile)
+	Key            string                 `protobuf:"bytes,5,opt,name=key,proto3" json:"key,omitempty"`                                             // registry: relative key path
+	View           string                 `protobuf:"bytes,6,opt,name=view,proto3" json:"view,omitempty"`                                           // registry: 32 or 64; explicit, required
+	ValueName      string                 `protobuf:"bytes,7,opt,name=value_name,json=valueName,proto3" json:"value_name,omitempty"`                // registry_value; empty means default value
+	ValueType      string                 `protobuf:"bytes,8,opt,name=value_type,json=valueType,proto3" json:"value_type,omitempty"`                // registry_value: string | dword | qword
+	ExpectedValue  string                 `protobuf:"bytes,9,opt,name=expected_value,json=expectedValue,proto3" json:"expected_value,omitempty"`    // non-secret literal, ordinary variables allowed
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1376,12 +1527,12 @@ func (x *SoftwareDetectionRule) GetExpectedValue() string {
 
 type SoftwareExecution struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
-	Mode           string                 `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`
-	SessionId      *uint32                `protobuf:"varint,2,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
-	Username       string                 `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`
-	Domain         string                 `protobuf:"bytes,4,opt,name=domain,proto3" json:"domain,omitempty"`
-	PasswordUtf8   []byte                 `protobuf:"bytes,5,opt,name=password_utf8,json=passwordUtf8,proto3" json:"password_utf8,omitempty"`
-	DetectionScope string                 `protobuf:"bytes,6,opt,name=detection_scope,json=detectionScope,proto3" json:"detection_scope,omitempty"`
+	Mode           string                 `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`                                           // system (default) | logged_in_user | specified_account
+	SessionId      *uint32                `protobuf:"varint,2,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`         // logged_in_user; required when active sessions are ambiguous
+	Username       string                 `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`                                   // specified_account: local user, DOMAIN\\user or user@domain
+	Domain         string                 `protobuf:"bytes,4,opt,name=domain,proto3" json:"domain,omitempty"`                                       // optional explicit domain; "." means local
+	PasswordUtf8   []byte                 `protobuf:"bytes,5,opt,name=password_utf8,json=passwordUtf8,proto3" json:"password_utf8,omitempty"`       // specified_account only; never child env/argv/logs
+	DetectionScope string                 `protobuf:"bytes,6,opt,name=detection_scope,json=detectionScope,proto3" json:"detection_scope,omitempty"` // machine (default), user (requires a non-SYSTEM execution context)
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1458,22 +1609,27 @@ func (x *SoftwareExecution) GetDetectionScope() string {
 	return ""
 }
 
+// ActionStatus is the UNIFIED per-action status the agent streams for every
+// server-dispatched action, so the console can show one consistent lifecycle per
+// device per action (BigFix/ManageEngine/Tanium style). It generalizes what used
+// to be an install-only status. A terminal phase carries the outcome — there is
+// no separate result message.
 type ActionStatus struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
-	ActionId         string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
-	ActionType       string                 `protobuf:"bytes,2,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`
+	ActionId         string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`       // = the dispatched command_id; the console's correlation key
+	ActionType       string                 `protobuf:"bytes,2,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"` // "patch_install" | "stage" | "scan" | "reboot" | "software_deploy"
 	DeviceId         string                 `protobuf:"bytes,3,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
 	Phase            ActionPhase            `protobuf:"varint,4,opt,name=phase,proto3,enum=aegisone.v1.ActionPhase" json:"phase,omitempty"`
-	ExitCode         int32                  `protobuf:"varint,5,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	RebootRequired   bool                   `protobuf:"varint,6,opt,name=reboot_required,json=rebootRequired,proto3" json:"reboot_required,omitempty"`
-	Reason           string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
-	Detail           string                 `protobuf:"bytes,8,opt,name=detail,proto3" json:"detail,omitempty"`
-	ProgressPct      int32                  `protobuf:"varint,9,opt,name=progress_pct,json=progressPct,proto3" json:"progress_pct,omitempty"`
-	StartedAt        int64                  `protobuf:"varint,10,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	FinishedAt       int64                  `protobuf:"varint,11,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
-	Kb               string                 `protobuf:"bytes,12,opt,name=kb,proto3" json:"kb,omitempty"`
-	PackageDirectory string                 `protobuf:"bytes,13,opt,name=package_directory,json=packageDirectory,proto3" json:"package_directory,omitempty"`
-	PackageCleanup   string                 `protobuf:"bytes,14,opt,name=package_cleanup,json=packageCleanup,proto3" json:"package_cleanup,omitempty"`
+	ExitCode         int32                  `protobuf:"varint,5,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`                         // set at SUCCESS/FAILED (e.g. DISM 0 | 3010 | 1641 | other)
+	RebootRequired   bool                   `protobuf:"varint,6,opt,name=reboot_required,json=rebootRequired,proto3" json:"reboot_required,omitempty"`       // set at SUCCESS where relevant
+	Reason           string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`                                              // concise status/failure reason (console status column)
+	Detail           string                 `protobuf:"bytes,8,opt,name=detail,proto3" json:"detail,omitempty"`                                              // verbose detail (e.g. trailing DISM output) for troubleshooting
+	ProgressPct      int32                  `protobuf:"varint,9,opt,name=progress_pct,json=progressPct,proto3" json:"progress_pct,omitempty"`                // best-effort 0..100 (download/install); 0 when not applicable
+	StartedAt        int64                  `protobuf:"varint,10,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`                     // unix seconds (set when the action starts running)
+	FinishedAt       int64                  `protobuf:"varint,11,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`                  // unix seconds (set at a terminal phase)
+	Kb               string                 `protobuf:"bytes,12,opt,name=kb,proto3" json:"kb,omitempty"`                                                     // KB for patch actions (reporting/correlation)
+	PackageDirectory string                 `protobuf:"bytes,13,opt,name=package_directory,json=packageDirectory,proto3" json:"package_directory,omitempty"` // bundle extraction directory (even after cleanup)
+	PackageCleanup   string                 `protobuf:"bytes,14,opt,name=package_cleanup,json=packageCleanup,proto3" json:"package_cleanup,omitempty"`       // removed | retained | failed; empty for non-bundles
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -1606,21 +1762,45 @@ func (x *ActionStatus) GetPackageCleanup() string {
 	return ""
 }
 
+// DeviceStateReport is the Layer 1 lightweight, frequent report: the device's
+// build and the list of INSTALLED KBs — raw facts only. The agent does NOT
+// compute "missing"; the server diffs installed-KBs against its catalog. Sent on
+// change (installed set rarely changes), routed online or via the offline buffer.
 type DeviceStateReport struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	DeviceId             string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	ProductName          string                 `protobuf:"bytes,2,opt,name=product_name,json=productName,proto3" json:"product_name,omitempty"`
-	DisplayVersion       string                 `protobuf:"bytes,3,opt,name=display_version,json=displayVersion,proto3" json:"display_version,omitempty"`
-	Build                string                 `protobuf:"bytes,4,opt,name=build,proto3" json:"build,omitempty"`
-	Architecture         string                 `protobuf:"bytes,5,opt,name=architecture,proto3" json:"architecture,omitempty"`
-	CollectedAt          int64                  `protobuf:"varint,6,opt,name=collected_at,json=collectedAt,proto3" json:"collected_at,omitempty"`
-	RebootPending        bool                   `protobuf:"varint,8,opt,name=reboot_pending,json=rebootPending,proto3" json:"reboot_pending,omitempty"`
-	RebootPendingKbs     []string               `protobuf:"bytes,9,rep,name=reboot_pending_kbs,json=rebootPendingKbs,proto3" json:"reboot_pending_kbs,omitempty"`
-	RebootPendingSources []string               `protobuf:"bytes,10,rep,name=reboot_pending_sources,json=rebootPendingSources,proto3" json:"reboot_pending_sources,omitempty"`
-	InstalledApps        []*InstalledApp        `protobuf:"bytes,11,rep,name=installed_apps,json=installedApps,proto3" json:"installed_apps,omitempty"`
-	InstalledKbs         []string               `protobuf:"bytes,12,rep,name=installed_kbs,json=installedKbs,proto3" json:"installed_kbs,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	DeviceId       string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	ProductName    string                 `protobuf:"bytes,2,opt,name=product_name,json=productName,proto3" json:"product_name,omitempty"`          // e.g. "Windows 11 Pro"
+	DisplayVersion string                 `protobuf:"bytes,3,opt,name=display_version,json=displayVersion,proto3" json:"display_version,omitempty"` // e.g. "24H2"
+	Build          string                 `protobuf:"bytes,4,opt,name=build,proto3" json:"build,omitempty"`                                         // e.g. "26100.4652" (authoritative cumulative level)
+	Architecture   string                 `protobuf:"bytes,5,opt,name=architecture,proto3" json:"architecture,omitempty"`                           // "amd64" | "arm64" | "x86"
+	CollectedAt    int64                  `protobuf:"varint,6,opt,name=collected_at,json=collectedAt,proto3" json:"collected_at,omitempty"`         // unix seconds
+	// Device-level pending-reboot state, so the console shows per-CI whether a
+	// machine is waiting for a reboot to finish applying patches (installed-but-
+	// -pending patches are not yet effective; the build only advances post-reboot).
+	RebootPending        bool     `protobuf:"varint,8,opt,name=reboot_pending,json=rebootPending,proto3" json:"reboot_pending,omitempty"`                        // any Windows pending-reboot indicator set
+	RebootPendingKbs     []string `protobuf:"bytes,9,rep,name=reboot_pending_kbs,json=rebootPendingKbs,proto3" json:"reboot_pending_kbs,omitempty"`              // KBs the agent installed that returned reboot-required and are awaiting a reboot (best-effort attribution)
+	RebootPendingSources []string `protobuf:"bytes,10,rep,name=reboot_pending_sources,json=rebootPendingSources,proto3" json:"reboot_pending_sources,omitempty"` // which indicators tripped (e.g. "CBS", "WindowsUpdate", "PendingFileRename", "PendingComputerRename")
+	// Enriched installed-apps inventory read from the Windows registry Uninstall
+	// hive (HKLM native + WOW6432Node + HKCU per-user). The server matches these
+	// against its third-party patch catalog (Chrome / Firefox / Adobe / Java /
+	// 1000+ vendors — server-team catalog size) to compute which apps are
+	// outdated and dispatch signed software_deploy tasks to update them.
+	// The agent imposes NO cap on this list — however many apps are installed
+	// on the endpoint, the full inventory is reported. The server catalog is
+	// the only policy point for which apps are patched.
+	InstalledApps []*InstalledApp `protobuf:"bytes,11,rep,name=installed_apps,json=installedApps,proto3" json:"installed_apps,omitempty"`
+	// Installed OS update KBs read from the registry (CBS CurrentState==112,
+	// supplemented by Win32_QuickFixEngineering) — NO cab, NO WUA, no network.
+	// This is one half of the server-side patch diff: the server computes
+	// "missing" = applicable(catalog, product+build+arch) − installed_kbs,
+	// using its own server-side wsusscn2.cab catalog. The endpoint never
+	// computes "missing" and never needs the cab. build (field 4) remains the
+	// authoritative cumulative level; this KB set covers standalone / .NET /
+	// security updates the build number alone does not express. Sorted, deduped.
+	// See docs/server-spec-patch-detection.md.
+	InstalledKbs  []string `protobuf:"bytes,12,rep,name=installed_kbs,json=installedKbs,proto3" json:"installed_kbs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeviceStateReport) Reset() {
@@ -1730,16 +1910,21 @@ func (x *DeviceStateReport) GetInstalledKbs() []string {
 	return nil
 }
 
+// InstalledApp is one entry from the Windows registry Uninstall hive. The
+// agent reports facts only — the server catalog decides whether an app is a
+// patch candidate, outdated, or a BigFix-style "fixlet" target. uninstall_key
+// doubles as the stable identifier the server uses when later dispatching an
+// update or uninstall.
 type InstalledApp struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	DisplayName     string                 `protobuf:"bytes,1,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	DisplayVersion  string                 `protobuf:"bytes,2,opt,name=display_version,json=displayVersion,proto3" json:"display_version,omitempty"`
-	Publisher       string                 `protobuf:"bytes,3,opt,name=publisher,proto3" json:"publisher,omitempty"`
-	InstallDate     string                 `protobuf:"bytes,4,opt,name=install_date,json=installDate,proto3" json:"install_date,omitempty"`
-	UninstallKey    string                 `protobuf:"bytes,5,opt,name=uninstall_key,json=uninstallKey,proto3" json:"uninstall_key,omitempty"`
-	Hive            string                 `protobuf:"bytes,6,opt,name=hive,proto3" json:"hive,omitempty"`
-	EstimatedSizeKb int64                  `protobuf:"varint,7,opt,name=estimated_size_kb,json=estimatedSizeKb,proto3" json:"estimated_size_kb,omitempty"`
-	UninstallString string                 `protobuf:"bytes,8,opt,name=uninstall_string,json=uninstallString,proto3" json:"uninstall_string,omitempty"`
+	DisplayName     string                 `protobuf:"bytes,1,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`                // user-visible name ("Google Chrome", "Mozilla Firefox")
+	DisplayVersion  string                 `protobuf:"bytes,2,opt,name=display_version,json=displayVersion,proto3" json:"display_version,omitempty"`       // reported version string ("118.0.5993.117")
+	Publisher       string                 `protobuf:"bytes,3,opt,name=publisher,proto3" json:"publisher,omitempty"`                                       // vendor ("Google LLC", "Mozilla")
+	InstallDate     string                 `protobuf:"bytes,4,opt,name=install_date,json=installDate,proto3" json:"install_date,omitempty"`                // yyyymmdd when present (not all vendors set this)
+	UninstallKey    string                 `protobuf:"bytes,5,opt,name=uninstall_key,json=uninstallKey,proto3" json:"uninstall_key,omitempty"`             // registry subkey name (stable id for later actions)
+	Hive            string                 `protobuf:"bytes,6,opt,name=hive,proto3" json:"hive,omitempty"`                                                 // "HKLM" | "HKLM\\WOW6432Node" | "HKCU\\<SID>" (per-user)
+	EstimatedSizeKb int64                  `protobuf:"varint,7,opt,name=estimated_size_kb,json=estimatedSizeKb,proto3" json:"estimated_size_kb,omitempty"` // Uninstall hive EstimatedSize value (0 when missing)
+	UninstallString string                 `protobuf:"bytes,8,opt,name=uninstall_string,json=uninstallString,proto3" json:"uninstall_string,omitempty"`    // vendor-registered uninstall command (optional, for reference)
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1830,14 +2015,18 @@ func (x *InstalledApp) GetUninstallString() string {
 	return ""
 }
 
+// CacheFullReport is sent when the agent cannot stage (pre-cache) a patch because
+// the cache is at its cap and nothing evictable remains (everything left is
+// staged). It is a fail-loud signal, not a silent drop: the server should raise
+// the cap or trigger the client cache-cleanup task.
 type CacheFullReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DeviceId      string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	PendingId     string                 `protobuf:"bytes,2,opt,name=pending_id,json=pendingId,proto3" json:"pending_id,omitempty"`
-	NeededBytes   int64                  `protobuf:"varint,3,opt,name=needed_bytes,json=neededBytes,proto3" json:"needed_bytes,omitempty"`
-	CapBytes      int64                  `protobuf:"varint,4,opt,name=cap_bytes,json=capBytes,proto3" json:"cap_bytes,omitempty"`
-	InUseBytes    int64                  `protobuf:"varint,5,opt,name=in_use_bytes,json=inUseBytes,proto3" json:"in_use_bytes,omitempty"`
-	Message       string                 `protobuf:"bytes,6,opt,name=message,proto3" json:"message,omitempty"`
+	PendingId     string                 `protobuf:"bytes,2,opt,name=pending_id,json=pendingId,proto3" json:"pending_id,omitempty"`        // KB/patch id that could not be staged
+	NeededBytes   int64                  `protobuf:"varint,3,opt,name=needed_bytes,json=neededBytes,proto3" json:"needed_bytes,omitempty"` // size the pending patch needs
+	CapBytes      int64                  `protobuf:"varint,4,opt,name=cap_bytes,json=capBytes,proto3" json:"cap_bytes,omitempty"`          // current cache cap
+	InUseBytes    int64                  `protobuf:"varint,5,opt,name=in_use_bytes,json=inUseBytes,proto3" json:"in_use_bytes,omitempty"`  // bytes currently cached
+	Message       string                 `protobuf:"bytes,6,opt,name=message,proto3" json:"message,omitempty"`                             // human-readable guidance
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1914,21 +2103,63 @@ func (x *CacheFullReport) GetMessage() string {
 	return ""
 }
 
+// FullInventoryReport is the Tier-3 periodic (6-12h) full snapshot of the
+// device's HARDWARE + SOFTWARE inventory. It is the safety-net report that
+// self-corrects the server's view even when Tier-2 change events are missed
+// (race, agent restart, bug) — one Tier-3 cycle supersedes anything the
+// server might have lost. Also sent ONCE on reconnect-after-offline, with
+// a flap floor so a flapping NIC does not DoS the server.
+//
+// SOFTWARE inventory reuses the InstalledApp enumeration (same registry
+// Uninstall hive walk as DeviceStateReport.installed_apps — HKLM native +
+// WOW6432Node + HKU per-user).
+//
+// HARDWARE inventory is pure Go + x/sys/windows — no WMI, no COM, no cgo —
+// to keep the agent binary small (≤25 MB target) and the RAM/CPU cost of a
+// snapshot in the single-ms range.
 type FullInventoryReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DeviceId      string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	CollectedAt   int64                  `protobuf:"varint,2,opt,name=collected_at,json=collectedAt,proto3" json:"collected_at,omitempty"`
-	Trigger       string                 `protobuf:"bytes,3,opt,name=trigger,proto3" json:"trigger,omitempty"`
+	CollectedAt   int64                  `protobuf:"varint,2,opt,name=collected_at,json=collectedAt,proto3" json:"collected_at,omitempty"` // unix seconds
+	Trigger       string                 `protobuf:"bytes,3,opt,name=trigger,proto3" json:"trigger,omitempty"`                             // "scheduled" | "reconnect" (why this snapshot ran)
 	Hardware      *HardwareInventory     `protobuf:"bytes,4,opt,name=hardware,proto3" json:"hardware,omitempty"`
-	InstalledApps []*InstalledApp        `protobuf:"bytes,5,rep,name=installed_apps,json=installedApps,proto3" json:"installed_apps,omitempty"`
-	Drivers       []*DriverInventory     `protobuf:"bytes,6,rep,name=drivers,proto3" json:"drivers,omitempty"`
-	InstalledAppx []*InstalledAppx       `protobuf:"bytes,7,rep,name=installed_appx,json=installedAppx,proto3" json:"installed_appx,omitempty"`
-	Identity      *IdentityInfo          `protobuf:"bytes,8,opt,name=identity,proto3" json:"identity,omitempty"`
-	DexHealth     *DexHealth             `protobuf:"bytes,9,opt,name=dex_health,json=dexHealth,proto3" json:"dex_health,omitempty"`
-	// Server-defined custom attributes evaluated by the agent: name -> value.
+	InstalledApps []*InstalledApp        `protobuf:"bytes,5,rep,name=installed_apps,json=installedApps,proto3" json:"installed_apps,omitempty"` // same enumeration as DeviceStateReport.installed_apps
+	// Installed device drivers (Win32_PnPSignedDriver). The server matches these
+	// against its OEM driver catalog (Dell/HP/Lenovo/etc.) to find outdated
+	// drivers Windows Update does not carry, then dispatches a signed driver
+	// deploy. Microsoft-delivered drivers additionally appear in the
+	// wsusscn2.cab scan; this list is the OEM/third-party coverage. Agent
+	// reports facts only; the server catalog is the policy point for what is
+	// patchable (no agent-side vendor filtering, same as installed_apps).
+	Drivers []*DriverInventory `protobuf:"bytes,6,rep,name=drivers,proto3" json:"drivers,omitempty"`
+	// Installed MSIX / AppX / Microsoft Store packages — the modern-app surface
+	// the classic registry Uninstall hive (installed_apps) does NOT show. Read
+	// from the system StateRepository (all users + provisioned) via pure registry
+	// (no PowerShell, unlike BigFix's Get-AppxPackage). The server matches these
+	// against its third-party catalog to detect outdated / vulnerable Store apps.
+	// One row per app (bundle/arch/resource duplicates collapsed).
+	InstalledAppx []*InstalledAppx `protobuf:"bytes,7,rep,name=installed_appx,json=installedAppx,proto3" json:"installed_appx,omitempty"`
+	// Device identity + session attributes (BigFix retrieved-properties
+	// equivalent) for console device-search and user-targeting. Native-only
+	// (WTS / NetGetJoinInformation / GetTickCount64) — no PowerShell. Optional:
+	// an agent that cannot read a field leaves it zero/empty.
+	Identity *IdentityInfo `protobuf:"bytes,8,opt,name=identity,proto3" json:"identity,omitempty"`
+	// Digital Employee Experience (DEX) health — device stability signals the
+	// server rolls into a DEX score. Step-1 = reliability event counts read from
+	// the Windows event log natively (no PowerShell). Optional/zero when absent.
+	DexHealth *DexHealth `protobuf:"bytes,9,opt,name=dex_health,json=dexHealth,proto3" json:"dex_health,omitempty"`
+	// Server-defined custom properties (BigFix "retrieved properties" / Tanium
+	// "sensors"): name -> value, evaluated locally by the agent from signed
+	// CustomAttributeSpec definitions. One unlimited map, no per-attribute schema
+	// change, no CMDB. Empty when no definitions are active.
 	CustomProperties map[string]string `protobuf:"bytes,10,rep,name=custom_properties,json=customProperties,proto3" json:"custom_properties,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Installed antivirus/security products (Windows Security Center). Lets the
+	// console surface the exact AV-exclusion guidance for whatever AV the endpoint
+	// runs (third-party AV can't be auto-excluded; Defender is auto-excluded by the
+	// agent). Native WMI root\SecurityCenter2; empty on Server SKUs / no SecurityCenter.
+	AntivirusProducts []*AntivirusProduct `protobuf:"bytes,11,rep,name=antivirus_products,json=antivirusProducts,proto3" json:"antivirus_products,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *FullInventoryReport) Reset() {
@@ -2031,8 +2262,89 @@ func (x *FullInventoryReport) GetCustomProperties() map[string]string {
 	return nil
 }
 
-// One server-defined custom attribute: a read-only, declarative provider
-// (env, file, registry, admin_tag, service_state) and its arguments.
+func (x *FullInventoryReport) GetAntivirusProducts() []*AntivirusProduct {
+	if x != nil {
+		return x.AntivirusProducts
+	}
+	return nil
+}
+
+// AntivirusProduct is one registered AV from Windows Security Center.
+type AntivirusProduct struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`                                      // display name, e.g. "Windows Defender", "CrowdStrike Falcon"
+	Enabled       bool                   `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`                               // real-time protection on
+	UpToDate      bool                   `protobuf:"varint,3,opt,name=up_to_date,json=upToDate,proto3" json:"up_to_date,omitempty"`           // signatures current
+	ProductState  uint32                 `protobuf:"varint,4,opt,name=product_state,json=productState,proto3" json:"product_state,omitempty"` // raw SecurityCenter2 productState (for the console to decode further)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AntivirusProduct) Reset() {
+	*x = AntivirusProduct{}
+	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AntivirusProduct) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AntivirusProduct) ProtoMessage() {}
+
+func (x *AntivirusProduct) ProtoReflect() protoreflect.Message {
+	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AntivirusProduct.ProtoReflect.Descriptor instead.
+func (*AntivirusProduct) Descriptor() ([]byte, []int) {
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *AntivirusProduct) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *AntivirusProduct) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *AntivirusProduct) GetUpToDate() bool {
+	if x != nil {
+		return x.UpToDate
+	}
+	return false
+}
+
+func (x *AntivirusProduct) GetProductState() uint32 {
+	if x != nil {
+		return x.ProductState
+	}
+	return 0
+}
+
+// CustomAttributeDefinition is ONE server-defined property the agent evaluates
+// locally with a DECLARATIVE, read-only provider (never arbitrary code):
+//
+//	provider "env"       args{name}            -> environment variable
+//	provider "file"      args{path, attr}      -> exists | size | version
+//	provider "registry"  args{root, key, name} -> HKLM/HKCU/... value (read-only)
+//	provider "admin_tag" args{name}            -> HKLM\SOFTWARE\AegisOne\Client\Tags
 type CustomAttributeDefinition struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -2044,7 +2356,7 @@ type CustomAttributeDefinition struct {
 
 func (x *CustomAttributeDefinition) Reset() {
 	*x = CustomAttributeDefinition{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2056,7 +2368,7 @@ func (x *CustomAttributeDefinition) String() string {
 func (*CustomAttributeDefinition) ProtoMessage() {}
 
 func (x *CustomAttributeDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[19]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2069,7 +2381,7 @@ func (x *CustomAttributeDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CustomAttributeDefinition.ProtoReflect.Descriptor instead.
 func (*CustomAttributeDefinition) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *CustomAttributeDefinition) GetName() string {
@@ -2093,18 +2405,21 @@ func (x *CustomAttributeDefinition) GetArgs() map[string]string {
 	return nil
 }
 
-// Payload of the signed set_custom_attributes command (anti-rollback on issued_at).
+// CustomAttributeSpec is the signed, anti-rollback definition set the server
+// pushes (as a set_custom_attributes command payload). The agent persists it,
+// re-verifies it at startup, and evaluates the definitions into
+// FullInventoryReport.custom_properties.
 type CustomAttributeSpec struct {
 	state         protoimpl.MessageState       `protogen:"open.v1"`
 	Definitions   []*CustomAttributeDefinition `protobuf:"bytes,1,rep,name=definitions,proto3" json:"definitions,omitempty"`
-	IssuedAt      int64                        `protobuf:"varint,2,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	IssuedAt      int64                        `protobuf:"varint,2,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"` // unix seconds; must exceed the stored value (anti-rollback)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CustomAttributeSpec) Reset() {
 	*x = CustomAttributeSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2116,7 +2431,7 @@ func (x *CustomAttributeSpec) String() string {
 func (*CustomAttributeSpec) ProtoMessage() {}
 
 func (x *CustomAttributeSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[20]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2129,7 +2444,7 @@ func (x *CustomAttributeSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CustomAttributeSpec.ProtoReflect.Descriptor instead.
 func (*CustomAttributeSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{20}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *CustomAttributeSpec) GetDefinitions() []*CustomAttributeDefinition {
@@ -2146,24 +2461,27 @@ func (x *CustomAttributeSpec) GetIssuedAt() int64 {
 	return 0
 }
 
-// Device stability over the last window_days, counted from the Windows event log.
+// DexHealth carries endpoint stability/reliability signals (BigFix-DEX
+// "Reliability" equivalent): counts of unexpected shutdowns, bugchecks (BSOD),
+// and dirty power events over a lookback window, read from the Windows System
+// event log. Boot/logon duration land in a later step.
 type DexHealth struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
-	UnexpectedShutdowns int32                  `protobuf:"varint,1,opt,name=unexpected_shutdowns,json=unexpectedShutdowns,proto3" json:"unexpected_shutdowns,omitempty"`
-	Bugchecks           int32                  `protobuf:"varint,2,opt,name=bugchecks,proto3" json:"bugchecks,omitempty"`
-	DirtyPowerEvents    int32                  `protobuf:"varint,3,opt,name=dirty_power_events,json=dirtyPowerEvents,proto3" json:"dirty_power_events,omitempty"`
-	WindowDays          int32                  `protobuf:"varint,4,opt,name=window_days,json=windowDays,proto3" json:"window_days,omitempty"`
-	BootDurationMs      int64                  `protobuf:"varint,5,opt,name=boot_duration_ms,json=bootDurationMs,proto3" json:"boot_duration_ms,omitempty"`
-	AppCrashes          int32                  `protobuf:"varint,6,opt,name=app_crashes,json=appCrashes,proto3" json:"app_crashes,omitempty"`
-	AppHangs            int32                  `protobuf:"varint,7,opt,name=app_hangs,json=appHangs,proto3" json:"app_hangs,omitempty"`
-	AppFaults           []*AppFault            `protobuf:"bytes,8,rep,name=app_faults,json=appFaults,proto3" json:"app_faults,omitempty"`
+	UnexpectedShutdowns int32                  `protobuf:"varint,1,opt,name=unexpected_shutdowns,json=unexpectedShutdowns,proto3" json:"unexpected_shutdowns,omitempty"` // System event 6008 in the window
+	Bugchecks           int32                  `protobuf:"varint,2,opt,name=bugchecks,proto3" json:"bugchecks,omitempty"`                                                // System event 1001 (BSOD / bugcheck) in the window
+	DirtyPowerEvents    int32                  `protobuf:"varint,3,opt,name=dirty_power_events,json=dirtyPowerEvents,proto3" json:"dirty_power_events,omitempty"`        // System event 41 (Kernel-Power dirty shutdown) in the window
+	WindowDays          int32                  `protobuf:"varint,4,opt,name=window_days,json=windowDays,proto3" json:"window_days,omitempty"`                            // lookback window used for the counts
+	BootDurationMs      int64                  `protobuf:"varint,5,opt,name=boot_duration_ms,json=bootDurationMs,proto3" json:"boot_duration_ms,omitempty"`              // last boot time (Diagnostics-Performance event 100, BootTime); 0 = unknown
+	AppCrashes          int32                  `protobuf:"varint,6,opt,name=app_crashes,json=appCrashes,proto3" json:"app_crashes,omitempty"`                            // Application event 1000 (app crash) in the window
+	AppHangs            int32                  `protobuf:"varint,7,opt,name=app_hangs,json=appHangs,proto3" json:"app_hangs,omitempty"`                                  // Application event 1002 (app hang / not responding) in the window
+	AppFaults           []*AppFault            `protobuf:"bytes,8,rep,name=app_faults,json=appFaults,proto3" json:"app_faults,omitempty"`                                // per-application crash/hang breakdown (top apps by fault count)
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
 
 func (x *DexHealth) Reset() {
 	*x = DexHealth{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2175,7 +2493,7 @@ func (x *DexHealth) String() string {
 func (*DexHealth) ProtoMessage() {}
 
 func (x *DexHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[21]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2188,7 +2506,7 @@ func (x *DexHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DexHealth.ProtoReflect.Descriptor instead.
 func (*DexHealth) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{21}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *DexHealth) GetUnexpectedShutdowns() int32 {
@@ -2247,18 +2565,24 @@ func (x *DexHealth) GetAppFaults() []*AppFault {
 	return nil
 }
 
+// AppFault is one application's crash + hang counts in the window — so the
+// console can show WHICH apps are unstable, not just a total.
 type AppFault struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Crashes       int32                  `protobuf:"varint,2,opt,name=crashes,proto3" json:"crashes,omitempty"`
-	Hangs         int32                  `protobuf:"varint,3,opt,name=hangs,proto3" json:"hangs,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Name    string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`        // faulting application (e.g. "chrome.exe")
+	Crashes int32                  `protobuf:"varint,2,opt,name=crashes,proto3" json:"crashes,omitempty"` // Application event 1000 for this app
+	Hangs   int32                  `protobuf:"varint,3,opt,name=hangs,proto3" json:"hangs,omitempty"`     // Application event 1002 for this app
+	// Detail of the MOST RECENT crash for this app (empty for hang-only apps).
+	LastModule    string `protobuf:"bytes,4,opt,name=last_module,json=lastModule,proto3" json:"last_module,omitempty"`             // faulting module (e.g. "ntdll.dll")
+	LastException string `protobuf:"bytes,5,opt,name=last_exception,json=lastException,proto3" json:"last_exception,omitempty"`    // exception code (e.g. "0xc0000005")
+	LastCrashUnix int64  `protobuf:"varint,6,opt,name=last_crash_unix,json=lastCrashUnix,proto3" json:"last_crash_unix,omitempty"` // time of the most recent crash (unix seconds), 0 = unknown
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AppFault) Reset() {
 	*x = AppFault{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2270,7 +2594,7 @@ func (x *AppFault) String() string {
 func (*AppFault) ProtoMessage() {}
 
 func (x *AppFault) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[22]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2283,7 +2607,7 @@ func (x *AppFault) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppFault.ProtoReflect.Descriptor instead.
 func (*AppFault) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{22}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *AppFault) GetName() string {
@@ -2307,21 +2631,43 @@ func (x *AppFault) GetHangs() int32 {
 	return 0
 }
 
-// Who is on the machine and its domain state. boot_time is unix seconds.
+func (x *AppFault) GetLastModule() string {
+	if x != nil {
+		return x.LastModule
+	}
+	return ""
+}
+
+func (x *AppFault) GetLastException() string {
+	if x != nil {
+		return x.LastException
+	}
+	return ""
+}
+
+func (x *AppFault) GetLastCrashUnix() int64 {
+	if x != nil {
+		return x.LastCrashUnix
+	}
+	return 0
+}
+
+// IdentityInfo carries device identity + session attributes used for console
+// device-search (by logged-on user) and policy/notification targeting.
 type IdentityInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	LoggedOnUser  string                 `protobuf:"bytes,1,opt,name=logged_on_user,json=loggedOnUser,proto3" json:"logged_on_user,omitempty"`
-	MachineDomain string                 `protobuf:"bytes,2,opt,name=machine_domain,json=machineDomain,proto3" json:"machine_domain,omitempty"`
-	DomainJoined  bool                   `protobuf:"varint,3,opt,name=domain_joined,json=domainJoined,proto3" json:"domain_joined,omitempty"`
-	UptimeSeconds int64                  `protobuf:"varint,4,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
-	BootTime      int64                  `protobuf:"varint,5,opt,name=boot_time,json=bootTime,proto3" json:"boot_time,omitempty"`
+	LoggedOnUser  string                 `protobuf:"bytes,1,opt,name=logged_on_user,json=loggedOnUser,proto3" json:"logged_on_user,omitempty"`   // interactive console user ("" = none / headless)
+	MachineDomain string                 `protobuf:"bytes,2,opt,name=machine_domain,json=machineDomain,proto3" json:"machine_domain,omitempty"`  // AD domain (if joined) or workgroup name
+	DomainJoined  bool                   `protobuf:"varint,3,opt,name=domain_joined,json=domainJoined,proto3" json:"domain_joined,omitempty"`    // true = joined to an AD domain
+	UptimeSeconds int64                  `protobuf:"varint,4,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"` // seconds since last boot
+	BootTime      int64                  `protobuf:"varint,5,opt,name=boot_time,json=bootTime,proto3" json:"boot_time,omitempty"`                // unix seconds of last boot (collected_at - uptime)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *IdentityInfo) Reset() {
 	*x = IdentityInfo{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2333,7 +2679,7 @@ func (x *IdentityInfo) String() string {
 func (*IdentityInfo) ProtoMessage() {}
 
 func (x *IdentityInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[23]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2346,7 +2692,7 @@ func (x *IdentityInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IdentityInfo.ProtoReflect.Descriptor instead.
 func (*IdentityInfo) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{23}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *IdentityInfo) GetLoggedOnUser() string {
@@ -2384,24 +2730,26 @@ func (x *IdentityInfo) GetBootTime() int64 {
 	return 0
 }
 
+// InstalledAppx is one installed MSIX/AppX/Store package. package_family_name
+// (Name_PublisherId) is the server catalog's stable match key.
 type InstalledAppx struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
-	DisplayName       string                 `protobuf:"bytes,1,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	PackageFullName   string                 `protobuf:"bytes,2,opt,name=package_full_name,json=packageFullName,proto3" json:"package_full_name,omitempty"`
-	PackageFamilyName string                 `protobuf:"bytes,3,opt,name=package_family_name,json=packageFamilyName,proto3" json:"package_family_name,omitempty"`
-	Name              string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
-	Version           string                 `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`
-	Architecture      string                 `protobuf:"bytes,6,opt,name=architecture,proto3" json:"architecture,omitempty"`
-	PublisherId       string                 `protobuf:"bytes,7,opt,name=publisher_id,json=publisherId,proto3" json:"publisher_id,omitempty"`
+	DisplayName       string                 `protobuf:"bytes,1,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`                     // friendly name; best-effort, may be empty
+	PackageFullName   string                 `protobuf:"bytes,2,opt,name=package_full_name,json=packageFullName,proto3" json:"package_full_name,omitempty"`       // "Name_Version_Arch_ResourceId_PublisherId"
+	PackageFamilyName string                 `protobuf:"bytes,3,opt,name=package_family_name,json=packageFamilyName,proto3" json:"package_family_name,omitempty"` // "Name_PublisherId" — catalog match key
+	Name              string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`                                                      // parsed package name
+	Version           string                 `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`                                                // parsed, e.g. "3.27.12250.0"
+	Architecture      string                 `protobuf:"bytes,6,opt,name=architecture,proto3" json:"architecture,omitempty"`                                      // "x64" | "x86" | "arm64" | "neutral"
+	PublisherId       string                 `protobuf:"bytes,7,opt,name=publisher_id,json=publisherId,proto3" json:"publisher_id,omitempty"`                     // publisher hash, e.g. "8wekyb3d8bbwe"
 	InstallLocation   string                 `protobuf:"bytes,8,opt,name=install_location,json=installLocation,proto3" json:"install_location,omitempty"`
-	Origin            string                 `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
+	Origin            string                 `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"` // "Store" | "Inbox" | "LineOfBusiness" | "DeveloperSigned" | ...
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
 
 func (x *InstalledAppx) Reset() {
 	*x = InstalledAppx{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2413,7 +2761,7 @@ func (x *InstalledAppx) String() string {
 func (*InstalledAppx) ProtoMessage() {}
 
 func (x *InstalledAppx) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[24]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2426,7 +2774,7 @@ func (x *InstalledAppx) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InstalledAppx.ProtoReflect.Descriptor instead.
 func (*InstalledAppx) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{24}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *InstalledAppx) GetDisplayName() string {
@@ -2492,24 +2840,26 @@ func (x *InstalledAppx) GetOrigin() string {
 	return ""
 }
 
+// DriverInventory is one installed, signed device driver. The server's
+// catalog match keys are hardware_id + provider_name + driver_version/date.
 type DriverInventory struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	DeviceName    string                 `protobuf:"bytes,1,opt,name=device_name,json=deviceName,proto3" json:"device_name,omitempty"`
-	DeviceClass   string                 `protobuf:"bytes,2,opt,name=device_class,json=deviceClass,proto3" json:"device_class,omitempty"`
-	DriverVersion string                 `protobuf:"bytes,3,opt,name=driver_version,json=driverVersion,proto3" json:"driver_version,omitempty"`
-	DriverDate    string                 `protobuf:"bytes,4,opt,name=driver_date,json=driverDate,proto3" json:"driver_date,omitempty"`
-	ProviderName  string                 `protobuf:"bytes,5,opt,name=provider_name,json=providerName,proto3" json:"provider_name,omitempty"`
-	HardwareId    string                 `protobuf:"bytes,6,opt,name=hardware_id,json=hardwareId,proto3" json:"hardware_id,omitempty"`
-	InfName       string                 `protobuf:"bytes,7,opt,name=inf_name,json=infName,proto3" json:"inf_name,omitempty"`
-	Manufacturer  string                 `protobuf:"bytes,8,opt,name=manufacturer,proto3" json:"manufacturer,omitempty"`
-	IsSigned      bool                   `protobuf:"varint,9,opt,name=is_signed,json=isSigned,proto3" json:"is_signed,omitempty"`
+	DeviceName    string                 `protobuf:"bytes,1,opt,name=device_name,json=deviceName,proto3" json:"device_name,omitempty"`          // "NVIDIA GeForce RTX 3060"
+	DeviceClass   string                 `protobuf:"bytes,2,opt,name=device_class,json=deviceClass,proto3" json:"device_class,omitempty"`       // "Display" | "Net" | "System" | ...
+	DriverVersion string                 `protobuf:"bytes,3,opt,name=driver_version,json=driverVersion,proto3" json:"driver_version,omitempty"` // "31.0.15.3623" (the compare key)
+	DriverDate    string                 `protobuf:"bytes,4,opt,name=driver_date,json=driverDate,proto3" json:"driver_date,omitempty"`          // "YYYY-MM-DD" (normalized from CIM_DATETIME); empty = unknown
+	ProviderName  string                 `protobuf:"bytes,5,opt,name=provider_name,json=providerName,proto3" json:"provider_name,omitempty"`    // "NVIDIA" | "Intel" | "Realtek"
+	HardwareId    string                 `protobuf:"bytes,6,opt,name=hardware_id,json=hardwareId,proto3" json:"hardware_id,omitempty"`          // "PCI\\VEN_10DE&DEV_2504..." — catalog match anchor
+	InfName       string                 `protobuf:"bytes,7,opt,name=inf_name,json=infName,proto3" json:"inf_name,omitempty"`                   // "oem123.inf"
+	Manufacturer  string                 `protobuf:"bytes,8,opt,name=manufacturer,proto3" json:"manufacturer,omitempty"`                        // device manufacturer string
+	IsSigned      bool                   `protobuf:"varint,9,opt,name=is_signed,json=isSigned,proto3" json:"is_signed,omitempty"`               // Authenticode-signed driver package
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DriverInventory) Reset() {
 	*x = DriverInventory{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2521,7 +2871,7 @@ func (x *DriverInventory) String() string {
 func (*DriverInventory) ProtoMessage() {}
 
 func (x *DriverInventory) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[25]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2534,7 +2884,7 @@ func (x *DriverInventory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DriverInventory.ProtoReflect.Descriptor instead.
 func (*DriverInventory) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{25}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *DriverInventory) GetDeviceName() string {
@@ -2600,38 +2950,63 @@ func (x *DriverInventory) GetIsSigned() bool {
 	return false
 }
 
+// HardwareInventory is the HW section of a Tier-3 snapshot. Fields that
+// are not available on the host are left empty strings or 0; the server
+// treats "" / 0 as "unknown", not "none". All sizes in bytes.
 type HardwareInventory struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	CpuVendor          string                 `protobuf:"bytes,1,opt,name=cpu_vendor,json=cpuVendor,proto3" json:"cpu_vendor,omitempty"`
-	CpuModel           string                 `protobuf:"bytes,2,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`
-	CpuPhysicalCores   int32                  `protobuf:"varint,3,opt,name=cpu_physical_cores,json=cpuPhysicalCores,proto3" json:"cpu_physical_cores,omitempty"`
-	CpuLogicalCores    int32                  `protobuf:"varint,4,opt,name=cpu_logical_cores,json=cpuLogicalCores,proto3" json:"cpu_logical_cores,omitempty"`
-	MemoryTotalBytes   int64                  `protobuf:"varint,5,opt,name=memory_total_bytes,json=memoryTotalBytes,proto3" json:"memory_total_bytes,omitempty"`
-	Disks              []*DiskInventory       `protobuf:"bytes,6,rep,name=disks,proto3" json:"disks,omitempty"`
-	Nics               []*NetworkInterface    `protobuf:"bytes,7,rep,name=nics,proto3" json:"nics,omitempty"`
-	BiosVendor         string                 `protobuf:"bytes,8,opt,name=bios_vendor,json=biosVendor,proto3" json:"bios_vendor,omitempty"`
-	BiosVersion        string                 `protobuf:"bytes,9,opt,name=bios_version,json=biosVersion,proto3" json:"bios_version,omitempty"`
-	BiosReleaseDate    string                 `protobuf:"bytes,10,opt,name=bios_release_date,json=biosReleaseDate,proto3" json:"bios_release_date,omitempty"`
-	SystemVendor       string                 `protobuf:"bytes,11,opt,name=system_vendor,json=systemVendor,proto3" json:"system_vendor,omitempty"`
-	SystemProduct      string                 `protobuf:"bytes,12,opt,name=system_product,json=systemProduct,proto3" json:"system_product,omitempty"`
-	SystemSerialNumber string                 `protobuf:"bytes,13,opt,name=system_serial_number,json=systemSerialNumber,proto3" json:"system_serial_number,omitempty"`
-	ChassisType        string                 `protobuf:"bytes,14,opt,name=chassis_type,json=chassisType,proto3" json:"chassis_type,omitempty"`
-	CpuMhz             int32                  `protobuf:"varint,15,opt,name=cpu_mhz,json=cpuMhz,proto3" json:"cpu_mhz,omitempty"`
-	CpuThreadsPerCore  int32                  `protobuf:"varint,16,opt,name=cpu_threads_per_core,json=cpuThreadsPerCore,proto3" json:"cpu_threads_per_core,omitempty"`
-	CpuArchitecture    string                 `protobuf:"bytes,17,opt,name=cpu_architecture,json=cpuArchitecture,proto3" json:"cpu_architecture,omitempty"`
-	OsProductName      string                 `protobuf:"bytes,18,opt,name=os_product_name,json=osProductName,proto3" json:"os_product_name,omitempty"`
-	OsDisplayVersion   string                 `protobuf:"bytes,19,opt,name=os_display_version,json=osDisplayVersion,proto3" json:"os_display_version,omitempty"`
-	OsBuild            string                 `protobuf:"bytes,20,opt,name=os_build,json=osBuild,proto3" json:"os_build,omitempty"`
-	OsServicePack      string                 `protobuf:"bytes,21,opt,name=os_service_pack,json=osServicePack,proto3" json:"os_service_pack,omitempty"`
-	SystemUuid         string                 `protobuf:"bytes,22,opt,name=system_uuid,json=systemUuid,proto3" json:"system_uuid,omitempty"`
-	Virtualization     string                 `protobuf:"bytes,23,opt,name=virtualization,proto3" json:"virtualization,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// CPU — vendor + model from CPUID; cores from GetLogicalProcessorInformation.
+	CpuVendor        string `protobuf:"bytes,1,opt,name=cpu_vendor,json=cpuVendor,proto3" json:"cpu_vendor,omitempty"` // e.g. "GenuineIntel" | "AuthenticAMD"
+	CpuModel         string `protobuf:"bytes,2,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`    // brand string from CPUID leaf 0x80000002-0x80000004
+	CpuPhysicalCores int32  `protobuf:"varint,3,opt,name=cpu_physical_cores,json=cpuPhysicalCores,proto3" json:"cpu_physical_cores,omitempty"`
+	CpuLogicalCores  int32  `protobuf:"varint,4,opt,name=cpu_logical_cores,json=cpuLogicalCores,proto3" json:"cpu_logical_cores,omitempty"`
+	// Memory — GlobalMemoryStatusEx totals.
+	MemoryTotalBytes int64 `protobuf:"varint,5,opt,name=memory_total_bytes,json=memoryTotalBytes,proto3" json:"memory_total_bytes,omitempty"`
+	// Disks — one entry per fixed drive (logical volume). Removable / network
+	// drives are excluded (noisy, change often).
+	Disks []*DiskInventory `protobuf:"bytes,6,rep,name=disks,proto3" json:"disks,omitempty"`
+	// NICs — one entry per physical adapter (loopback / tunnel adapters excluded).
+	Nics []*NetworkInterface `protobuf:"bytes,7,rep,name=nics,proto3" json:"nics,omitempty"`
+	// BIOS / chassis — SMBIOS table (bios_vendor / bios_version / system_vendor
+	// / system_product / serial_number / chassis_type). serial_number MAY be
+	// regulated / PII in some jurisdictions; the server catalog decides
+	// whether to persist or redact.
+	BiosVendor         string `protobuf:"bytes,8,opt,name=bios_vendor,json=biosVendor,proto3" json:"bios_vendor,omitempty"`
+	BiosVersion        string `protobuf:"bytes,9,opt,name=bios_version,json=biosVersion,proto3" json:"bios_version,omitempty"`
+	BiosReleaseDate    string `protobuf:"bytes,10,opt,name=bios_release_date,json=biosReleaseDate,proto3" json:"bios_release_date,omitempty"`
+	SystemVendor       string `protobuf:"bytes,11,opt,name=system_vendor,json=systemVendor,proto3" json:"system_vendor,omitempty"`
+	SystemProduct      string `protobuf:"bytes,12,opt,name=system_product,json=systemProduct,proto3" json:"system_product,omitempty"`
+	SystemSerialNumber string `protobuf:"bytes,13,opt,name=system_serial_number,json=systemSerialNumber,proto3" json:"system_serial_number,omitempty"`
+	ChassisType        string `protobuf:"bytes,14,opt,name=chassis_type,json=chassisType,proto3" json:"chassis_type,omitempty"` // "Desktop" | "Laptop" | "Server" | "VM" | etc.
+	// UC-21.1 — closes the easy gaps vs BigFix detailed_hw_physical_processors /
+	// detailed_hw_operating_systems / detailed_hw_smbios categories without
+	// dragging in full SMBIOS raw-table parsing.
+	CpuMhz            int32  `protobuf:"varint,15,opt,name=cpu_mhz,json=cpuMhz,proto3" json:"cpu_mhz,omitempty"`                                      // clock speed from registry (~MHz under CentralProcessor\0)
+	CpuThreadsPerCore int32  `protobuf:"varint,16,opt,name=cpu_threads_per_core,json=cpuThreadsPerCore,proto3" json:"cpu_threads_per_core,omitempty"` // logical / physical when both known; 0 when unknown
+	CpuArchitecture   string `protobuf:"bytes,17,opt,name=cpu_architecture,json=cpuArchitecture,proto3" json:"cpu_architecture,omitempty"`            // "amd64" | "arm64" | "x86"
+	// OS — closes BigFix detailed_hw_operating_systems. These are richer than
+	// the free-form Heartbeat.os string and give a server-side catalog match
+	// the exact build + edition + servicing level.
+	OsProductName    string `protobuf:"bytes,18,opt,name=os_product_name,json=osProductName,proto3" json:"os_product_name,omitempty"`          // "Windows 11 Pro" (ProductName registry)
+	OsDisplayVersion string `protobuf:"bytes,19,opt,name=os_display_version,json=osDisplayVersion,proto3" json:"os_display_version,omitempty"` // "23H2" (DisplayVersion registry)
+	OsBuild          string `protobuf:"bytes,20,opt,name=os_build,json=osBuild,proto3" json:"os_build,omitempty"`                              // "22631.4890" (CurrentBuild + UBR)
+	OsServicePack    string `protobuf:"bytes,21,opt,name=os_service_pack,json=osServicePack,proto3" json:"os_service_pack,omitempty"`          // "Service Pack 1" when present; empty on modern Windows (10+)
+	// System UUID (SMBIOS type 1). Already collected at enroll for dedup;
+	// reporting it here lets the server catalog correlate an endpoint across
+	// reinstalls that reset device_id.
+	SystemUuid string `protobuf:"bytes,22,opt,name=system_uuid,json=systemUuid,proto3" json:"system_uuid,omitempty"`
+	// Virtualization — guest-side detection using BIOS/system vendor strings:
+	// "none" | "vmware" | "virtualbox" | "hyperv" | "xen" | "kvm" | "qemu" |
+	// "parallels" | "unknown". Not a full LPAR equivalent; BigFix's LPAR
+	// detection is AIX/zOS-centric and out of our Phase-1 scope.
+	Virtualization string `protobuf:"bytes,23,opt,name=virtualization,proto3" json:"virtualization,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *HardwareInventory) Reset() {
 	*x = HardwareInventory{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2643,7 +3018,7 @@ func (x *HardwareInventory) String() string {
 func (*HardwareInventory) ProtoMessage() {}
 
 func (x *HardwareInventory) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[26]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2656,7 +3031,7 @@ func (x *HardwareInventory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HardwareInventory.ProtoReflect.Descriptor instead.
 func (*HardwareInventory) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{26}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *HardwareInventory) GetCpuVendor() string {
@@ -2821,20 +3196,24 @@ func (x *HardwareInventory) GetVirtualization() string {
 }
 
 type DiskInventory struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	MountPoint    string                 `protobuf:"bytes,1,opt,name=mount_point,json=mountPoint,proto3" json:"mount_point,omitempty"`
-	VolumeLabel   string                 `protobuf:"bytes,2,opt,name=volume_label,json=volumeLabel,proto3" json:"volume_label,omitempty"`
-	FileSystem    string                 `protobuf:"bytes,3,opt,name=file_system,json=fileSystem,proto3" json:"file_system,omitempty"`
-	TotalBytes    int64                  `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
-	FreeBytes     int64                  `protobuf:"varint,5,opt,name=free_bytes,json=freeBytes,proto3" json:"free_bytes,omitempty"`
-	DriveType     string                 `protobuf:"bytes,6,opt,name=drive_type,json=driveType,proto3" json:"drive_type,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	MountPoint  string                 `protobuf:"bytes,1,opt,name=mount_point,json=mountPoint,proto3" json:"mount_point,omitempty"`    // "C:\\"
+	VolumeLabel string                 `protobuf:"bytes,2,opt,name=volume_label,json=volumeLabel,proto3" json:"volume_label,omitempty"` // may be empty
+	FileSystem  string                 `protobuf:"bytes,3,opt,name=file_system,json=fileSystem,proto3" json:"file_system,omitempty"`    // "NTFS" | "FAT32" | ...
+	TotalBytes  int64                  `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	FreeBytes   int64                  `protobuf:"varint,5,opt,name=free_bytes,json=freeBytes,proto3" json:"free_bytes,omitempty"`
+	// Drive media type — detected via IOCTL_STORAGE_QUERY_PROPERTY with
+	// StorageDeviceSeekPenaltyProperty + bus-type probe. Values:
+	// "SSD" | "HDD" | "NVMe" | "Unknown". Useful for asset / lifecycle
+	// reporting (replace-cycle planning, SSD-only software policies).
+	DriveType     string `protobuf:"bytes,6,opt,name=drive_type,json=driveType,proto3" json:"drive_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DiskInventory) Reset() {
 	*x = DiskInventory{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2846,7 +3225,7 @@ func (x *DiskInventory) String() string {
 func (*DiskInventory) ProtoMessage() {}
 
 func (x *DiskInventory) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[27]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2859,7 +3238,7 @@ func (x *DiskInventory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiskInventory.ProtoReflect.Descriptor instead.
 func (*DiskInventory) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{27}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *DiskInventory) GetMountPoint() string {
@@ -2906,19 +3285,19 @@ func (x *DiskInventory) GetDriveType() string {
 
 type NetworkInterface struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	MacAddress    string                 `protobuf:"bytes,2,opt,name=mac_address,json=macAddress,proto3" json:"mac_address,omitempty"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`                               // adapter friendly name
+	MacAddress    string                 `protobuf:"bytes,2,opt,name=mac_address,json=macAddress,proto3" json:"mac_address,omitempty"` // "AA:BB:CC:DD:EE:FF"
 	Ipv4Addresses []string               `protobuf:"bytes,3,rep,name=ipv4_addresses,json=ipv4Addresses,proto3" json:"ipv4_addresses,omitempty"`
 	Ipv6Addresses []string               `protobuf:"bytes,4,rep,name=ipv6_addresses,json=ipv6Addresses,proto3" json:"ipv6_addresses,omitempty"`
-	LinkSpeedBps  int64                  `protobuf:"varint,5,opt,name=link_speed_bps,json=linkSpeedBps,proto3" json:"link_speed_bps,omitempty"`
-	Status        string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`
+	LinkSpeedBps  int64                  `protobuf:"varint,5,opt,name=link_speed_bps,json=linkSpeedBps,proto3" json:"link_speed_bps,omitempty"` // bits per second; 0 when unknown
+	Status        string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`                                    // "up" | "down" | "unknown"
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NetworkInterface) Reset() {
 	*x = NetworkInterface{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2930,7 +3309,7 @@ func (x *NetworkInterface) String() string {
 func (*NetworkInterface) ProtoMessage() {}
 
 func (x *NetworkInterface) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[28]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2943,7 +3322,7 @@ func (x *NetworkInterface) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkInterface.ProtoReflect.Descriptor instead.
 func (*NetworkInterface) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{28}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *NetworkInterface) GetName() string {
@@ -2988,27 +3367,69 @@ func (x *NetworkInterface) GetStatus() string {
 	return ""
 }
 
+// AuditEvent is one audit record the agent emits to the server for every
+// security-relevant event: signed commands received or rejected, command
+// completion outcomes, enrollment success / failure, cert renewals. The
+// SERVER is the sole authoritative compliance surface — it writes
+// server_audit.log with its own integrity controls that the endpoint
+// admin cannot reach. The agent keeps a small rolling local audit.log
+// JSONL trace for on-endpoint L1 forensics (field engineer with no
+// server portal) and to capture pre-enrollment events the server never
+// saw; the local copy is best-effort and explicitly secondary.
+//
+// NO PII / secrets ever appear in an AuditEvent — only command metadata
+// (type, id, actor, source, decision). SecureParameters and payload bytes
+// are NEVER logged here, same discipline as UC-20 script content audit.
 type AuditEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DeviceId      string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	Ts            int64                  `protobuf:"varint,2,opt,name=ts,proto3" json:"ts,omitempty"`
-	EventType     string                 `protobuf:"bytes,3,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
-	CommandId     string                 `protobuf:"bytes,4,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	CommandType   string                 `protobuf:"bytes,5,opt,name=command_type,json=commandType,proto3" json:"command_type,omitempty"`
-	Actor         string                 `protobuf:"bytes,6,opt,name=actor,proto3" json:"actor,omitempty"`
-	Source        string                 `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
-	IssuedAt      int64                  `protobuf:"varint,8,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
-	SignatureOk   bool                   `protobuf:"varint,9,opt,name=signature_ok,json=signatureOk,proto3" json:"signature_ok,omitempty"`
-	Decision      string                 `protobuf:"bytes,10,opt,name=decision,proto3" json:"decision,omitempty"`
-	Reason        string                 `protobuf:"bytes,11,opt,name=reason,proto3" json:"reason,omitempty"`
-	Details       string                 `protobuf:"bytes,14,opt,name=details,proto3" json:"details,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	DeviceId string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	// ts: unix millis when the agent made the audit decision (receive-time,
+	// not Command.issued_at which is when the operator clicked run).
+	Ts int64 `protobuf:"varint,2,opt,name=ts,proto3" json:"ts,omitempty"`
+	// event_type: short closed vocabulary so server-side analysis keys off
+	// exact strings.
+	//   "command_received"    — signed command passed signature check
+	//   "command_rejected"    — signed command failed signature or validation
+	//   "enrollment_success"  — EnrollRequest accepted + cert issued
+	//   "enrollment_failed"   — EnrollRequest rejected (bad token, license, etc.)
+	//   "cert_renewed"        — client cert rotated before expiry
+	//   "audit_degraded"      — local audit.log write failure (fail-loud)
+	EventType   string `protobuf:"bytes,3,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	CommandId   string `protobuf:"bytes,4,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`        // signed command id (empty on enrollment events)
+	CommandType string `protobuf:"bytes,5,opt,name=command_type,json=commandType,proto3" json:"command_type,omitempty"`  // e.g. "run_command" | "install_patch" (empty on non-command events)
+	Actor       string `protobuf:"bytes,6,opt,name=actor,proto3" json:"actor,omitempty"`                                 // from Command.actor
+	Source      string `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`                               // from Command.source
+	IssuedAt    int64  `protobuf:"varint,8,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`          // from Command.issued_at
+	SignatureOk bool   `protobuf:"varint,9,opt,name=signature_ok,json=signatureOk,proto3" json:"signature_ok,omitempty"` // true = signature verified
+	Decision    string `protobuf:"bytes,10,opt,name=decision,proto3" json:"decision,omitempty"`                          // "accepted" | "rejected" | "degraded"
+	Reason      string `protobuf:"bytes,11,opt,name=reason,proto3" json:"reason,omitempty"`                              // human-readable short reason (no secrets)
+	// details is a short per-command-type payload summary so an auditor
+	// can tell WHAT was done, not just that "a run_command was received".
+	// Format is "k1=v1, k2=v2" with keys per command type:
+	//   run_command:         shell=<cmd|powershell|...>, command=<text truncated to 400B>
+	//   install_patch:       kb=<KB####>
+	//   uninstall_patch:     kb=<KB####>
+	//   stage_patch:         kb=<KB####>
+	//   software_deploy*:    name=<...>, version=<...>, action=<install|uninstall>
+	//   collect_file:        paths=<N>, first=<first path>
+	//   file_operation:      op=<copy|move|write_bytes|...>, src=<...>, dst=<...>
+	//   reboot:              delay=<N>s
+	//   scan_now|scan:       (empty)
+	//   report_device_state: (empty)
+	//   open_shell:          session_id=<short>
+	// SECRET GUARD: when the signed spec carries secure_parameters, the
+	// summary is replaced with "<sensitive — secure parameters in use>"
+	// so a secret substituted into ${name} tokens cannot leak via audit.
+	// Admin discipline must still be followed for literal secrets in
+	// script sources (same discipline as UC-20 script content audit).
+	Details       string `protobuf:"bytes,14,opt,name=details,proto3" json:"details,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AuditEvent) Reset() {
 	*x = AuditEvent{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3020,7 +3441,7 @@ func (x *AuditEvent) String() string {
 func (*AuditEvent) ProtoMessage() {}
 
 func (x *AuditEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[29]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3033,7 +3454,7 @@ func (x *AuditEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditEvent.ProtoReflect.Descriptor instead.
 func (*AuditEvent) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{29}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *AuditEvent) GetDeviceId() string {
@@ -3140,7 +3561,7 @@ type AgentMessage struct {
 
 func (x *AgentMessage) Reset() {
 	*x = AgentMessage{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3152,7 +3573,7 @@ func (x *AgentMessage) String() string {
 func (*AgentMessage) ProtoMessage() {}
 
 func (x *AgentMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[30]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3165,7 +3586,7 @@ func (x *AgentMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentMessage.ProtoReflect.Descriptor instead.
 func (*AgentMessage) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{30}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *AgentMessage) GetPayload() isAgentMessage_Payload {
@@ -3314,55 +3735,65 @@ func (*AgentMessage_AuditEvent) isAgentMessage_Payload() {}
 
 func (*AgentMessage_DexTelemetry) isAgentMessage_Payload() {}
 
-// One aggregated CPU / memory window (percent, 0-100). collected_at is unix seconds.
+// DexTelemetry is a periodic, AGGREGATED resource-usage report for the DEX score
+// (BigFix-DEX device-performance equivalent). The agent samples live CPU and
+// memory at a short interval and sends avg/min/max over a window, on its OWN
+// cadence — NOT in the change-gated inventory, where a constantly-changing value
+// would force a send every cycle. Native-only (GetSystemTimes /
+// GlobalMemoryStatusEx) — no PowerShell, no WMI.
 type DexTelemetry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DeviceId      string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	CollectedAt   int64                  `protobuf:"varint,2,opt,name=collected_at,json=collectedAt,proto3" json:"collected_at,omitempty"`
-	WindowSeconds int32                  `protobuf:"varint,3,opt,name=window_seconds,json=windowSeconds,proto3" json:"window_seconds,omitempty"`
-	SampleCount   int32                  `protobuf:"varint,4,opt,name=sample_count,json=sampleCount,proto3" json:"sample_count,omitempty"`
-	CpuAvg        float64                `protobuf:"fixed64,5,opt,name=cpu_avg,json=cpuAvg,proto3" json:"cpu_avg,omitempty"`
+	CollectedAt   int64                  `protobuf:"varint,2,opt,name=collected_at,json=collectedAt,proto3" json:"collected_at,omitempty"`       // unix seconds at window end
+	WindowSeconds int32                  `protobuf:"varint,3,opt,name=window_seconds,json=windowSeconds,proto3" json:"window_seconds,omitempty"` // aggregation window length
+	SampleCount   int32                  `protobuf:"varint,4,opt,name=sample_count,json=sampleCount,proto3" json:"sample_count,omitempty"`       // samples aggregated into this report
+	CpuAvg        float64                `protobuf:"fixed64,5,opt,name=cpu_avg,json=cpuAvg,proto3" json:"cpu_avg,omitempty"`                     // CPU utilization %, averaged over the window
 	CpuMin        float64                `protobuf:"fixed64,6,opt,name=cpu_min,json=cpuMin,proto3" json:"cpu_min,omitempty"`
 	CpuMax        float64                `protobuf:"fixed64,7,opt,name=cpu_max,json=cpuMax,proto3" json:"cpu_max,omitempty"`
-	MemUsedAvg    float64                `protobuf:"fixed64,8,opt,name=mem_used_avg,json=memUsedAvg,proto3" json:"mem_used_avg,omitempty"`
+	MemUsedAvg    float64                `protobuf:"fixed64,8,opt,name=mem_used_avg,json=memUsedAvg,proto3" json:"mem_used_avg,omitempty"` // physical memory in-use %, averaged (available% = 100 - used)
 	MemUsedMin    float64                `protobuf:"fixed64,9,opt,name=mem_used_min,json=memUsedMin,proto3" json:"mem_used_min,omitempty"`
 	MemUsedMax    float64                `protobuf:"fixed64,10,opt,name=mem_used_max,json=memUsedMax,proto3" json:"mem_used_max,omitempty"`
-	// Disk: PhysicalDisk(_Total) queue length, transfers/s, latency.
-	DiskQueueAvg     float64 `protobuf:"fixed64,11,opt,name=disk_queue_avg,json=diskQueueAvg,proto3" json:"disk_queue_avg,omitempty"`
+	// PhysicalDisk(_Total) performance, averaged over the window (0 when unavailable).
+	DiskQueueAvg     float64 `protobuf:"fixed64,11,opt,name=disk_queue_avg,json=diskQueueAvg,proto3" json:"disk_queue_avg,omitempty"` // avg. disk queue length (outstanding I/O)
 	DiskQueueMin     float64 `protobuf:"fixed64,12,opt,name=disk_queue_min,json=diskQueueMin,proto3" json:"disk_queue_min,omitempty"`
 	DiskQueueMax     float64 `protobuf:"fixed64,13,opt,name=disk_queue_max,json=diskQueueMax,proto3" json:"disk_queue_max,omitempty"`
-	DiskIopsAvg      float64 `protobuf:"fixed64,14,opt,name=disk_iops_avg,json=diskIopsAvg,proto3" json:"disk_iops_avg,omitempty"`
+	DiskIopsAvg      float64 `protobuf:"fixed64,14,opt,name=disk_iops_avg,json=diskIopsAvg,proto3" json:"disk_iops_avg,omitempty"` // disk transfers/sec
 	DiskIopsMin      float64 `protobuf:"fixed64,15,opt,name=disk_iops_min,json=diskIopsMin,proto3" json:"disk_iops_min,omitempty"`
 	DiskIopsMax      float64 `protobuf:"fixed64,16,opt,name=disk_iops_max,json=diskIopsMax,proto3" json:"disk_iops_max,omitempty"`
-	DiskLatencyMsAvg float64 `protobuf:"fixed64,17,opt,name=disk_latency_ms_avg,json=diskLatencyMsAvg,proto3" json:"disk_latency_ms_avg,omitempty"`
+	DiskLatencyMsAvg float64 `protobuf:"fixed64,17,opt,name=disk_latency_ms_avg,json=diskLatencyMsAvg,proto3" json:"disk_latency_ms_avg,omitempty"` // avg. ms per transfer
 	DiskLatencyMsMin float64 `protobuf:"fixed64,18,opt,name=disk_latency_ms_min,json=diskLatencyMsMin,proto3" json:"disk_latency_ms_min,omitempty"`
 	DiskLatencyMsMax float64 `protobuf:"fixed64,19,opt,name=disk_latency_ms_max,json=diskLatencyMsMax,proto3" json:"disk_latency_ms_max,omitempty"`
-	// Network: ICMP round trip to net_target (default gateway unless configured).
-	NetRttMsAvg float64 `protobuf:"fixed64,20,opt,name=net_rtt_ms_avg,json=netRttMsAvg,proto3" json:"net_rtt_ms_avg,omitempty"`
+	// Network latency + reachability to the ping target (default gateway, or the
+	// configured AEGIS_DEX_PING_TARGET). 0 when no target could be probed.
+	NetRttMsAvg float64 `protobuf:"fixed64,20,opt,name=net_rtt_ms_avg,json=netRttMsAvg,proto3" json:"net_rtt_ms_avg,omitempty"` // avg. ICMP round-trip ms (over reachable probes)
 	NetRttMsMin float64 `protobuf:"fixed64,21,opt,name=net_rtt_ms_min,json=netRttMsMin,proto3" json:"net_rtt_ms_min,omitempty"`
 	NetRttMsMax float64 `protobuf:"fixed64,22,opt,name=net_rtt_ms_max,json=netRttMsMax,proto3" json:"net_rtt_ms_max,omitempty"`
-	NetLossPct  float64 `protobuf:"fixed64,23,opt,name=net_loss_pct,json=netLossPct,proto3" json:"net_loss_pct,omitempty"`
-	NetTarget   string  `protobuf:"bytes,24,opt,name=net_target,json=netTarget,proto3" json:"net_target,omitempty"`
-	// Battery (percent).
+	NetLossPct  float64 `protobuf:"fixed64,23,opt,name=net_loss_pct,json=netLossPct,proto3" json:"net_loss_pct,omitempty"` // % of probes with no reply this window (packet loss)
+	NetTarget   string  `protobuf:"bytes,24,opt,name=net_target,json=netTarget,proto3" json:"net_target,omitempty"`        // IP that was probed
+	// Battery (laptops). battery_present=false on desktops/servers/VMs.
 	BatteryPresent      bool    `protobuf:"varint,25,opt,name=battery_present,json=batteryPresent,proto3" json:"battery_present,omitempty"`
-	BatteryAcOnline     bool    `protobuf:"varint,26,opt,name=battery_ac_online,json=batteryAcOnline,proto3" json:"battery_ac_online,omitempty"`
-	BatteryChargePctAvg float64 `protobuf:"fixed64,27,opt,name=battery_charge_pct_avg,json=batteryChargePctAvg,proto3" json:"battery_charge_pct_avg,omitempty"`
-	BatteryChargePctMin float64 `protobuf:"fixed64,28,opt,name=battery_charge_pct_min,json=batteryChargePctMin,proto3" json:"battery_charge_pct_min,omitempty"`
+	BatteryAcOnline     bool    `protobuf:"varint,26,opt,name=battery_ac_online,json=batteryAcOnline,proto3" json:"battery_ac_online,omitempty"`                // true = on AC power
+	BatteryChargePctAvg float64 `protobuf:"fixed64,27,opt,name=battery_charge_pct_avg,json=batteryChargePctAvg,proto3" json:"battery_charge_pct_avg,omitempty"` // charge %, averaged over the window
+	BatteryChargePctMin float64 `protobuf:"fixed64,28,opt,name=battery_charge_pct_min,json=batteryChargePctMin,proto3" json:"battery_charge_pct_min,omitempty"` // window low (drain indicator)
 	BatteryChargePctMax float64 `protobuf:"fixed64,29,opt,name=battery_charge_pct_max,json=batteryChargePctMax,proto3" json:"battery_charge_pct_max,omitempty"`
-	// Wi-Fi signal quality (0-100) and network name.
+	// Wi-Fi (laptops). wifi_present=false when there is no Wi-Fi adapter.
 	WifiPresent      bool    `protobuf:"varint,30,opt,name=wifi_present,json=wifiPresent,proto3" json:"wifi_present,omitempty"`
-	WifiConnected    bool    `protobuf:"varint,31,opt,name=wifi_connected,json=wifiConnected,proto3" json:"wifi_connected,omitempty"`
-	WifiSignalPctAvg float64 `protobuf:"fixed64,32,opt,name=wifi_signal_pct_avg,json=wifiSignalPctAvg,proto3" json:"wifi_signal_pct_avg,omitempty"`
+	WifiConnected    bool    `protobuf:"varint,31,opt,name=wifi_connected,json=wifiConnected,proto3" json:"wifi_connected,omitempty"`               // associated to an AP
+	WifiSignalPctAvg float64 `protobuf:"fixed64,32,opt,name=wifi_signal_pct_avg,json=wifiSignalPctAvg,proto3" json:"wifi_signal_pct_avg,omitempty"` // signal quality %, averaged over the window
 	WifiSignalPctMin float64 `protobuf:"fixed64,33,opt,name=wifi_signal_pct_min,json=wifiSignalPctMin,proto3" json:"wifi_signal_pct_min,omitempty"`
 	WifiSignalPctMax float64 `protobuf:"fixed64,34,opt,name=wifi_signal_pct_max,json=wifiSignalPctMax,proto3" json:"wifi_signal_pct_max,omitempty"`
 	WifiSsid         string  `protobuf:"bytes,35,opt,name=wifi_ssid,json=wifiSsid,proto3" json:"wifi_ssid,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Battery health/wear (laptops). battery_health_pct = full-charged / designed
+	// capacity * 100 (100 = like-new, lower = worn). 0 = unknown / no battery.
+	BatteryHealthPct  float64 `protobuf:"fixed64,36,opt,name=battery_health_pct,json=batteryHealthPct,proto3" json:"battery_health_pct,omitempty"`
+	BatteryCycleCount int32   `protobuf:"varint,37,opt,name=battery_cycle_count,json=batteryCycleCount,proto3" json:"battery_cycle_count,omitempty"` // charge cycles, 0 = unknown (many firmwares don't report it)
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *DexTelemetry) Reset() {
 	*x = DexTelemetry{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3374,7 +3805,7 @@ func (x *DexTelemetry) String() string {
 func (*DexTelemetry) ProtoMessage() {}
 
 func (x *DexTelemetry) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[31]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3387,7 +3818,7 @@ func (x *DexTelemetry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DexTelemetry.ProtoReflect.Descriptor instead.
 func (*DexTelemetry) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{31}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *DexTelemetry) GetDeviceId() string {
@@ -3635,18 +4066,36 @@ func (x *DexTelemetry) GetWifiSsid() string {
 	return ""
 }
 
+func (x *DexTelemetry) GetBatteryHealthPct() float64 {
+	if x != nil {
+		return x.BatteryHealthPct
+	}
+	return 0
+}
+
+func (x *DexTelemetry) GetBatteryCycleCount() int32 {
+	if x != nil {
+		return x.BatteryCycleCount
+	}
+	return 0
+}
+
+// PatchBaseline is the tiny snapshot the server pushes on sync: "for your build,
+// the latest known KBs are these." The agent caches it and, while offline,
+// compares its installed KBs against it to flag "likely missing" locally
+// (best-effort; the authoritative diff is server-side on reconnect).
 type PatchBaseline struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Build         string                 `protobuf:"bytes,1,opt,name=build,proto3" json:"build,omitempty"`
-	LatestKbs     []string               `protobuf:"bytes,2,rep,name=latest_kbs,json=latestKbs,proto3" json:"latest_kbs,omitempty"`
-	IssuedAt      int64                  `protobuf:"varint,3,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	Build         string                 `protobuf:"bytes,1,opt,name=build,proto3" json:"build,omitempty"`                          // the build this baseline applies to
+	LatestKbs     []string               `protobuf:"bytes,2,rep,name=latest_kbs,json=latestKbs,proto3" json:"latest_kbs,omitempty"` // KBs expected for the latest state of that build
+	IssuedAt      int64                  `protobuf:"varint,3,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`   // unix seconds
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PatchBaseline) Reset() {
 	*x = PatchBaseline{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3658,7 +4107,7 @@ func (x *PatchBaseline) String() string {
 func (*PatchBaseline) ProtoMessage() {}
 
 func (x *PatchBaseline) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[32]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3671,7 +4120,7 @@ func (x *PatchBaseline) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PatchBaseline.ProtoReflect.Descriptor instead.
 func (*PatchBaseline) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{32}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *PatchBaseline) GetBuild() string {
@@ -3695,17 +4144,21 @@ func (x *PatchBaseline) GetIssuedAt() int64 {
 	return 0
 }
 
+// CabManifest tells the agent the current wsusscn2.cab version the server has.
+// The agent compares it to its locally cached cab version and, if different,
+// fetches the new cab via peer-cache (one-way: internet → catalog server →
+// peer-cache → endpoint; the endpoint never fetches from Microsoft).
 type CabManifest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Version       string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
-	Sha256        string                 `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	Version       string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"` // opaque version/manifest id of the current cab
+	Sha256        string                 `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`   // integrity of the cab to fetch
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CabManifest) Reset() {
 	*x = CabManifest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3717,7 +4170,7 @@ func (x *CabManifest) String() string {
 func (*CabManifest) ProtoMessage() {}
 
 func (x *CabManifest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[33]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3730,7 +4183,7 @@ func (x *CabManifest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CabManifest.ProtoReflect.Descriptor instead.
 func (*CabManifest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{33}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *CabManifest) GetVersion() string {
@@ -3761,7 +4214,7 @@ type ServerMessage struct {
 
 func (x *ServerMessage) Reset() {
 	*x = ServerMessage{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3773,7 +4226,7 @@ func (x *ServerMessage) String() string {
 func (*ServerMessage) ProtoMessage() {}
 
 func (x *ServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[34]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3786,7 +4239,7 @@ func (x *ServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerMessage.ProtoReflect.Descriptor instead.
 func (*ServerMessage) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{34}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ServerMessage) GetPayload() isServerMessage_Payload {
@@ -3845,19 +4298,28 @@ func (*ServerMessage_PatchBaseline) isServerMessage_Payload() {}
 
 func (*ServerMessage_CabManifest) isServerMessage_Payload() {}
 
+// ContentRequest asks the server (peer-cache) for a file by kind+id. The agent
+// never fetches from the internet — only from the server/peer-cache over this
+// same mTLS channel.
 type ContentRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
-	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
-	Sha256        string                 `protobuf:"bytes,3,opt,name=sha256,proto3" json:"sha256,omitempty"`
-	Offset        int64                  `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Kind   string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`     // "cab" | "patch" | "package" (software distribution)
+	Id     string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`         // cab version, patch id (e.g. KB), or package content_id
+	Sha256 string                 `protobuf:"bytes,3,opt,name=sha256,proto3" json:"sha256,omitempty"` // expected digest, verified after download
+	// offset is the byte position to resume streaming from (checkpoint restart).
+	// 0 = from the start. On a mid-transfer disconnect the agent keeps the bytes
+	// it already wrote and re-requests with offset = bytes-on-disk, so a large
+	// package is not re-sent from zero. The server seeks to this offset and
+	// streams the remainder; an offset past the file's end is rejected so the
+	// agent restarts cleanly. End-to-end SHA-256 still verifies the whole file.
+	Offset        int64 `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ContentRequest) Reset() {
 	*x = ContentRequest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3869,7 +4331,7 @@ func (x *ContentRequest) String() string {
 func (*ContentRequest) ProtoMessage() {}
 
 func (x *ContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[35]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3882,7 +4344,7 @@ func (x *ContentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContentRequest.ProtoReflect.Descriptor instead.
 func (*ContentRequest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{35}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ContentRequest) GetKind() string {
@@ -3913,6 +4375,7 @@ func (x *ContentRequest) GetOffset() int64 {
 	return 0
 }
 
+// ContentChunk is one slice of the streamed file.
 type ContentChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
@@ -3922,7 +4385,7 @@ type ContentChunk struct {
 
 func (x *ContentChunk) Reset() {
 	*x = ContentChunk{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3934,7 +4397,7 @@ func (x *ContentChunk) String() string {
 func (*ContentChunk) ProtoMessage() {}
 
 func (x *ContentChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[36]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3947,7 +4410,7 @@ func (x *ContentChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContentChunk.ProtoReflect.Descriptor instead.
 func (*ContentChunk) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{36}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ContentChunk) GetData() []byte {
@@ -3957,27 +4420,40 @@ func (x *ContentChunk) GetData() []byte {
 	return nil
 }
 
+// EnrollRequest is the agent's one-time enrollment call (Option B). The agent has
+// no client cert yet, so this runs over SERVER-AUTH TLS (agent verifies the server
+// via the embedded CA) and is authenticated by the per-tenant enroll_token. The
+// agent generates its own keypair locally and sends only a CSR — the private key
+// never leaves the device.
 type EnrollRequest struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	EnrollToken       string                 `protobuf:"bytes,1,opt,name=enroll_token,json=enrollToken,proto3" json:"enroll_token,omitempty"`
-	DeviceId          string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	CsrPem            string                 `protobuf:"bytes,3,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"`
-	SystemUuid        string                 `protobuf:"bytes,4,opt,name=system_uuid,json=systemUuid,proto3" json:"system_uuid,omitempty"`
-	MachineGuid       string                 `protobuf:"bytes,5,opt,name=machine_guid,json=machineGuid,proto3" json:"machine_guid,omitempty"`
-	Hostname          string                 `protobuf:"bytes,6,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	Os                string                 `protobuf:"bytes,7,opt,name=os,proto3" json:"os,omitempty"`
-	AgentVersion      string                 `protobuf:"bytes,8,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	TpmEk             string                 `protobuf:"bytes,9,opt,name=tpm_ek,json=tpmEk,proto3" json:"tpm_ek,omitempty"`
-	SchemaVersion     string                 `protobuf:"bytes,10,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
-	AgentCapabilities []string               `protobuf:"bytes,11,rep,name=agent_capabilities,json=agentCapabilities,proto3" json:"agent_capabilities,omitempty"`
-	DeviceType        string                 `protobuf:"bytes,12,opt,name=device_type,json=deviceType,proto3" json:"device_type,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	EnrollToken  string                 `protobuf:"bytes,1,opt,name=enroll_token,json=enrollToken,proto3" json:"enroll_token,omitempty"` // per-tenant bootstrap token (license-gated server side)
+	DeviceId     string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`          // agent's persisted UUID (may be empty on first ever enroll)
+	CsrPem       string                 `protobuf:"bytes,3,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"`                // PEM CSR, CN = device_id; server CA signs it
+	SystemUuid   string                 `protobuf:"bytes,4,opt,name=system_uuid,json=systemUuid,proto3" json:"system_uuid,omitempty"`    // SMBIOS System UUID (primary dedup key)
+	MachineGuid  string                 `protobuf:"bytes,5,opt,name=machine_guid,json=machineGuid,proto3" json:"machine_guid,omitempty"` // registry MachineGuid (secondary dedup key)
+	Hostname     string                 `protobuf:"bytes,6,opt,name=hostname,proto3" json:"hostname,omitempty"`                          // display attribute only — never a dedup key
+	Os           string                 `protobuf:"bytes,7,opt,name=os,proto3" json:"os,omitempty"`
+	AgentVersion string                 `protobuf:"bytes,8,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	TpmEk        string                 `protobuf:"bytes,9,opt,name=tpm_ek,json=tpmEk,proto3" json:"tpm_ek,omitempty"` // TPM Endorsement Key fingerprint (strongest dedup key when present)
+	// schema_version — same semantics as Heartbeat.schema_version. Captured
+	// at enroll so the server knows the contract version before the first
+	// heartbeat arrives (and can reject a protocol-incompatible agent).
+	SchemaVersion string `protobuf:"bytes,10,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	// agent_capabilities — same semantics as Heartbeat.agent_capabilities,
+	// captured at enroll so the server records the capability profile
+	// atomically with issuing the per-device client certificate.
+	AgentCapabilities []string `protobuf:"bytes,11,rep,name=agent_capabilities,json=agentCapabilities,proto3" json:"agent_capabilities,omitempty"`
+	// device_type — "endpoint" | "probe" (Phase 2). Captured at enroll so
+	// the server stores the device's role alongside the issued cert.
+	DeviceType    string `protobuf:"bytes,12,opt,name=device_type,json=deviceType,proto3" json:"device_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EnrollRequest) Reset() {
 	*x = EnrollRequest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3989,7 +4465,7 @@ func (x *EnrollRequest) String() string {
 func (*EnrollRequest) ProtoMessage() {}
 
 func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[37]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4002,7 +4478,7 @@ func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollRequest.ProtoReflect.Descriptor instead.
 func (*EnrollRequest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{37}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *EnrollRequest) GetEnrollToken() string {
@@ -4089,20 +4565,23 @@ func (x *EnrollRequest) GetDeviceType() string {
 	return ""
 }
 
+// EnrollResponse returns the signed per-device client certificate. assigned_device_id
+// is the server-reconciled id (may differ from the requested one after dedup). A
+// non-empty error means the enrollment was rejected (bad token, over license, etc.).
 type EnrollResponse struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
-	ClientCertPem    string                 `protobuf:"bytes,1,opt,name=client_cert_pem,json=clientCertPem,proto3" json:"client_cert_pem,omitempty"`
-	CaChainPem       string                 `protobuf:"bytes,2,opt,name=ca_chain_pem,json=caChainPem,proto3" json:"ca_chain_pem,omitempty"`
+	ClientCertPem    string                 `protobuf:"bytes,1,opt,name=client_cert_pem,json=clientCertPem,proto3" json:"client_cert_pem,omitempty"` // signed per-device client certificate
+	CaChainPem       string                 `protobuf:"bytes,2,opt,name=ca_chain_pem,json=caChainPem,proto3" json:"ca_chain_pem,omitempty"`          // CA chain (optional; may already be provisioned)
 	AssignedDeviceId string                 `protobuf:"bytes,3,opt,name=assigned_device_id,json=assignedDeviceId,proto3" json:"assigned_device_id,omitempty"`
 	Error            string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
-	ComputerId       string                 `protobuf:"bytes,5,opt,name=computer_id,json=computerId,proto3" json:"computer_id,omitempty"`
+	ComputerId       string                 `protobuf:"bytes,5,opt,name=computer_id,json=computerId,proto3" json:"computer_id,omitempty"` // server-assigned numeric console id (e.g. 10-digit, expandable)
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
 
 func (x *EnrollResponse) Reset() {
 	*x = EnrollResponse{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4114,7 +4593,7 @@ func (x *EnrollResponse) String() string {
 func (*EnrollResponse) ProtoMessage() {}
 
 func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[38]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4127,7 +4606,7 @@ func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollResponse.ProtoReflect.Descriptor instead.
 func (*EnrollResponse) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{38}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *EnrollResponse) GetClientCertPem() string {
@@ -4165,20 +4644,37 @@ func (x *EnrollResponse) GetComputerId() string {
 	return ""
 }
 
+// CollectFileSpec is the payload of a signed "collect_file" command — the agent
+// uploads the named endpoint-local files to the server via UploadContent. The
+// agent is a faithful executor: it reads only what the signed command names, caps
+// per file and per task, and never pushes on its own.
 type CollectFileSpec struct {
-	state                   protoimpl.MessageState `protogen:"open.v1"`
-	Paths                   []string               `protobuf:"bytes,1,rep,name=paths,proto3" json:"paths,omitempty"`
-	MaxBytesEach            int64                  `protobuf:"varint,2,opt,name=max_bytes_each,json=maxBytesEach,proto3" json:"max_bytes_each,omitempty"`
-	TailBytes               int64                  `protobuf:"varint,3,opt,name=tail_bytes,json=tailBytes,proto3" json:"tail_bytes,omitempty"`
-	MaxTotalBytes           int64                  `protobuf:"varint,4,opt,name=max_total_bytes,json=maxTotalBytes,proto3" json:"max_total_bytes,omitempty"`
-	MaxUploadBytesPerSecond int64                  `protobuf:"varint,5,opt,name=max_upload_bytes_per_second,json=maxUploadBytesPerSecond,proto3" json:"max_upload_bytes_per_second,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// paths lists files to upload, each either an absolute path or a shell-style
+	// glob (e.g. "C:\\temp\\deploy.log", "C:\\Program Files\\App\\logs\\*.log").
+	Paths []string `protobuf:"bytes,1,rep,name=paths,proto3" json:"paths,omitempty"`
+	// max_bytes_each caps the bytes uploaded per file (safety / bandwidth). A file
+	// larger than the cap is handled per tail_bytes below. 0 = agent default.
+	MaxBytesEach int64 `protobuf:"varint,2,opt,name=max_bytes_each,json=maxBytesEach,proto3" json:"max_bytes_each,omitempty"`
+	// tail_bytes, when > 0, uploads ONLY the last N bytes of each file (log tail).
+	// 0 = upload the whole file (subject to max_bytes_each; over-cap → tail of cap).
+	TailBytes int64 `protobuf:"varint,3,opt,name=tail_bytes,json=tailBytes,proto3" json:"tail_bytes,omitempty"`
+	// max_total_bytes caps the SUM across all files in this task (DoS brake).
+	// 0 = agent default (e.g. 500 MB).
+	MaxTotalBytes int64 `protobuf:"varint,4,opt,name=max_total_bytes,json=maxTotalBytes,proto3" json:"max_total_bytes,omitempty"`
+	// Per-task upload rate cap in bytes per second for the agent-to-server
+	// UploadContent stream. 0 = no per-task cap. The agent applies BigFix-
+	// style "lower wins": effective rate is min of this and the agent's
+	// config cap (AEGIS_UPLOAD_MAX_BYTES_PER_SECOND). Signed command cannot
+	// bypass the agent's admin-set cap.
+	MaxUploadBytesPerSecond int64 `protobuf:"varint,5,opt,name=max_upload_bytes_per_second,json=maxUploadBytesPerSecond,proto3" json:"max_upload_bytes_per_second,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
 
 func (x *CollectFileSpec) Reset() {
 	*x = CollectFileSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4190,7 +4686,7 @@ func (x *CollectFileSpec) String() string {
 func (*CollectFileSpec) ProtoMessage() {}
 
 func (x *CollectFileSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[39]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4203,7 +4699,7 @@ func (x *CollectFileSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CollectFileSpec.ProtoReflect.Descriptor instead.
 func (*CollectFileSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{39}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *CollectFileSpec) GetPaths() []string {
@@ -4241,20 +4737,23 @@ func (x *CollectFileSpec) GetMaxUploadBytesPerSecond() int64 {
 	return 0
 }
 
+// UploadChunk is one slice of a file being uploaded. The FIRST chunk must set
+// action_id + name (+ optional total_size), subsequent chunks only data (and the
+// last chunk sets sha256_full for end-to-end integrity).
 type UploadChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ActionId      string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
-	TotalSize     int64                  `protobuf:"varint,4,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`
-	Sha256Full    string                 `protobuf:"bytes,5,opt,name=sha256_full,json=sha256Full,proto3" json:"sha256_full,omitempty"`
+	ActionId      string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`       // the collect_file command_id (also the console grouping key)
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`                               // relative stored name (e.g. "deploy.log" or "logs/app.log")
+	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`                               // chunk payload (typically 1 MiB)
+	TotalSize     int64                  `protobuf:"varint,4,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`   // optional; agent's intended total upload size (first chunk)
+	Sha256Full    string                 `protobuf:"bytes,5,opt,name=sha256_full,json=sha256Full,proto3" json:"sha256_full,omitempty"` // hex SHA-256 of the full payload (final chunk)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UploadChunk) Reset() {
 	*x = UploadChunk{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4266,7 +4765,7 @@ func (x *UploadChunk) String() string {
 func (*UploadChunk) ProtoMessage() {}
 
 func (x *UploadChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[40]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4279,7 +4778,7 @@ func (x *UploadChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadChunk.ProtoReflect.Descriptor instead.
 func (*UploadChunk) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{40}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *UploadChunk) GetActionId() string {
@@ -4317,19 +4816,20 @@ func (x *UploadChunk) GetSha256Full() string {
 	return ""
 }
 
+// UploadAck is returned once per uploaded file.
 type UploadAck struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	StoredPath    string                 `protobuf:"bytes,1,opt,name=stored_path,json=storedPath,proto3" json:"stored_path,omitempty"`
+	StoredPath    string                 `protobuf:"bytes,1,opt,name=stored_path,json=storedPath,proto3" json:"stored_path,omitempty"` // where the server put it (e.g. "uploads/<device>/<action>/<name>")
 	ReceivedBytes int64                  `protobuf:"varint,2,opt,name=received_bytes,json=receivedBytes,proto3" json:"received_bytes,omitempty"`
-	IntegrityOk   bool                   `protobuf:"varint,3,opt,name=integrity_ok,json=integrityOk,proto3" json:"integrity_ok,omitempty"`
-	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	IntegrityOk   bool                   `protobuf:"varint,3,opt,name=integrity_ok,json=integrityOk,proto3" json:"integrity_ok,omitempty"` // true when the computed SHA-256 matches sha256_full
+	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`                                 // non-empty on refusal / verify failure
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UploadAck) Reset() {
 	*x = UploadAck{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4341,7 +4841,7 @@ func (x *UploadAck) String() string {
 func (*UploadAck) ProtoMessage() {}
 
 func (x *UploadAck) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[41]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4354,7 +4854,7 @@ func (x *UploadAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadAck.ProtoReflect.Descriptor instead.
 func (*UploadAck) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{41}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *UploadAck) GetStoredPath() string {
@@ -4387,14 +4887,14 @@ func (x *UploadAck) GetError() string {
 
 type RenewRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	CsrPem        string                 `protobuf:"bytes,1,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"`
+	CsrPem        string                 `protobuf:"bytes,1,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"` // new CSR; the server signs it for the authenticated device
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RenewRequest) Reset() {
 	*x = RenewRequest{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4406,7 +4906,7 @@ func (x *RenewRequest) String() string {
 func (*RenewRequest) ProtoMessage() {}
 
 func (x *RenewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[42]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4419,7 +4919,7 @@ func (x *RenewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewRequest.ProtoReflect.Descriptor instead.
 func (*RenewRequest) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{42}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *RenewRequest) GetCsrPem() string {
@@ -4439,7 +4939,7 @@ type RenewResponse struct {
 
 func (x *RenewResponse) Reset() {
 	*x = RenewResponse{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[43]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4451,7 +4951,7 @@ func (x *RenewResponse) String() string {
 func (*RenewResponse) ProtoMessage() {}
 
 func (x *RenewResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[43]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4464,7 +4964,7 @@ func (x *RenewResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewResponse.ProtoReflect.Descriptor instead.
 func (*RenewResponse) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{43}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *RenewResponse) GetClientCertPem() string {
@@ -4481,20 +4981,33 @@ func (x *RenewResponse) GetError() string {
 	return ""
 }
 
+// OpenShellSpec is the payload of a signed "open_shell" command — it reserves a
+// shell session on the agent. The agent dials ShellSession with session_id to
+// pump stdin/stdout. The admin never sees this spec; it is the server↔agent
+// contract. The session is single-use — session_id MUST NOT be reused.
 type OpenShellSpec struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	SessionId          string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	TtlSeconds         int32                  `protobuf:"varint,2,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
-	IdleTimeoutSeconds int32                  `protobuf:"varint,3,opt,name=idle_timeout_seconds,json=idleTimeoutSeconds,proto3" json:"idle_timeout_seconds,omitempty"`
-	MaxDurationSeconds int32                  `protobuf:"varint,4,opt,name=max_duration_seconds,json=maxDurationSeconds,proto3" json:"max_duration_seconds,omitempty"`
-	IssuedAt           int64                  `protobuf:"varint,5,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session_id — the ID the agent presents on its first ShellInput chunk.
+	// Opaque, 32+ bytes recommended; one-shot (second use is refused).
+	SessionId string `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// ttl_seconds — the signed command is honored only this long after issue;
+	// after that the open_shell is refused ("expired"). Defaults to 60s.
+	TtlSeconds int32 `protobuf:"varint,2,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	// idle_timeout_seconds — the agent kills the session after this many seconds
+	// with no stdin AND no stdout. 0 = agent default (600 = 10 minutes).
+	IdleTimeoutSeconds int32 `protobuf:"varint,3,opt,name=idle_timeout_seconds,json=idleTimeoutSeconds,proto3" json:"idle_timeout_seconds,omitempty"`
+	// max_duration_seconds — hard upper bound regardless of activity.
+	// 0 = agent default (3600 = 1 hour).
+	MaxDurationSeconds int32 `protobuf:"varint,4,opt,name=max_duration_seconds,json=maxDurationSeconds,proto3" json:"max_duration_seconds,omitempty"`
+	// issued_at — server timestamp (unix seconds) used with ttl_seconds.
+	IssuedAt      int64 `protobuf:"varint,5,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OpenShellSpec) Reset() {
 	*x = OpenShellSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[44]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4506,7 +5019,7 @@ func (x *OpenShellSpec) String() string {
 func (*OpenShellSpec) ProtoMessage() {}
 
 func (x *OpenShellSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[44]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4519,7 +5032,7 @@ func (x *OpenShellSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenShellSpec.ProtoReflect.Descriptor instead.
 func (*OpenShellSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{44}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *OpenShellSpec) GetSessionId() string {
@@ -4557,17 +5070,21 @@ func (x *OpenShellSpec) GetIssuedAt() int64 {
 	return 0
 }
 
+// ShellInput — from server to agent (received on the ShellSession stream). Each
+// chunk carries stdin bytes, an out-of-band control signal, or a session end.
 type ShellInput struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Stdin         []byte                 `protobuf:"bytes,1,opt,name=stdin,proto3" json:"stdin,omitempty"`
-	Control       string                 `protobuf:"bytes,2,opt,name=control,proto3" json:"control,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Stdin []byte                 `protobuf:"bytes,1,opt,name=stdin,proto3" json:"stdin,omitempty"` // raw bytes to write to the shell's stdin
+	// control: "close" ends the session cleanly; "break" is best-effort Ctrl+C
+	// (the LocalSystem service has no console → the agent terminates the shell).
+	Control       string `protobuf:"bytes,2,opt,name=control,proto3" json:"control,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ShellInput) Reset() {
 	*x = ShellInput{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[45]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4579,7 +5096,7 @@ func (x *ShellInput) String() string {
 func (*ShellInput) ProtoMessage() {}
 
 func (x *ShellInput) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[45]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4592,7 +5109,7 @@ func (x *ShellInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShellInput.ProtoReflect.Descriptor instead.
 func (*ShellInput) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{45}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ShellInput) GetStdin() []byte {
@@ -4609,21 +5126,25 @@ func (x *ShellInput) GetControl() string {
 	return ""
 }
 
+// ShellOutput — from agent to server (sent on the ShellSession stream). The
+// FIRST chunk MUST set session_id (binds the stream to the signed open_shell
+// command). Subsequent chunks carry stdout/stderr; the final chunk sets closed
+// with the exit code and a reason.
 type ShellOutput struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	Stdout        []byte                 `protobuf:"bytes,2,opt,name=stdout,proto3" json:"stdout,omitempty"`
-	Stderr        []byte                 `protobuf:"bytes,3,opt,name=stderr,proto3" json:"stderr,omitempty"`
-	Closed        bool                   `protobuf:"varint,4,opt,name=closed,proto3" json:"closed,omitempty"`
-	ExitCode      int32                  `protobuf:"varint,5,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	Reason        string                 `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // required on FIRST chunk; ignored thereafter
+	Stdout        []byte                 `protobuf:"bytes,2,opt,name=stdout,proto3" json:"stdout,omitempty"`                        // bytes from the shell's stdout
+	Stderr        []byte                 `protobuf:"bytes,3,opt,name=stderr,proto3" json:"stderr,omitempty"`                        // bytes from the shell's stderr
+	Closed        bool                   `protobuf:"varint,4,opt,name=closed,proto3" json:"closed,omitempty"`                       // final chunk when the session ends
+	ExitCode      int32                  `protobuf:"varint,5,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`   // shell process exit code (final chunk)
+	Reason        string                 `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`                        // "exited" | "idle_timeout" | "max_duration" | "close" | error text
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ShellOutput) Reset() {
 	*x = ShellOutput{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[46]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4635,7 +5156,7 @@ func (x *ShellOutput) String() string {
 func (*ShellOutput) ProtoMessage() {}
 
 func (x *ShellOutput) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[46]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4648,7 +5169,7 @@ func (x *ShellOutput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShellOutput.ProtoReflect.Descriptor instead.
 func (*ShellOutput) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{46}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ShellOutput) GetSessionId() string {
@@ -4693,23 +5214,46 @@ func (x *ShellOutput) GetReason() string {
 	return ""
 }
 
+// RunCommandSpec is the payload of a signed "run_command" task — a one-shot
+// command execution (BigFix WebUI / BladeLogic Type-1 equivalent) that returns
+// stdout+stderr+exit as ActionStatus. Live interactive sessions are open_shell
+// instead; this is the atom for ad-hoc queries, scripted multi-host workflows,
+// and future console-authored tasks. Server-side filesystem is NOT required —
+// output optionally streams back as a file via UploadContent (reuses the same
+// upload channel as collect_file).
 type RunCommandSpec struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Command        string                 `protobuf:"bytes,1,opt,name=command,proto3" json:"command,omitempty"`
-	Shell          string                 `protobuf:"bytes,2,opt,name=shell,proto3" json:"shell,omitempty"`
-	TimeoutSeconds int32                  `protobuf:"varint,3,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
-	MaxOutputBytes int64                  `protobuf:"varint,4,opt,name=max_output_bytes,json=maxOutputBytes,proto3" json:"max_output_bytes,omitempty"`
-	UploadAs       string                 `protobuf:"bytes,5,opt,name=upload_as,json=uploadAs,proto3" json:"upload_as,omitempty"`
-	Parameters     map[string]string      `protobuf:"bytes,6,rep,name=parameters,proto3" json:"parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	WorkingDir     string                 `protobuf:"bytes,7,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
-	RunAs          string                 `protobuf:"bytes,8,opt,name=run_as,json=runAs,proto3" json:"run_as,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// command — the exact text to execute (interpreted by `shell`). Nothing is
+	// guessed: whatever the admin wrote is what runs. ${name} parameter tokens
+	// are substituted the same way softdist does (same engine).
+	Command string `protobuf:"bytes,1,opt,name=command,proto3" json:"command,omitempty"`
+	// shell — the interpreter. "cmd" / "powershell" / "pwsh" (Windows), "bash" /
+	// "sh" / "zsh" (Linux/macOS). "" or "auto" picks the OS-native shell. An
+	// unsupported value on this OS is reported honestly (NOT_APPLICABLE).
+	Shell string `protobuf:"bytes,2,opt,name=shell,proto3" json:"shell,omitempty"`
+	// timeout_seconds — hard upper bound on execution. 0 = agent default (300).
+	TimeoutSeconds int32 `protobuf:"varint,3,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	// max_output_bytes — caps combined stdout+stderr returned inline (ActionStatus
+	// Detail). Over-cap output is truncated with a notice; use upload_as to save
+	// the FULL output as a server-side file instead. 0 = agent default (1 MiB).
+	MaxOutputBytes int64 `protobuf:"varint,4,opt,name=max_output_bytes,json=maxOutputBytes,proto3" json:"max_output_bytes,omitempty"`
+	// upload_as — when non-empty, the agent streams stdout to the server via
+	// UploadContent with this name (relative path under the device's upload
+	// area). stderr still returns inline. Reuses collect_file plumbing.
+	UploadAs string `protobuf:"bytes,5,opt,name=upload_as,json=uploadAs,proto3" json:"upload_as,omitempty"`
+	// parameters — ${name} substitution values (same engine as softdist).
+	Parameters map[string]string `protobuf:"bytes,6,rep,name=parameters,proto3" json:"parameters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// working_dir — process CWD. Empty = agent default (SKVC\tmp).
+	WorkingDir string `protobuf:"bytes,7,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
+	// run_as — reserved for a future per-user context. v1 is LocalSystem only.
+	RunAs         string `protobuf:"bytes,8,opt,name=run_as,json=runAs,proto3" json:"run_as,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunCommandSpec) Reset() {
 	*x = RunCommandSpec{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[47]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4721,7 +5265,7 @@ func (x *RunCommandSpec) String() string {
 func (*RunCommandSpec) ProtoMessage() {}
 
 func (x *RunCommandSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[47]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4734,7 +5278,7 @@ func (x *RunCommandSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunCommandSpec.ProtoReflect.Descriptor instead.
 func (*RunCommandSpec) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{47}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *RunCommandSpec) GetCommand() string {
@@ -4793,16 +5337,20 @@ func (x *RunCommandSpec) GetRunAs() string {
 	return ""
 }
 
+// RunCommandResult is embedded in the ActionStatus.Detail as JSON so the REPL
+// / console can parse it structurally (shell_used, bytes_out, truncated, etc.)
+// WITHOUT re-encoding every field onto ActionStatus. ActionStatus's Reason
+// still carries a human-readable summary.
 type RunCommandResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ExitCode      int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
 	ShellUsed     string                 `protobuf:"bytes,2,opt,name=shell_used,json=shellUsed,proto3" json:"shell_used,omitempty"`
 	StdoutBytes   int64                  `protobuf:"varint,3,opt,name=stdout_bytes,json=stdoutBytes,proto3" json:"stdout_bytes,omitempty"`
 	StderrBytes   int64                  `protobuf:"varint,4,opt,name=stderr_bytes,json=stderrBytes,proto3" json:"stderr_bytes,omitempty"`
-	Stdout        string                 `protobuf:"bytes,5,opt,name=stdout,proto3" json:"stdout,omitempty"`
-	Stderr        string                 `protobuf:"bytes,6,opt,name=stderr,proto3" json:"stderr,omitempty"`
-	Truncated     bool                   `protobuf:"varint,7,opt,name=truncated,proto3" json:"truncated,omitempty"`
-	UploadedPath  string                 `protobuf:"bytes,8,opt,name=uploaded_path,json=uploadedPath,proto3" json:"uploaded_path,omitempty"`
+	Stdout        string                 `protobuf:"bytes,5,opt,name=stdout,proto3" json:"stdout,omitempty"`                                 // inline, up to max_output_bytes (may be truncated)
+	Stderr        string                 `protobuf:"bytes,6,opt,name=stderr,proto3" json:"stderr,omitempty"`                                 // inline, same cap
+	Truncated     bool                   `protobuf:"varint,7,opt,name=truncated,proto3" json:"truncated,omitempty"`                          // true when the inline capture was cut
+	UploadedPath  string                 `protobuf:"bytes,8,opt,name=uploaded_path,json=uploadedPath,proto3" json:"uploaded_path,omitempty"` // non-empty when upload_as was set and upload succeeded
 	DurationMs    int64                  `protobuf:"varint,9,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4810,7 +5358,7 @@ type RunCommandResult struct {
 
 func (x *RunCommandResult) Reset() {
 	*x = RunCommandResult{}
-	mi := &file_aegisone_v1_agent_proto_msgTypes[48]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4822,7 +5370,7 @@ func (x *RunCommandResult) String() string {
 func (*RunCommandResult) ProtoMessage() {}
 
 func (x *RunCommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_aegisone_v1_agent_proto_msgTypes[48]
+	mi := &file_aegisone_v1_agent_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4835,7 +5383,7 @@ func (x *RunCommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunCommandResult.ProtoReflect.Descriptor instead.
 func (*RunCommandResult) Descriptor() ([]byte, []int) {
-	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{48}
+	return file_aegisone_v1_agent_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *RunCommandResult) GetExitCode() int32 {
@@ -5100,7 +5648,7 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\tcap_bytes\x18\x04 \x01(\x03R\bcapBytes\x12 \n" +
 	"\fin_use_bytes\x18\x05 \x01(\x03R\n" +
 	"inUseBytes\x12\x18\n" +
-	"\amessage\x18\x06 \x01(\tR\amessage\"\x80\x05\n" +
+	"\amessage\x18\x06 \x01(\tR\amessage\"\xce\x05\n" +
 	"\x13FullInventoryReport\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12!\n" +
 	"\fcollected_at\x18\x02 \x01(\x03R\vcollectedAt\x12\x18\n" +
@@ -5113,10 +5661,17 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"dex_health\x18\t \x01(\v2\x16.aegisone.v1.DexHealthR\tdexHealth\x12c\n" +
 	"\x11custom_properties\x18\n" +
-	" \x03(\v26.aegisone.v1.FullInventoryReport.CustomPropertiesEntryR\x10customProperties\x1aC\n" +
+	" \x03(\v26.aegisone.v1.FullInventoryReport.CustomPropertiesEntryR\x10customProperties\x12L\n" +
+	"\x12antivirus_products\x18\v \x03(\v2\x1d.aegisone.v1.AntivirusProductR\x11antivirusProducts\x1aC\n" +
 	"\x15CustomPropertiesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xca\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x01\n" +
+	"\x10AntivirusProduct\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aenabled\x18\x02 \x01(\bR\aenabled\x12\x1c\n" +
+	"\n" +
+	"up_to_date\x18\x03 \x01(\bR\bupToDate\x12#\n" +
+	"\rproduct_state\x18\x04 \x01(\rR\fproductState\"\xca\x01\n" +
 	"\x19CustomAttributeDefinition\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12D\n" +
@@ -5138,11 +5693,15 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"appCrashes\x12\x1b\n" +
 	"\tapp_hangs\x18\a \x01(\x05R\bappHangs\x124\n" +
 	"\n" +
-	"app_faults\x18\b \x03(\v2\x15.aegisone.v1.AppFaultR\tappFaults\"N\n" +
+	"app_faults\x18\b \x03(\v2\x15.aegisone.v1.AppFaultR\tappFaults\"\xbe\x01\n" +
 	"\bAppFault\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\acrashes\x18\x02 \x01(\x05R\acrashes\x12\x14\n" +
-	"\x05hangs\x18\x03 \x01(\x05R\x05hangs\"\xc4\x01\n" +
+	"\x05hangs\x18\x03 \x01(\x05R\x05hangs\x12\x1f\n" +
+	"\vlast_module\x18\x04 \x01(\tR\n" +
+	"lastModule\x12%\n" +
+	"\x0elast_exception\x18\x05 \x01(\tR\rlastException\x12&\n" +
+	"\x0flast_crash_unix\x18\x06 \x01(\x03R\rlastCrashUnix\"\xc4\x01\n" +
 	"\fIdentityInfo\x12$\n" +
 	"\x0elogged_on_user\x18\x01 \x01(\tR\floggedOnUser\x12%\n" +
 	"\x0emachine_domain\x18\x02 \x01(\tR\rmachineDomain\x12#\n" +
@@ -5250,8 +5809,7 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	" \x01(\v2\x17.aegisone.v1.AuditEventH\x00R\n" +
 	"auditEvent\x12@\n" +
 	"\rdex_telemetry\x18\v \x01(\v2\x19.aegisone.v1.DexTelemetryH\x00R\fdexTelemetryB\t\n" +
-	"\apayloadJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"\xcc\n" +
-	"\n" +
+	"\apayloadJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"\xaa\v\n" +
 	"\fDexTelemetry\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12!\n" +
 	"\fcollected_at\x18\x02 \x01(\x03R\vcollectedAt\x12%\n" +
@@ -5293,7 +5851,9 @@ const file_aegisone_v1_agent_proto_rawDesc = "" +
 	"\x13wifi_signal_pct_avg\x18  \x01(\x01R\x10wifiSignalPctAvg\x12-\n" +
 	"\x13wifi_signal_pct_min\x18! \x01(\x01R\x10wifiSignalPctMin\x12-\n" +
 	"\x13wifi_signal_pct_max\x18\" \x01(\x01R\x10wifiSignalPctMax\x12\x1b\n" +
-	"\twifi_ssid\x18# \x01(\tR\bwifiSsid\"a\n" +
+	"\twifi_ssid\x18# \x01(\tR\bwifiSsid\x12,\n" +
+	"\x12battery_health_pct\x18$ \x01(\x01R\x10batteryHealthPct\x12.\n" +
+	"\x13battery_cycle_count\x18% \x01(\x05R\x11batteryCycleCount\"a\n" +
 	"\rPatchBaseline\x12\x14\n" +
 	"\x05build\x18\x01 \x01(\tR\x05build\x12\x1d\n" +
 	"\n" +
@@ -5441,7 +6001,7 @@ func file_aegisone_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_aegisone_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_aegisone_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 54)
+var file_aegisone_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 55)
 var file_aegisone_v1_agent_proto_goTypes = []any{
 	(ActionPhase)(0),                  // 0: aegisone.v1.ActionPhase
 	(*Heartbeat)(nil),                 // 1: aegisone.v1.Heartbeat
@@ -5463,48 +6023,49 @@ var file_aegisone_v1_agent_proto_goTypes = []any{
 	(*InstalledApp)(nil),              // 17: aegisone.v1.InstalledApp
 	(*CacheFullReport)(nil),           // 18: aegisone.v1.CacheFullReport
 	(*FullInventoryReport)(nil),       // 19: aegisone.v1.FullInventoryReport
-	(*CustomAttributeDefinition)(nil), // 20: aegisone.v1.CustomAttributeDefinition
-	(*CustomAttributeSpec)(nil),       // 21: aegisone.v1.CustomAttributeSpec
-	(*DexHealth)(nil),                 // 22: aegisone.v1.DexHealth
-	(*AppFault)(nil),                  // 23: aegisone.v1.AppFault
-	(*IdentityInfo)(nil),              // 24: aegisone.v1.IdentityInfo
-	(*InstalledAppx)(nil),             // 25: aegisone.v1.InstalledAppx
-	(*DriverInventory)(nil),           // 26: aegisone.v1.DriverInventory
-	(*HardwareInventory)(nil),         // 27: aegisone.v1.HardwareInventory
-	(*DiskInventory)(nil),             // 28: aegisone.v1.DiskInventory
-	(*NetworkInterface)(nil),          // 29: aegisone.v1.NetworkInterface
-	(*AuditEvent)(nil),                // 30: aegisone.v1.AuditEvent
-	(*AgentMessage)(nil),              // 31: aegisone.v1.AgentMessage
-	(*DexTelemetry)(nil),              // 32: aegisone.v1.DexTelemetry
-	(*PatchBaseline)(nil),             // 33: aegisone.v1.PatchBaseline
-	(*CabManifest)(nil),               // 34: aegisone.v1.CabManifest
-	(*ServerMessage)(nil),             // 35: aegisone.v1.ServerMessage
-	(*ContentRequest)(nil),            // 36: aegisone.v1.ContentRequest
-	(*ContentChunk)(nil),              // 37: aegisone.v1.ContentChunk
-	(*EnrollRequest)(nil),             // 38: aegisone.v1.EnrollRequest
-	(*EnrollResponse)(nil),            // 39: aegisone.v1.EnrollResponse
-	(*CollectFileSpec)(nil),           // 40: aegisone.v1.CollectFileSpec
-	(*UploadChunk)(nil),               // 41: aegisone.v1.UploadChunk
-	(*UploadAck)(nil),                 // 42: aegisone.v1.UploadAck
-	(*RenewRequest)(nil),              // 43: aegisone.v1.RenewRequest
-	(*RenewResponse)(nil),             // 44: aegisone.v1.RenewResponse
-	(*OpenShellSpec)(nil),             // 45: aegisone.v1.OpenShellSpec
-	(*ShellInput)(nil),                // 46: aegisone.v1.ShellInput
-	(*ShellOutput)(nil),               // 47: aegisone.v1.ShellOutput
-	(*RunCommandSpec)(nil),            // 48: aegisone.v1.RunCommandSpec
-	(*RunCommandResult)(nil),          // 49: aegisone.v1.RunCommandResult
-	nil,                               // 50: aegisone.v1.SoftwareDeploySpec.ParametersEntry
-	nil,                               // 51: aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
-	nil,                               // 52: aegisone.v1.FullInventoryReport.CustomPropertiesEntry
-	nil,                               // 53: aegisone.v1.CustomAttributeDefinition.ArgsEntry
-	nil,                               // 54: aegisone.v1.RunCommandSpec.ParametersEntry
+	(*AntivirusProduct)(nil),          // 20: aegisone.v1.AntivirusProduct
+	(*CustomAttributeDefinition)(nil), // 21: aegisone.v1.CustomAttributeDefinition
+	(*CustomAttributeSpec)(nil),       // 22: aegisone.v1.CustomAttributeSpec
+	(*DexHealth)(nil),                 // 23: aegisone.v1.DexHealth
+	(*AppFault)(nil),                  // 24: aegisone.v1.AppFault
+	(*IdentityInfo)(nil),              // 25: aegisone.v1.IdentityInfo
+	(*InstalledAppx)(nil),             // 26: aegisone.v1.InstalledAppx
+	(*DriverInventory)(nil),           // 27: aegisone.v1.DriverInventory
+	(*HardwareInventory)(nil),         // 28: aegisone.v1.HardwareInventory
+	(*DiskInventory)(nil),             // 29: aegisone.v1.DiskInventory
+	(*NetworkInterface)(nil),          // 30: aegisone.v1.NetworkInterface
+	(*AuditEvent)(nil),                // 31: aegisone.v1.AuditEvent
+	(*AgentMessage)(nil),              // 32: aegisone.v1.AgentMessage
+	(*DexTelemetry)(nil),              // 33: aegisone.v1.DexTelemetry
+	(*PatchBaseline)(nil),             // 34: aegisone.v1.PatchBaseline
+	(*CabManifest)(nil),               // 35: aegisone.v1.CabManifest
+	(*ServerMessage)(nil),             // 36: aegisone.v1.ServerMessage
+	(*ContentRequest)(nil),            // 37: aegisone.v1.ContentRequest
+	(*ContentChunk)(nil),              // 38: aegisone.v1.ContentChunk
+	(*EnrollRequest)(nil),             // 39: aegisone.v1.EnrollRequest
+	(*EnrollResponse)(nil),            // 40: aegisone.v1.EnrollResponse
+	(*CollectFileSpec)(nil),           // 41: aegisone.v1.CollectFileSpec
+	(*UploadChunk)(nil),               // 42: aegisone.v1.UploadChunk
+	(*UploadAck)(nil),                 // 43: aegisone.v1.UploadAck
+	(*RenewRequest)(nil),              // 44: aegisone.v1.RenewRequest
+	(*RenewResponse)(nil),             // 45: aegisone.v1.RenewResponse
+	(*OpenShellSpec)(nil),             // 46: aegisone.v1.OpenShellSpec
+	(*ShellInput)(nil),                // 47: aegisone.v1.ShellInput
+	(*ShellOutput)(nil),               // 48: aegisone.v1.ShellOutput
+	(*RunCommandSpec)(nil),            // 49: aegisone.v1.RunCommandSpec
+	(*RunCommandResult)(nil),          // 50: aegisone.v1.RunCommandResult
+	nil,                               // 51: aegisone.v1.SoftwareDeploySpec.ParametersEntry
+	nil,                               // 52: aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
+	nil,                               // 53: aegisone.v1.FullInventoryReport.CustomPropertiesEntry
+	nil,                               // 54: aegisone.v1.CustomAttributeDefinition.ArgsEntry
+	nil,                               // 55: aegisone.v1.RunCommandSpec.ParametersEntry
 }
 var file_aegisone_v1_agent_proto_depIdxs = []int32{
 	4,  // 0: aegisone.v1.PatchScanResult.missing:type_name -> aegisone.v1.MissingUpdate
 	4,  // 1: aegisone.v1.PatchScanResult.installed:type_name -> aegisone.v1.MissingUpdate
-	50, // 2: aegisone.v1.SoftwareDeploySpec.parameters:type_name -> aegisone.v1.SoftwareDeploySpec.ParametersEntry
+	51, // 2: aegisone.v1.SoftwareDeploySpec.parameters:type_name -> aegisone.v1.SoftwareDeploySpec.ParametersEntry
 	14, // 3: aegisone.v1.SoftwareDeploySpec.execution:type_name -> aegisone.v1.SoftwareExecution
-	51, // 4: aegisone.v1.SoftwareDeploySpec.secure_parameters:type_name -> aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
+	52, // 4: aegisone.v1.SoftwareDeploySpec.secure_parameters:type_name -> aegisone.v1.SoftwareDeploySpec.SecureParametersEntry
 	9,  // 5: aegisone.v1.SoftwareDeploySpec.bundle:type_name -> aegisone.v1.SoftwareBundle
 	10, // 6: aegisone.v1.SoftwareDeploySpec.steps:type_name -> aegisone.v1.SoftwareDeploymentSteps
 	12, // 7: aegisone.v1.SoftwareDeploySpec.detection:type_name -> aegisone.v1.SoftwareDetection
@@ -5514,48 +6075,49 @@ var file_aegisone_v1_agent_proto_depIdxs = []int32{
 	13, // 11: aegisone.v1.SoftwareDetection.rules:type_name -> aegisone.v1.SoftwareDetectionRule
 	0,  // 12: aegisone.v1.ActionStatus.phase:type_name -> aegisone.v1.ActionPhase
 	17, // 13: aegisone.v1.DeviceStateReport.installed_apps:type_name -> aegisone.v1.InstalledApp
-	27, // 14: aegisone.v1.FullInventoryReport.hardware:type_name -> aegisone.v1.HardwareInventory
+	28, // 14: aegisone.v1.FullInventoryReport.hardware:type_name -> aegisone.v1.HardwareInventory
 	17, // 15: aegisone.v1.FullInventoryReport.installed_apps:type_name -> aegisone.v1.InstalledApp
-	26, // 16: aegisone.v1.FullInventoryReport.drivers:type_name -> aegisone.v1.DriverInventory
-	25, // 17: aegisone.v1.FullInventoryReport.installed_appx:type_name -> aegisone.v1.InstalledAppx
-	24, // 18: aegisone.v1.FullInventoryReport.identity:type_name -> aegisone.v1.IdentityInfo
-	22, // 19: aegisone.v1.FullInventoryReport.dex_health:type_name -> aegisone.v1.DexHealth
-	52, // 20: aegisone.v1.FullInventoryReport.custom_properties:type_name -> aegisone.v1.FullInventoryReport.CustomPropertiesEntry
-	53, // 21: aegisone.v1.CustomAttributeDefinition.args:type_name -> aegisone.v1.CustomAttributeDefinition.ArgsEntry
-	20, // 22: aegisone.v1.CustomAttributeSpec.definitions:type_name -> aegisone.v1.CustomAttributeDefinition
-	23, // 23: aegisone.v1.DexHealth.app_faults:type_name -> aegisone.v1.AppFault
-	28, // 24: aegisone.v1.HardwareInventory.disks:type_name -> aegisone.v1.DiskInventory
-	29, // 25: aegisone.v1.HardwareInventory.nics:type_name -> aegisone.v1.NetworkInterface
-	1,  // 26: aegisone.v1.AgentMessage.heartbeat:type_name -> aegisone.v1.Heartbeat
-	2,  // 27: aegisone.v1.AgentMessage.command_result:type_name -> aegisone.v1.CommandResult
-	5,  // 28: aegisone.v1.AgentMessage.patch_scan_result:type_name -> aegisone.v1.PatchScanResult
-	16, // 29: aegisone.v1.AgentMessage.device_state:type_name -> aegisone.v1.DeviceStateReport
-	18, // 30: aegisone.v1.AgentMessage.cache_full:type_name -> aegisone.v1.CacheFullReport
-	15, // 31: aegisone.v1.AgentMessage.action_status:type_name -> aegisone.v1.ActionStatus
-	19, // 32: aegisone.v1.AgentMessage.full_inventory:type_name -> aegisone.v1.FullInventoryReport
-	30, // 33: aegisone.v1.AgentMessage.audit_event:type_name -> aegisone.v1.AuditEvent
-	32, // 34: aegisone.v1.AgentMessage.dex_telemetry:type_name -> aegisone.v1.DexTelemetry
-	3,  // 35: aegisone.v1.ServerMessage.command:type_name -> aegisone.v1.Command
-	33, // 36: aegisone.v1.ServerMessage.patch_baseline:type_name -> aegisone.v1.PatchBaseline
-	34, // 37: aegisone.v1.ServerMessage.cab_manifest:type_name -> aegisone.v1.CabManifest
-	54, // 38: aegisone.v1.RunCommandSpec.parameters:type_name -> aegisone.v1.RunCommandSpec.ParametersEntry
-	31, // 39: aegisone.v1.AgentControlPlane.Connect:input_type -> aegisone.v1.AgentMessage
-	36, // 40: aegisone.v1.AgentControlPlane.FetchContent:input_type -> aegisone.v1.ContentRequest
-	41, // 41: aegisone.v1.AgentControlPlane.UploadContent:input_type -> aegisone.v1.UploadChunk
-	38, // 42: aegisone.v1.AgentControlPlane.Enroll:input_type -> aegisone.v1.EnrollRequest
-	43, // 43: aegisone.v1.AgentControlPlane.Renew:input_type -> aegisone.v1.RenewRequest
-	47, // 44: aegisone.v1.AgentControlPlane.ShellSession:input_type -> aegisone.v1.ShellOutput
-	35, // 45: aegisone.v1.AgentControlPlane.Connect:output_type -> aegisone.v1.ServerMessage
-	37, // 46: aegisone.v1.AgentControlPlane.FetchContent:output_type -> aegisone.v1.ContentChunk
-	42, // 47: aegisone.v1.AgentControlPlane.UploadContent:output_type -> aegisone.v1.UploadAck
-	39, // 48: aegisone.v1.AgentControlPlane.Enroll:output_type -> aegisone.v1.EnrollResponse
-	44, // 49: aegisone.v1.AgentControlPlane.Renew:output_type -> aegisone.v1.RenewResponse
-	46, // 50: aegisone.v1.AgentControlPlane.ShellSession:output_type -> aegisone.v1.ShellInput
-	45, // [45:51] is the sub-list for method output_type
-	39, // [39:45] is the sub-list for method input_type
-	39, // [39:39] is the sub-list for extension type_name
-	39, // [39:39] is the sub-list for extension extendee
-	0,  // [0:39] is the sub-list for field type_name
+	27, // 16: aegisone.v1.FullInventoryReport.drivers:type_name -> aegisone.v1.DriverInventory
+	26, // 17: aegisone.v1.FullInventoryReport.installed_appx:type_name -> aegisone.v1.InstalledAppx
+	25, // 18: aegisone.v1.FullInventoryReport.identity:type_name -> aegisone.v1.IdentityInfo
+	23, // 19: aegisone.v1.FullInventoryReport.dex_health:type_name -> aegisone.v1.DexHealth
+	53, // 20: aegisone.v1.FullInventoryReport.custom_properties:type_name -> aegisone.v1.FullInventoryReport.CustomPropertiesEntry
+	20, // 21: aegisone.v1.FullInventoryReport.antivirus_products:type_name -> aegisone.v1.AntivirusProduct
+	54, // 22: aegisone.v1.CustomAttributeDefinition.args:type_name -> aegisone.v1.CustomAttributeDefinition.ArgsEntry
+	21, // 23: aegisone.v1.CustomAttributeSpec.definitions:type_name -> aegisone.v1.CustomAttributeDefinition
+	24, // 24: aegisone.v1.DexHealth.app_faults:type_name -> aegisone.v1.AppFault
+	29, // 25: aegisone.v1.HardwareInventory.disks:type_name -> aegisone.v1.DiskInventory
+	30, // 26: aegisone.v1.HardwareInventory.nics:type_name -> aegisone.v1.NetworkInterface
+	1,  // 27: aegisone.v1.AgentMessage.heartbeat:type_name -> aegisone.v1.Heartbeat
+	2,  // 28: aegisone.v1.AgentMessage.command_result:type_name -> aegisone.v1.CommandResult
+	5,  // 29: aegisone.v1.AgentMessage.patch_scan_result:type_name -> aegisone.v1.PatchScanResult
+	16, // 30: aegisone.v1.AgentMessage.device_state:type_name -> aegisone.v1.DeviceStateReport
+	18, // 31: aegisone.v1.AgentMessage.cache_full:type_name -> aegisone.v1.CacheFullReport
+	15, // 32: aegisone.v1.AgentMessage.action_status:type_name -> aegisone.v1.ActionStatus
+	19, // 33: aegisone.v1.AgentMessage.full_inventory:type_name -> aegisone.v1.FullInventoryReport
+	31, // 34: aegisone.v1.AgentMessage.audit_event:type_name -> aegisone.v1.AuditEvent
+	33, // 35: aegisone.v1.AgentMessage.dex_telemetry:type_name -> aegisone.v1.DexTelemetry
+	3,  // 36: aegisone.v1.ServerMessage.command:type_name -> aegisone.v1.Command
+	34, // 37: aegisone.v1.ServerMessage.patch_baseline:type_name -> aegisone.v1.PatchBaseline
+	35, // 38: aegisone.v1.ServerMessage.cab_manifest:type_name -> aegisone.v1.CabManifest
+	55, // 39: aegisone.v1.RunCommandSpec.parameters:type_name -> aegisone.v1.RunCommandSpec.ParametersEntry
+	32, // 40: aegisone.v1.AgentControlPlane.Connect:input_type -> aegisone.v1.AgentMessage
+	37, // 41: aegisone.v1.AgentControlPlane.FetchContent:input_type -> aegisone.v1.ContentRequest
+	42, // 42: aegisone.v1.AgentControlPlane.UploadContent:input_type -> aegisone.v1.UploadChunk
+	39, // 43: aegisone.v1.AgentControlPlane.Enroll:input_type -> aegisone.v1.EnrollRequest
+	44, // 44: aegisone.v1.AgentControlPlane.Renew:input_type -> aegisone.v1.RenewRequest
+	48, // 45: aegisone.v1.AgentControlPlane.ShellSession:input_type -> aegisone.v1.ShellOutput
+	36, // 46: aegisone.v1.AgentControlPlane.Connect:output_type -> aegisone.v1.ServerMessage
+	38, // 47: aegisone.v1.AgentControlPlane.FetchContent:output_type -> aegisone.v1.ContentChunk
+	43, // 48: aegisone.v1.AgentControlPlane.UploadContent:output_type -> aegisone.v1.UploadAck
+	40, // 49: aegisone.v1.AgentControlPlane.Enroll:output_type -> aegisone.v1.EnrollResponse
+	45, // 50: aegisone.v1.AgentControlPlane.Renew:output_type -> aegisone.v1.RenewResponse
+	47, // 51: aegisone.v1.AgentControlPlane.ShellSession:output_type -> aegisone.v1.ShellInput
+	46, // [46:52] is the sub-list for method output_type
+	40, // [40:46] is the sub-list for method input_type
+	40, // [40:40] is the sub-list for extension type_name
+	40, // [40:40] is the sub-list for extension extendee
+	0,  // [0:40] is the sub-list for field type_name
 }
 
 func init() { file_aegisone_v1_agent_proto_init() }
@@ -5564,7 +6126,7 @@ func file_aegisone_v1_agent_proto_init() {
 		return
 	}
 	file_aegisone_v1_agent_proto_msgTypes[13].OneofWrappers = []any{}
-	file_aegisone_v1_agent_proto_msgTypes[30].OneofWrappers = []any{
+	file_aegisone_v1_agent_proto_msgTypes[31].OneofWrappers = []any{
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_CommandResult)(nil),
 		(*AgentMessage_PatchScanResult)(nil),
@@ -5575,7 +6137,7 @@ func file_aegisone_v1_agent_proto_init() {
 		(*AgentMessage_AuditEvent)(nil),
 		(*AgentMessage_DexTelemetry)(nil),
 	}
-	file_aegisone_v1_agent_proto_msgTypes[34].OneofWrappers = []any{
+	file_aegisone_v1_agent_proto_msgTypes[35].OneofWrappers = []any{
 		(*ServerMessage_Command)(nil),
 		(*ServerMessage_PatchBaseline)(nil),
 		(*ServerMessage_CabManifest)(nil),
@@ -5586,7 +6148,7 @@ func file_aegisone_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_aegisone_v1_agent_proto_rawDesc), len(file_aegisone_v1_agent_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   54,
+			NumMessages:   55,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -1,48 +1,24 @@
 // =====================================================================================
-// AEGIS ONE - Agent <-> Server contract, as implemented by the shipped agent.
+// AEGIS ONE - Agent <-> Server contract (package aegisone.v1).
 //
-// SOURCE OF TRUTH: the agent team's aegis_one_proto module (grpc/agent.proto,
-// owner: Vijay). That source was not available, so this file was RECOVERED from
-// the FileDescriptorProto that protoc-gen-go embeds in the compiled agent
-// (dist/AegisOneClient.exe) and mockserver (dist/mockserver.exe); both binaries
-// carry byte-identical descriptors. It is checked against that descriptor
-// (same package, messages, fields, numbers, types, reserved ranges, service);
-// only the file name and go_package differ, neither of which is on the wire.
-// Replace it with the agent team's real file as soon as that is available, and
-// regenerate.
+// SOURCE OF TRUTH: the agent team's aegis_one_proto module, grpc/agent.proto
+// (owner: Vijay). This file is that file verbatim as of upstream commit d1fed59
+// (2026-11-19) with ONE change: go_package points at this module's gen/ tree.
+// Do not edit anything else here. To change the contract, change it upstream,
+// copy the file again, then run
+//   buf generate --path proto/aegisone/v1/agent.proto
+//   buf breaking --against '.git#branch=main'
 //
-// Last re-verified 2026-11-08 against agent zip 4 (proto commits 88b3709,
-// 2240a16, e1d3d6b): inventory, audit events, resume offset, command
-// attribution, software deploy v2 fields. Normalized descriptors are identical.
+// Until 2026-11-19 this file was recovered from the descriptor embedded in the
+// shipped agent binary; that copy matched the upstream file field for field.
 //
 // Command signatures (Command.signature) are not described by this file: they
 // are Ed25519 over commandsign.CanonicalBytes - see internal/signing.
 // =====================================================================================
+
 syntax = "proto3";
-
 package aegisone.v1;
-
 option go_package = "aegis-one/gen/aegisone/v1;aegisonev1";
-
-service AgentControlPlane {
-  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
-  rpc FetchContent(ContentRequest) returns (stream ContentChunk);
-  rpc UploadContent(stream UploadChunk) returns (UploadAck);
-  rpc Enroll(EnrollRequest) returns (EnrollResponse);
-  rpc Renew(RenewRequest) returns (RenewResponse);
-  rpc ShellSession(stream ShellOutput) returns (stream ShellInput);
-}
-
-enum ActionPhase {
-  ACTION_PHASE_UNSPECIFIED = 0;
-  ACTION_PHASE_QUEUED = 1;
-  ACTION_PHASE_DOWNLOADING = 2;
-  ACTION_PHASE_VERIFYING = 3;
-  ACTION_PHASE_RUNNING = 4;
-  ACTION_PHASE_SUCCESS = 5;
-  ACTION_PHASE_FAILED = 6;
-  ACTION_PHASE_NOT_APPLICABLE = 7;
-}
 
 message Heartbeat {
   string device_id = 1;
@@ -50,8 +26,24 @@ message Heartbeat {
   string os = 3;
   string hostname = 4;
   int64 timestamp = 5;
+  // schema_version is the stable version of the telemetry contract the
+  // agent speaks ("1" in Phase 1). The server gates feature rollouts on
+  // this, NOT on the free-form agent_version string. Breaking changes
+  // bump this; additive changes do not.
   string schema_version = 6;
+  // agent_capabilities is the list of action types + feature flags this
+  // agent supports — the server dispatches only known-supported types,
+  // which keeps older agents safe when the server adds new task kinds.
+  // Example entries: "software_deploy", "software_deploy_bundle",
+  // "software_deploy_workflow", "install_patch", "stage_patch",
+  // "collect_file", "run_command", "open_shell", "scan_now", "reboot",
+  // "report_device_state", "script_content_audit". Content is informative
+  // and server-tolerant (unknown strings are safely ignored).
   repeated string agent_capabilities = 7;
+  // device_type is the agent's role on the fleet. Phase 1: "endpoint"
+  // (laptop/desktop/server). Phase 2 adds "probe" (NMS collector). Set
+  // here so server-side storage and console filters key off a dedicated
+  // field from day one; adding more values later is non-breaking.
   string device_type = 8;
 }
 
@@ -66,325 +58,666 @@ message Command {
   string type = 2;
   bytes payload = 3;
   bytes signature = 4;
+  // Attribution — populated by the dispatcher (console / server / mock)
+  // when the command is signed. The agent treats these as advisory for
+  // logging and audit; the signature on fields 1-4 is what proves the
+  // command is authentic. These three fields extend the signed envelope
+  // on servers that implement the Phase-1 FR3 audit requirement; older
+  // dispatchers leave them empty and the agent logs them as unknown.
+  //
+  // actor: the human / system that initiated the command.
+  //   Examples: "nsh:<os-user>@<mock-host>"
+  //             "console:<console-user>@<console-url>"
+  //             "server:api"
+  //             "server:schedule"
+  //             "server:auto" (mock env-var-driven dispatch)
   string actor = 5;
+  // source: where the dispatcher ran. Useful when the same actor can
+  // operate from multiple surfaces (web console, CLI, NSH REPL).
+  //   Examples: "mockserver.nsh"
+  //             "console.web"
+  //             "server.scheduler"
   string source = 6;
+  // issued_at: unix seconds at the moment the operator clicked "run" /
+  // typed enter / the scheduler fired. Distinct from the ActionStatus
+  // started_at (which is when the agent began executing).
   int64 issued_at = 7;
 }
 
+// MissingUpdate is one not-installed update applicable to the device, found by
+// scanning locally against the server-provided wsusscn2.cab (no internet). It
+// carries the full metadata a UEM console (BigFix/ManageEngine/Tanium style)
+// needs to list, filter, categorize and group patches. The agent reports ALL
+// applicable not-installed updates and TAGS each one (see `superseded`); it does
+// NOT drop any — categorization and patch policy are the server/console's job.
 message MissingUpdate {
-  string update_id = 1;
+  string update_id = 1;              // WUA Identity.UpdateID (GUID)
   repeated string kb_article_ids = 2;
   string title = 3;
-  string classification = 4;
+  string classification = 4;        // "Security Updates" | "Critical Updates" | ...
   repeated string products = 5;
-  string type = 6;
-  string msrc_severity = 7;
+  string type = 6;                  // "Software" | "Driver"
+  string msrc_severity = 7;         // "Critical" | "Important" | ...
   repeated string cve_ids = 8;
-  double size_mb = 9;
+  double size_mb = 9;               // MaxDownloadSize (upper bound; bundles report the superset max)
   bool reboot_required = 10;
+
+  // superseded = this update is replaced by a newer update that is ALSO in this
+  // same result set, so it is applicable-but-not-actionable: the console lists
+  // it in its "superseded / no longer required" category and excludes it from
+  // the actionable "missing" count and download-size totals.
   bool superseded = 11;
-  repeated string superseded_update_ids = 12;
-  repeated string security_bulletin_ids = 13;
-  int32 revision_number = 14;
-  string support_url = 15;
-  string description = 16;
-  double min_size_mb = 17;
+  repeated string superseded_update_ids = 12; // UpdateIDs this update itself replaces (supersedence chain)
+  repeated string security_bulletin_ids = 13; // legacy MS bulletin IDs (e.g. "MS17-010")
+  int32 revision_number = 14;       // WUA Identity.RevisionNumber
+  string support_url = 15;          // SupportUrl ("more info" link for the console)
+  string description = 16;          // human-readable update description
+  double min_size_mb = 17;          // MinDownloadSize (realistic lower bound vs the superset size_mb)
 }
 
+// PatchScanResult is what the agent sends after a local scan (Model B, SCCM /
+// BladeLogic style): the device's build/identity plus the list of missing
+// updates it computed from the server-provided catalog. The server stores this
+// and drives remediation; the endpoint never touches the internet.
 message PatchScanResult {
   string device_id = 1;
-  string product_name = 2;
-  string display_version = 3;
-  string build = 4;
-  string architecture = 5;
-  int64 collected_at = 6;
-  string source = 7;
+  string product_name = 2;          // e.g. "Windows 11 Pro"
+  string display_version = 3;       // e.g. "23H2"
+  string build = 4;                 // e.g. "22631.7517"
+  string architecture = 5;          // "amd64" | "arm64" | "x86"
+  int64 collected_at = 6;           // unix seconds
+  string source = 7;                // "offline-cab" | "online" (traceability)
   repeated MissingUpdate missing = 8;
+  // Authoritative INSTALLED updates (WUA view — what the system/console shows),
+  // with the same rich metadata as `missing`. This is the source of the console's
+  // "installed patches" list (the coarse CBS-registry KB list was dropped).
   repeated MissingUpdate installed = 9;
 }
 
+// InstallPatchSpec is the structured payload the server puts inside a signed
+// Command of type "install_patch". The server delivers the patch file to the
+// endpoint out-of-band (peer-cache) and names its LOCAL path here; the agent
+// only ever touches that local file — never the network. The signature on the
+// enclosing Command covers the serialized bytes of this message.
 message InstallPatchSpec {
-  string kb = 1;
-  string file_path = 2;
-  string expected_hash = 3;
-  string hash_algorithm = 4;
+  string kb = 1;              // e.g. "KB5126052" (reporting / correlation)
+  string file_path = 2;       // LOCAL path where the server delivered the file
+  string expected_hash = 3;   // integrity check (hex-encoded digest)
+  string hash_algorithm = 4;  // "sha256" (default) | "sha512" | ... (configurable)
+  // os_build is the OS build this KB produces (e.g. "22621.7584"), from the server
+  // catalog. Used on UNINSTALL to find the cumulative update's CBS package
+  // (Package_for_RollupFix~...~<build>...) — LCU package names carry the build, not
+  // the KB. Standalone KBs (Package_for_KB<n>~...) are matched by KB and don't need
+  // it. Optional; without it an LCU uninstall falls back to the WUA path.
   string os_build = 5;
 }
 
+// RebootSpec is the payload of a signed "reboot" command: the server decides
+// when a device reboots (e.g. a maintenance window). delay_seconds is the grace
+// period; message is shown to any logged-in users.
 message RebootSpec {
   int32 delay_seconds = 1;
   string message = 2;
 }
 
+// SoftwareDeploySpec is the payload of a signed "software_deploy" command: the
+// server tells the agent to install (or uninstall) a catalog package. The agent
+// runs ANY installer the payload names (msi/exe/ps1/bat) — executing a PAYLOAD
+// is not the agent using PowerShell for its own logic. Targeting, scheduling and
+// rollout are SERVER/console side; the agent only executes one signed deploy and
+// reports an ActionStatus (action_type = "software_deploy").
 message SoftwareDeploySpec {
-  string package_id = 1;
-  string name = 2;
-  string version = 3;
-  string action = 4;
-  string installer_type = 5;
-  string file_path = 6;
-  string expected_hash = 7;
-  string hash_algorithm = 8;
-  string silent_args = 9;
-  repeated int32 success_exit_codes = 10;
-  int32 timeout_seconds = 11;
+  string package_id = 1;      // console catalog id (correlation key)
+  string name = 2;            // "Google Chrome" (reporting/logging)
+  string version = 3;         // "145.0.2" (reporting)
+  string action = 4;          // "install" (default) | "uninstall"
+  string installer_type = 5;  // "msi" | "exe" | "ps1" | "bat" | "auto" (infer from extension)
+  string file_path = 6;       // LOCAL path the server delivered, OR the fetch target name
+  string expected_hash = 7;   // integrity check (hex-encoded digest)
+  string hash_algorithm = 8;  // "sha256" (default) | "sha512" | ...
+  string silent_args = 9;     // silent/unattended args, e.g. "/qn /norestart" (msi) | "/S"
+  repeated int32 success_exit_codes = 10; // extra codes to treat as success beyond {0,3010,1641}
+  int32 timeout_seconds = 11; // kill the installer after this many seconds; 0 = config default
+  // content_id names the installer blob in the server catalog. When set (and the
+  // file is not already cached), the agent STREAMS the bytes from the server via
+  // FetchContent (kind="package") — the real-UEM delivery path, no internet. The
+  // fetched file is stored encrypted at rest and verified against expected_hash.
+  // file_path (above) stays supported for a pre-staged/local installer (dev or an
+  // admin-dropped file); file_path wins when it exists, else content_id is fetched.
   string content_id = 12;
+  // require_ac_power, when true, makes the agent REFUSE the deploy if the
+  // machine is on battery (not AC/mains). The safety gate for a BIOS/firmware
+  // flash — power loss mid-flash can brick the device. Deeper flash safety
+  // (BitLocker suspend, multi-reboot sequencing) is owned by the vendor flash
+  // utility, so the agent only enforces the power precondition. Agent maps it
+  // to Params.RequireACPower.
   bool require_ac_power = 25;
+
+  // require_signature, when true, makes the agent verify the installer's
+  // Authenticode digital signature (trusted publisher) before running it and
+  // REFUSE if it is unsigned/untrusted — the standard-UEM publisher check. Left
+  // false for internally-built/unsigned installers.
   bool require_signature = 13;
+  // product_code is the MSI ProductCode GUID (e.g.
+  // "{23170F69-40C1-2702-2409-000001000000}"). When set, the agent checks whether
+  // that product is ALREADY installed before acting (idempotency / detection rule):
+  // install of an already-present product is skipped (NOT_APPLICABLE), and an
+  // uninstall of an absent product is skipped. Level-1 detection (MSI only); richer
+  // detection rules (registry/file/version) come later.
   string product_code = 14;
+  // uninstall_key identifies a non-MSI (EXE/script-installed) product in the Windows
+  // registry Uninstall hive — either the exact subkey name under
+  // HKLM\...\CurrentVersion\Uninstall (and its WOW6432Node mirror), or matched by
+  // display_name below. When set on an uninstall, the agent reads the product's
+  // QuietUninstallString (preferred — vendor-silent) or UninstallString + silent_args
+  // and runs it directly: no installer file needed. It also enables idempotency for
+  // non-MSI apps (uninstall of an absent app is skipped; install of a present one is
+  // skipped). The agent is a faithful executor — it runs the registered/admin-given
+  // command, it does not guess silent switches.
   string uninstall_key = 15;
+  // display_name is the product's registry DisplayName (e.g. "7-Zip 26.04"), used to
+  // locate the app when uninstall_key is empty (substring match, case-insensitive).
   string display_name = 16;
+  // parameters are author-supplied name→value pairs substituted into silent_args and
+  // (for the "command" type) the command, written as ${name}. There is NO fixed set
+  // — any key the package author defines is usable. The agent also provides built-in
+  // RUNTIME variables resolved on the endpoint (e.g. ${hostname}, ${device_id},
+  // ${download_dir}, ${temp_dir}, ${arch}); author parameters override a built-in of
+  // the same name. All parameters are also exported to child scripts as environment
+  // variables AEGIS_PARAM_<NAME>. This gives BigFix-style static + dynamic packaging.
   map<string, string> parameters = 17;
+  // Explicit execution settings/secrets require v2, bundle or workflow task types.
+  // Older agents reject that task type instead of silently executing as SYSTEM.
   SoftwareExecution execution = 18;
+  // Values are carried only within signed mTLS commands. NEVER persist/log this
+  // message in plaintext. Delivered only through a child stdin JSON pipe, never
+  // command arguments or environment. Server must encrypt durable job storage.
   map<string, string> secure_parameters = 19;
+  // ZIP bundle jobs MUST use signed command.type=software_deploy_bundle.
   SoftwareBundle bundle = 20;
+  // Pre/post commands REQUIRE software_deploy_workflow (no legacy fallback).
   SoftwareDeploymentSteps steps = 21;
+  // Advanced detection REQUIRES software_deploy_detect, even with bundle/steps.
   SoftwareDetection detection = 22;
+  // Per-task fetch rate cap in bytes per second for the server-to-agent
+  // content stream (bundle/installer download). 0 = no per-task cap. The
+  // agent applies BigFix-style "lower wins": the effective rate is min of
+  // this and the agent's config cap (AEGIS_FETCH_MAX_BYTES_PER_SECOND).
+  // The signed command cannot bypass the agent's admin-set cap. Server-
+  // side cumulative throttle is enforced independently by the server.
   int64 max_fetch_bytes_per_second = 23;
+  // capture_script_content, when true, writes the FULL script bytes
+  // (payload .ps1/.bat/.cmd/.vbs/.py or bundle entry_point script) into
+  // the agent's local softdist transcript at
+  // <SKVC>\logs\softdist\<action_id>.transcript. Default (false) still
+  // captures a tamper-evident audit record: SHA-256 digest + size + first
+  // 500 B + last 500 B of each script executed. Full capture is for
+  // compliance / forensic deployments where the admin requires end-to-end
+  // visibility of what ran. The endpoint policy AEGIS_LOG_SCRIPT_CONTENT
+  // ("enabled" default | "disabled" force-off | "always" force-on) can
+  // override this per-task flag; the flag is the per-deploy hint, not the
+  // final say. SecureParameters values are NEVER substituted into the
+  // transcript — they are delivered via child stdin only.
   bool capture_script_content = 24;
 }
 
+// The ZIP contains aegis-package.json v1 and a SHA256/size entry for every file.
+// expected_hash above pins the entire ZIP; entry_point pins execution to a member.
 message SoftwareBundle {
-  string entry_point = 1;
-  string command = 2;
-  string destination = 3;
-  string cleanup = 4;
+  string entry_point = 1; // relative installer/script path; empty with command
+  string command = 2; // external command, only with installer_type=command
+  string destination = 3; // optional absolute NEW directory; never merge/overwrite
+  string cleanup = 4; // empty=default: managed directory removed, custom retained;
+                      // always=remove after execution; retain=custom directory only
 }
 
+// Ordered commands around one deployment, not dependency-package orchestration.
+// This first workflow version requires a verified bundle. No implicit shell.
 message SoftwareDeploymentSteps {
-  repeated SoftwareCommandStep before = 1;
-  repeated SoftwareCommandStep after = 2;
-  repeated SoftwareCommandStep rollback = 3;
+  repeated SoftwareCommandStep before = 1; // max 8; failure prevents main action
+  repeated SoftwareCommandStep after = 2; // max 8; only after main success
+  // rollback commands run ONLY on failure (pre-step failure after reaching the
+  // extracting state, main-action failure, or any after-step failure). They
+  // run in order; a rollback step's own failure is reported but does NOT stop
+  // the remaining rollback commands — rollback is best-effort cleanup. The
+  // signed admin owns the sequence; the agent never guesses undo operations.
+  repeated SoftwareCommandStep rollback = 3; // max 8; executed only on failure
 }
-
 message SoftwareCommandStep {
-  string name = 1;
-  string command = 2;
-  string arguments = 3;
-  int32 timeout_seconds = 4;
-  repeated int32 success_exit_codes = 5;
-  bool use_secure_parameters = 6;
+  string name = 1; // non-secret operator label, max 128 bytes
+  string command = 2; // executable; same token, package cwd and ordinary params
+  string arguments = 3; // Windows arguments; explicit cmd.exe /D /C for shell syntax
+  int32 timeout_seconds = 4; // 0=300; max 3600 per step
+  repeated int32 success_exit_codes = 5; // additional success codes
+  bool use_secure_parameters = 6; // opt in to job stdin JSON; never argv/env
 }
 
+// Positive installed-state rules, evaluated before and after a deployment.
 message SoftwareDetection {
-  string mode = 1;
+  string mode = 1; // all (default) | any; flat list of 1-32 rules
   repeated SoftwareDetectionRule rules = 2;
 }
-
 message SoftwareDetectionRule {
-  string kind = 1;
-  string path = 2;
-  string minimum_version = 3;
-  string hive = 4;
-  string key = 5;
-  string view = 6;
-  string value_name = 7;
-  string value_type = 8;
-  string expected_value = 9;
+  string kind = 1; // file_exists | file_version | registry_key | registry_value
+  string path = 2; // local absolute file path; ordinary runtime variables allowed
+  string minimum_version = 3; // file_version: numeric 1-4 components
+  string hive = 4; // registry: HKLM or HKCU (selected user's loaded profile)
+  string key = 5; // registry: relative key path
+  string view = 6; // registry: 32 or 64; explicit, required
+  string value_name = 7; // registry_value; empty means default value
+  string value_type = 8; // registry_value: string | dword | qword
+  string expected_value = 9; // non-secret literal, ordinary variables allowed
 }
 
 message SoftwareExecution {
-  string mode = 1;
-  optional uint32 session_id = 2;
-  string username = 3;
-  string domain = 4;
-  bytes password_utf8 = 5;
-  string detection_scope = 6;
+  string mode = 1; // system (default) | logged_in_user | specified_account
+  optional uint32 session_id = 2; // logged_in_user; required when active sessions are ambiguous
+  string username = 3; // specified_account: local user, DOMAIN\\user or user@domain
+  string domain = 4; // optional explicit domain; "." means local
+  bytes password_utf8 = 5; // specified_account only; never child env/argv/logs
+  string detection_scope = 6; // machine (default), user (requires a non-SYSTEM execution context)
 }
 
+// ActionPhase is the lifecycle stage of ANY server-dispatched action (patch
+// install, stage/pre-cache, scan, reboot, future software deploy). The agent
+// streams an ActionStatus at each transition; SUCCESS, FAILED and NOT_APPLICABLE
+// are terminal. Scheduled/Pending is a SERVER-side state (scheduling is
+// server-driven) — the agent only reports from QUEUED onward.
+enum ActionPhase {
+  ACTION_PHASE_UNSPECIFIED = 0;
+  ACTION_PHASE_QUEUED = 1;         // accepted, waiting to run
+  ACTION_PHASE_DOWNLOADING = 2;    // fetching content (peer-cache) into the local cache
+  ACTION_PHASE_VERIFYING = 3;      // decrypt + integrity/signature check
+  ACTION_PHASE_RUNNING = 4;        // executing (DISM install, offline scan, reboot schedule, ...)
+  ACTION_PHASE_SUCCESS = 5;        // completed / fixed (e.g. install exit 0 / 3010)
+  ACTION_PHASE_FAILED = 6;         // failed (exit_code + reason)
+  ACTION_PHASE_NOT_APPLICABLE = 7; // nothing to do (already installed / not applicable / skipped)
+}
+
+// ActionStatus is the UNIFIED per-action status the agent streams for every
+// server-dispatched action, so the console can show one consistent lifecycle per
+// device per action (BigFix/ManageEngine/Tanium style). It generalizes what used
+// to be an install-only status. A terminal phase carries the outcome — there is
+// no separate result message.
 message ActionStatus {
-  string action_id = 1;
-  string action_type = 2;
+  string action_id = 1;        // = the dispatched command_id; the console's correlation key
+  string action_type = 2;      // "patch_install" | "stage" | "scan" | "reboot" | "software_deploy"
   string device_id = 3;
   ActionPhase phase = 4;
-  int32 exit_code = 5;
-  bool reboot_required = 6;
-  string reason = 7;
-  string detail = 8;
-  int32 progress_pct = 9;
-  int64 started_at = 10;
-  int64 finished_at = 11;
-  string kb = 12;
-  string package_directory = 13;
-  string package_cleanup = 14;
+  int32 exit_code = 5;         // set at SUCCESS/FAILED (e.g. DISM 0 | 3010 | 1641 | other)
+  bool reboot_required = 6;    // set at SUCCESS where relevant
+  string reason = 7;           // concise status/failure reason (console status column)
+  string detail = 8;           // verbose detail (e.g. trailing DISM output) for troubleshooting
+  int32 progress_pct = 9;      // best-effort 0..100 (download/install); 0 when not applicable
+  int64 started_at = 10;       // unix seconds (set when the action starts running)
+  int64 finished_at = 11;      // unix seconds (set at a terminal phase)
+  string kb = 12;              // KB for patch actions (reporting/correlation)
+  string package_directory = 13; // bundle extraction directory (even after cleanup)
+  string package_cleanup = 14; // removed | retained | failed; empty for non-bundles
 }
 
+// DeviceStateReport is the Layer 1 lightweight, frequent report: the device's
+// build and the list of INSTALLED KBs — raw facts only. The agent does NOT
+// compute "missing"; the server diffs installed-KBs against its catalog. Sent on
+// change (installed set rarely changes), routed online or via the offline buffer.
 message DeviceStateReport {
-  reserved 7;
   string device_id = 1;
-  string product_name = 2;
-  string display_version = 3;
-  string build = 4;
-  string architecture = 5;
-  int64 collected_at = 6;
-  bool reboot_pending = 8;
-  repeated string reboot_pending_kbs = 9;
-  repeated string reboot_pending_sources = 10;
+  string product_name = 2;      // e.g. "Windows 11 Pro"
+  string display_version = 3;   // e.g. "24H2"
+  string build = 4;             // e.g. "26100.4652" (authoritative cumulative level)
+  string architecture = 5;      // "amd64" | "arm64" | "x86"
+  int64 collected_at = 6;       // unix seconds
+  reserved 7; // was installed_kbs at field 7 (dropped once; re-added at field 12
+              // with a fresh number so no stale field-7 wire data is misread).
+
+  // Device-level pending-reboot state, so the console shows per-CI whether a
+  // machine is waiting for a reboot to finish applying patches (installed-but-
+  // -pending patches are not yet effective; the build only advances post-reboot).
+  bool reboot_pending = 8;                 // any Windows pending-reboot indicator set
+  repeated string reboot_pending_kbs = 9;  // KBs the agent installed that returned reboot-required and are awaiting a reboot (best-effort attribution)
+  repeated string reboot_pending_sources = 10; // which indicators tripped (e.g. "CBS", "WindowsUpdate", "PendingFileRename", "PendingComputerRename")
+
+  // Enriched installed-apps inventory read from the Windows registry Uninstall
+  // hive (HKLM native + WOW6432Node + HKCU per-user). The server matches these
+  // against its third-party patch catalog (Chrome / Firefox / Adobe / Java /
+  // 1000+ vendors — server-team catalog size) to compute which apps are
+  // outdated and dispatch signed software_deploy tasks to update them.
+  // The agent imposes NO cap on this list — however many apps are installed
+  // on the endpoint, the full inventory is reported. The server catalog is
+  // the only policy point for which apps are patched.
   repeated InstalledApp installed_apps = 11;
+
+  // Installed OS update KBs read from the registry (CBS CurrentState==112,
+  // supplemented by Win32_QuickFixEngineering) — NO cab, NO WUA, no network.
+  // This is one half of the server-side patch diff: the server computes
+  // "missing" = applicable(catalog, product+build+arch) − installed_kbs,
+  // using its own server-side wsusscn2.cab catalog. The endpoint never
+  // computes "missing" and never needs the cab. build (field 4) remains the
+  // authoritative cumulative level; this KB set covers standalone / .NET /
+  // security updates the build number alone does not express. Sorted, deduped.
+  // See docs/server-spec-patch-detection.md.
   repeated string installed_kbs = 12;
 }
 
+// InstalledApp is one entry from the Windows registry Uninstall hive. The
+// agent reports facts only — the server catalog decides whether an app is a
+// patch candidate, outdated, or a BigFix-style "fixlet" target. uninstall_key
+// doubles as the stable identifier the server uses when later dispatching an
+// update or uninstall.
 message InstalledApp {
-  string display_name = 1;
-  string display_version = 2;
-  string publisher = 3;
-  string install_date = 4;
-  string uninstall_key = 5;
-  string hive = 6;
-  int64 estimated_size_kb = 7;
-  string uninstall_string = 8;
+  string display_name = 1;      // user-visible name ("Google Chrome", "Mozilla Firefox")
+  string display_version = 2;   // reported version string ("118.0.5993.117")
+  string publisher = 3;         // vendor ("Google LLC", "Mozilla")
+  string install_date = 4;      // yyyymmdd when present (not all vendors set this)
+  string uninstall_key = 5;     // registry subkey name (stable id for later actions)
+  string hive = 6;              // "HKLM" | "HKLM\\WOW6432Node" | "HKCU\\<SID>" (per-user)
+  int64 estimated_size_kb = 7;  // Uninstall hive EstimatedSize value (0 when missing)
+  string uninstall_string = 8;  // vendor-registered uninstall command (optional, for reference)
 }
 
+// CacheFullReport is sent when the agent cannot stage (pre-cache) a patch because
+// the cache is at its cap and nothing evictable remains (everything left is
+// staged). It is a fail-loud signal, not a silent drop: the server should raise
+// the cap or trigger the client cache-cleanup task.
 message CacheFullReport {
   string device_id = 1;
-  string pending_id = 2;
-  int64 needed_bytes = 3;
-  int64 cap_bytes = 4;
-  int64 in_use_bytes = 5;
-  string message = 6;
+  string pending_id = 2;    // KB/patch id that could not be staged
+  int64 needed_bytes = 3;   // size the pending patch needs
+  int64 cap_bytes = 4;      // current cache cap
+  int64 in_use_bytes = 5;   // bytes currently cached
+  string message = 6;       // human-readable guidance
 }
 
+// FullInventoryReport is the Tier-3 periodic (6-12h) full snapshot of the
+// device's HARDWARE + SOFTWARE inventory. It is the safety-net report that
+// self-corrects the server's view even when Tier-2 change events are missed
+// (race, agent restart, bug) — one Tier-3 cycle supersedes anything the
+// server might have lost. Also sent ONCE on reconnect-after-offline, with
+// a flap floor so a flapping NIC does not DoS the server.
+//
+// SOFTWARE inventory reuses the InstalledApp enumeration (same registry
+// Uninstall hive walk as DeviceStateReport.installed_apps — HKLM native +
+// WOW6432Node + HKU per-user).
+//
+// HARDWARE inventory is pure Go + x/sys/windows — no WMI, no COM, no cgo —
+// to keep the agent binary small (≤25 MB target) and the RAM/CPU cost of a
+// snapshot in the single-ms range.
 message FullInventoryReport {
   string device_id = 1;
-  int64 collected_at = 2;
-  string trigger = 3;
+  int64 collected_at = 2;        // unix seconds
+  string trigger = 3;            // "scheduled" | "reconnect" (why this snapshot ran)
   HardwareInventory hardware = 4;
-  repeated InstalledApp installed_apps = 5;
+  repeated InstalledApp installed_apps = 5; // same enumeration as DeviceStateReport.installed_apps
+  // Installed device drivers (Win32_PnPSignedDriver). The server matches these
+  // against its OEM driver catalog (Dell/HP/Lenovo/etc.) to find outdated
+  // drivers Windows Update does not carry, then dispatches a signed driver
+  // deploy. Microsoft-delivered drivers additionally appear in the
+  // wsusscn2.cab scan; this list is the OEM/third-party coverage. Agent
+  // reports facts only; the server catalog is the policy point for what is
+  // patchable (no agent-side vendor filtering, same as installed_apps).
   repeated DriverInventory drivers = 6;
+
+  // Installed MSIX / AppX / Microsoft Store packages — the modern-app surface
+  // the classic registry Uninstall hive (installed_apps) does NOT show. Read
+  // from the system StateRepository (all users + provisioned) via pure registry
+  // (no PowerShell, unlike BigFix's Get-AppxPackage). The server matches these
+  // against its third-party catalog to detect outdated / vulnerable Store apps.
+  // One row per app (bundle/arch/resource duplicates collapsed).
   repeated InstalledAppx installed_appx = 7;
+
+  // Device identity + session attributes (BigFix retrieved-properties
+  // equivalent) for console device-search and user-targeting. Native-only
+  // (WTS / NetGetJoinInformation / GetTickCount64) — no PowerShell. Optional:
+  // an agent that cannot read a field leaves it zero/empty.
   IdentityInfo identity = 8;
+
+  // Digital Employee Experience (DEX) health — device stability signals the
+  // server rolls into a DEX score. Step-1 = reliability event counts read from
+  // the Windows event log natively (no PowerShell). Optional/zero when absent.
   DexHealth dex_health = 9;
-  // Server-defined custom attributes evaluated by the agent: name -> value.
+
+  // Server-defined custom properties (BigFix "retrieved properties" / Tanium
+  // "sensors"): name -> value, evaluated locally by the agent from signed
+  // CustomAttributeSpec definitions. One unlimited map, no per-attribute schema
+  // change, no CMDB. Empty when no definitions are active.
   map<string, string> custom_properties = 10;
+
+  // Installed antivirus/security products (Windows Security Center). Lets the
+  // console surface the exact AV-exclusion guidance for whatever AV the endpoint
+  // runs (third-party AV can't be auto-excluded; Defender is auto-excluded by the
+  // agent). Native WMI root\SecurityCenter2; empty on Server SKUs / no SecurityCenter.
+  repeated AntivirusProduct antivirus_products = 11;
 }
 
-// One server-defined custom attribute: a read-only, declarative provider
-// (env, file, registry, admin_tag, service_state) and its arguments.
+// AntivirusProduct is one registered AV from Windows Security Center.
+message AntivirusProduct {
+  string name = 1;        // display name, e.g. "Windows Defender", "CrowdStrike Falcon"
+  bool enabled = 2;       // real-time protection on
+  bool up_to_date = 3;    // signatures current
+  uint32 product_state = 4; // raw SecurityCenter2 productState (for the console to decode further)
+}
+
+// CustomAttributeDefinition is ONE server-defined property the agent evaluates
+// locally with a DECLARATIVE, read-only provider (never arbitrary code):
+//   provider "env"       args{name}            -> environment variable
+//   provider "file"      args{path, attr}      -> exists | size | version
+//   provider "registry"  args{root, key, name} -> HKLM/HKCU/... value (read-only)
+//   provider "admin_tag" args{name}            -> HKLM\SOFTWARE\AegisOne\Client\Tags
 message CustomAttributeDefinition {
   string name = 1;
   string provider = 2;
   map<string, string> args = 3;
 }
 
-// Payload of the signed set_custom_attributes command (anti-rollback on issued_at).
+// CustomAttributeSpec is the signed, anti-rollback definition set the server
+// pushes (as a set_custom_attributes command payload). The agent persists it,
+// re-verifies it at startup, and evaluates the definitions into
+// FullInventoryReport.custom_properties.
 message CustomAttributeSpec {
   repeated CustomAttributeDefinition definitions = 1;
-  int64 issued_at = 2;
+  int64 issued_at = 2; // unix seconds; must exceed the stored value (anti-rollback)
 }
 
-// Device stability over the last window_days, counted from the Windows event log.
+// DexHealth carries endpoint stability/reliability signals (BigFix-DEX
+// "Reliability" equivalent): counts of unexpected shutdowns, bugchecks (BSOD),
+// and dirty power events over a lookback window, read from the Windows System
+// event log. Boot/logon duration land in a later step.
 message DexHealth {
-  int32 unexpected_shutdowns = 1;
-  int32 bugchecks = 2;
-  int32 dirty_power_events = 3;
-  int32 window_days = 4;
-  int64 boot_duration_ms = 5;
-  int32 app_crashes = 6;
-  int32 app_hangs = 7;
-  repeated AppFault app_faults = 8;
+  int32 unexpected_shutdowns = 1; // System event 6008 in the window
+  int32 bugchecks = 2;            // System event 1001 (BSOD / bugcheck) in the window
+  int32 dirty_power_events = 3;   // System event 41 (Kernel-Power dirty shutdown) in the window
+  int32 window_days = 4;          // lookback window used for the counts
+  int64 boot_duration_ms = 5;     // last boot time (Diagnostics-Performance event 100, BootTime); 0 = unknown
+  int32 app_crashes = 6;          // Application event 1000 (app crash) in the window
+  int32 app_hangs = 7;            // Application event 1002 (app hang / not responding) in the window
+  repeated AppFault app_faults = 8; // per-application crash/hang breakdown (top apps by fault count)
 }
 
+// AppFault is one application's crash + hang counts in the window — so the
+// console can show WHICH apps are unstable, not just a total.
 message AppFault {
-  string name = 1;
-  int32 crashes = 2;
-  int32 hangs = 3;
+  string name = 1;    // faulting application (e.g. "chrome.exe")
+  int32 crashes = 2;  // Application event 1000 for this app
+  int32 hangs = 3;    // Application event 1002 for this app
+  // Detail of the MOST RECENT crash for this app (empty for hang-only apps).
+  string last_module = 4;      // faulting module (e.g. "ntdll.dll")
+  string last_exception = 5;   // exception code (e.g. "0xc0000005")
+  int64  last_crash_unix = 6;  // time of the most recent crash (unix seconds), 0 = unknown
 }
 
-// Who is on the machine and its domain state. boot_time is unix seconds.
+// IdentityInfo carries device identity + session attributes used for console
+// device-search (by logged-on user) and policy/notification targeting.
 message IdentityInfo {
-  string logged_on_user = 1;
-  string machine_domain = 2;
-  bool domain_joined = 3;
-  int64 uptime_seconds = 4;
-  int64 boot_time = 5;
+  string logged_on_user = 1; // interactive console user ("" = none / headless)
+  string machine_domain = 2; // AD domain (if joined) or workgroup name
+  bool domain_joined = 3;    // true = joined to an AD domain
+  int64 uptime_seconds = 4;  // seconds since last boot
+  int64 boot_time = 5;       // unix seconds of last boot (collected_at - uptime)
 }
 
+// InstalledAppx is one installed MSIX/AppX/Store package. package_family_name
+// (Name_PublisherId) is the server catalog's stable match key.
 message InstalledAppx {
-  string display_name = 1;
-  string package_full_name = 2;
-  string package_family_name = 3;
-  string name = 4;
-  string version = 5;
-  string architecture = 6;
-  string publisher_id = 7;
+  string display_name = 1;        // friendly name; best-effort, may be empty
+  string package_full_name = 2;   // "Name_Version_Arch_ResourceId_PublisherId"
+  string package_family_name = 3; // "Name_PublisherId" — catalog match key
+  string name = 4;                // parsed package name
+  string version = 5;             // parsed, e.g. "3.27.12250.0"
+  string architecture = 6;        // "x64" | "x86" | "arm64" | "neutral"
+  string publisher_id = 7;        // publisher hash, e.g. "8wekyb3d8bbwe"
   string install_location = 8;
-  string origin = 9;
+  string origin = 9;              // "Store" | "Inbox" | "LineOfBusiness" | "DeveloperSigned" | ...
 }
 
+// DriverInventory is one installed, signed device driver. The server's
+// catalog match keys are hardware_id + provider_name + driver_version/date.
 message DriverInventory {
-  string device_name = 1;
-  string device_class = 2;
-  string driver_version = 3;
-  string driver_date = 4;
-  string provider_name = 5;
-  string hardware_id = 6;
-  string inf_name = 7;
-  string manufacturer = 8;
-  bool is_signed = 9;
+  string device_name = 1;    // "NVIDIA GeForce RTX 3060"
+  string device_class = 2;   // "Display" | "Net" | "System" | ...
+  string driver_version = 3; // "31.0.15.3623" (the compare key)
+  string driver_date = 4;    // "YYYY-MM-DD" (normalized from CIM_DATETIME); empty = unknown
+  string provider_name = 5;  // "NVIDIA" | "Intel" | "Realtek"
+  string hardware_id = 6;    // "PCI\\VEN_10DE&DEV_2504..." — catalog match anchor
+  string inf_name = 7;       // "oem123.inf"
+  string manufacturer = 8;   // device manufacturer string
+  bool is_signed = 9;        // Authenticode-signed driver package
 }
 
+// HardwareInventory is the HW section of a Tier-3 snapshot. Fields that
+// are not available on the host are left empty strings or 0; the server
+// treats "" / 0 as "unknown", not "none". All sizes in bytes.
 message HardwareInventory {
-  string cpu_vendor = 1;
-  string cpu_model = 2;
+  // CPU — vendor + model from CPUID; cores from GetLogicalProcessorInformation.
+  string cpu_vendor = 1;         // e.g. "GenuineIntel" | "AuthenticAMD"
+  string cpu_model = 2;          // brand string from CPUID leaf 0x80000002-0x80000004
   int32 cpu_physical_cores = 3;
   int32 cpu_logical_cores = 4;
+  // Memory — GlobalMemoryStatusEx totals.
   int64 memory_total_bytes = 5;
+  // Disks — one entry per fixed drive (logical volume). Removable / network
+  // drives are excluded (noisy, change often).
   repeated DiskInventory disks = 6;
+  // NICs — one entry per physical adapter (loopback / tunnel adapters excluded).
   repeated NetworkInterface nics = 7;
+  // BIOS / chassis — SMBIOS table (bios_vendor / bios_version / system_vendor
+  // / system_product / serial_number / chassis_type). serial_number MAY be
+  // regulated / PII in some jurisdictions; the server catalog decides
+  // whether to persist or redact.
   string bios_vendor = 8;
   string bios_version = 9;
   string bios_release_date = 10;
   string system_vendor = 11;
   string system_product = 12;
   string system_serial_number = 13;
-  string chassis_type = 14;
-  int32 cpu_mhz = 15;
-  int32 cpu_threads_per_core = 16;
-  string cpu_architecture = 17;
-  string os_product_name = 18;
-  string os_display_version = 19;
-  string os_build = 20;
-  string os_service_pack = 21;
+  string chassis_type = 14;       // "Desktop" | "Laptop" | "Server" | "VM" | etc.
+
+  // UC-21.1 — closes the easy gaps vs BigFix detailed_hw_physical_processors /
+  // detailed_hw_operating_systems / detailed_hw_smbios categories without
+  // dragging in full SMBIOS raw-table parsing.
+  int32 cpu_mhz = 15;              // clock speed from registry (~MHz under CentralProcessor\0)
+  int32 cpu_threads_per_core = 16; // logical / physical when both known; 0 when unknown
+  string cpu_architecture = 17;    // "amd64" | "arm64" | "x86"
+  // OS — closes BigFix detailed_hw_operating_systems. These are richer than
+  // the free-form Heartbeat.os string and give a server-side catalog match
+  // the exact build + edition + servicing level.
+  string os_product_name = 18;     // "Windows 11 Pro" (ProductName registry)
+  string os_display_version = 19;  // "23H2" (DisplayVersion registry)
+  string os_build = 20;            // "22631.4890" (CurrentBuild + UBR)
+  string os_service_pack = 21;     // "Service Pack 1" when present; empty on modern Windows (10+)
+  // System UUID (SMBIOS type 1). Already collected at enroll for dedup;
+  // reporting it here lets the server catalog correlate an endpoint across
+  // reinstalls that reset device_id.
   string system_uuid = 22;
+  // Virtualization — guest-side detection using BIOS/system vendor strings:
+  // "none" | "vmware" | "virtualbox" | "hyperv" | "xen" | "kvm" | "qemu" |
+  // "parallels" | "unknown". Not a full LPAR equivalent; BigFix's LPAR
+  // detection is AIX/zOS-centric and out of our Phase-1 scope.
   string virtualization = 23;
 }
 
 message DiskInventory {
-  string mount_point = 1;
-  string volume_label = 2;
-  string file_system = 3;
+  string mount_point = 1;        // "C:\\"
+  string volume_label = 2;       // may be empty
+  string file_system = 3;        // "NTFS" | "FAT32" | ...
   int64 total_bytes = 4;
   int64 free_bytes = 5;
+  // Drive media type — detected via IOCTL_STORAGE_QUERY_PROPERTY with
+  // StorageDeviceSeekPenaltyProperty + bus-type probe. Values:
+  // "SSD" | "HDD" | "NVMe" | "Unknown". Useful for asset / lifecycle
+  // reporting (replace-cycle planning, SSD-only software policies).
   string drive_type = 6;
 }
 
 message NetworkInterface {
-  string name = 1;
-  string mac_address = 2;
+  string name = 1;               // adapter friendly name
+  string mac_address = 2;        // "AA:BB:CC:DD:EE:FF"
   repeated string ipv4_addresses = 3;
   repeated string ipv6_addresses = 4;
-  int64 link_speed_bps = 5;
-  string status = 6;
+  int64 link_speed_bps = 5;      // bits per second; 0 when unknown
+  string status = 6;             // "up" | "down" | "unknown"
 }
 
+// AuditEvent is one audit record the agent emits to the server for every
+// security-relevant event: signed commands received or rejected, command
+// completion outcomes, enrollment success / failure, cert renewals. The
+// SERVER is the sole authoritative compliance surface — it writes
+// server_audit.log with its own integrity controls that the endpoint
+// admin cannot reach. The agent keeps a small rolling local audit.log
+// JSONL trace for on-endpoint L1 forensics (field engineer with no
+// server portal) and to capture pre-enrollment events the server never
+// saw; the local copy is best-effort and explicitly secondary.
+//
+// NO PII / secrets ever appear in an AuditEvent — only command metadata
+// (type, id, actor, source, decision). SecureParameters and payload bytes
+// are NEVER logged here, same discipline as UC-20 script content audit.
 message AuditEvent {
-  reserved 12, 13;
   string device_id = 1;
+  // ts: unix millis when the agent made the audit decision (receive-time,
+  // not Command.issued_at which is when the operator clicked run).
   int64 ts = 2;
+  // event_type: short closed vocabulary so server-side analysis keys off
+  // exact strings.
+  //   "command_received"    — signed command passed signature check
+  //   "command_rejected"    — signed command failed signature or validation
+  //   "enrollment_success"  — EnrollRequest accepted + cert issued
+  //   "enrollment_failed"   — EnrollRequest rejected (bad token, license, etc.)
+  //   "cert_renewed"        — client cert rotated before expiry
+  //   "audit_degraded"      — local audit.log write failure (fail-loud)
   string event_type = 3;
-  string command_id = 4;
-  string command_type = 5;
-  string actor = 6;
-  string source = 7;
-  int64 issued_at = 8;
-  bool signature_ok = 9;
-  string decision = 10;
-  string reason = 11;
+  string command_id = 4;    // signed command id (empty on enrollment events)
+  string command_type = 5;  // e.g. "run_command" | "install_patch" (empty on non-command events)
+  string actor = 6;         // from Command.actor
+  string source = 7;        // from Command.source
+  int64 issued_at = 8;      // from Command.issued_at
+  bool signature_ok = 9;    // true = signature verified
+  string decision = 10;     // "accepted" | "rejected" | "degraded"
+  string reason = 11;       // human-readable short reason (no secrets)
+  reserved 12, 13;          // was prev_hash + line_hash (chain-hash dropped — server is authoritative, local chain was theatre)
+  // details is a short per-command-type payload summary so an auditor
+  // can tell WHAT was done, not just that "a run_command was received".
+  // Format is "k1=v1, k2=v2" with keys per command type:
+  //   run_command:         shell=<cmd|powershell|...>, command=<text truncated to 400B>
+  //   install_patch:       kb=<KB####>
+  //   uninstall_patch:     kb=<KB####>
+  //   stage_patch:         kb=<KB####>
+  //   software_deploy*:    name=<...>, version=<...>, action=<install|uninstall>
+  //   collect_file:        paths=<N>, first=<first path>
+  //   file_operation:      op=<copy|move|write_bytes|...>, src=<...>, dst=<...>
+  //   reboot:              delay=<N>s
+  //   scan_now|scan:       (empty)
+  //   report_device_state: (empty)
+  //   open_shell:          session_id=<short>
+  // SECRET GUARD: when the signed spec carries secure_parameters, the
+  // summary is replaced with "<sensitive — secure parameters in use>"
+  // so a secret substituted into ${name} tokens cannot leak via audit.
+  // Admin discipline must still be followed for literal secrets in
+  // script sources (same discipline as UC-20 script content audit).
   string details = 14;
 }
 
 message AgentMessage {
-  reserved 4, 5;
+  reserved 4; // was InstallResult
+  reserved 5; // was InstallStatus, superseded by the unified ActionStatus (field 8)
   oneof payload {
     Heartbeat heartbeat = 1;
     CommandResult command_result = 2;
@@ -398,58 +731,77 @@ message AgentMessage {
   }
 }
 
-// One aggregated CPU / memory window (percent, 0-100). collected_at is unix seconds.
+// DexTelemetry is a periodic, AGGREGATED resource-usage report for the DEX score
+// (BigFix-DEX device-performance equivalent). The agent samples live CPU and
+// memory at a short interval and sends avg/min/max over a window, on its OWN
+// cadence — NOT in the change-gated inventory, where a constantly-changing value
+// would force a send every cycle. Native-only (GetSystemTimes /
+// GlobalMemoryStatusEx) — no PowerShell, no WMI.
 message DexTelemetry {
   string device_id = 1;
-  int64 collected_at = 2;
-  int32 window_seconds = 3;
-  int32 sample_count = 4;
-  double cpu_avg = 5;
+  int64 collected_at = 2;   // unix seconds at window end
+  int32 window_seconds = 3; // aggregation window length
+  int32 sample_count = 4;   // samples aggregated into this report
+  double cpu_avg = 5;       // CPU utilization %, averaged over the window
   double cpu_min = 6;
   double cpu_max = 7;
-  double mem_used_avg = 8;
+  double mem_used_avg = 8;  // physical memory in-use %, averaged (available% = 100 - used)
   double mem_used_min = 9;
   double mem_used_max = 10;
-  // Disk: PhysicalDisk(_Total) queue length, transfers/s, latency.
-  double disk_queue_avg = 11;
+  // PhysicalDisk(_Total) performance, averaged over the window (0 when unavailable).
+  double disk_queue_avg = 11;      // avg. disk queue length (outstanding I/O)
   double disk_queue_min = 12;
   double disk_queue_max = 13;
-  double disk_iops_avg = 14;
+  double disk_iops_avg = 14;       // disk transfers/sec
   double disk_iops_min = 15;
   double disk_iops_max = 16;
-  double disk_latency_ms_avg = 17;
+  double disk_latency_ms_avg = 17; // avg. ms per transfer
   double disk_latency_ms_min = 18;
   double disk_latency_ms_max = 19;
-  // Network: ICMP round trip to net_target (default gateway unless configured).
-  double net_rtt_ms_avg = 20;
+  // Network latency + reachability to the ping target (default gateway, or the
+  // configured AEGIS_DEX_PING_TARGET). 0 when no target could be probed.
+  double net_rtt_ms_avg = 20; // avg. ICMP round-trip ms (over reachable probes)
   double net_rtt_ms_min = 21;
   double net_rtt_ms_max = 22;
-  double net_loss_pct = 23;
-  string net_target = 24;
-  // Battery (percent).
+  double net_loss_pct = 23;   // % of probes with no reply this window (packet loss)
+  string net_target = 24;     // IP that was probed
+  // Battery (laptops). battery_present=false on desktops/servers/VMs.
   bool battery_present = 25;
-  bool battery_ac_online = 26;
-  double battery_charge_pct_avg = 27;
-  double battery_charge_pct_min = 28;
+  bool battery_ac_online = 26;        // true = on AC power
+  double battery_charge_pct_avg = 27; // charge %, averaged over the window
+  double battery_charge_pct_min = 28; // window low (drain indicator)
   double battery_charge_pct_max = 29;
-  // Wi-Fi signal quality (0-100) and network name.
+  // Wi-Fi (laptops). wifi_present=false when there is no Wi-Fi adapter.
   bool wifi_present = 30;
-  bool wifi_connected = 31;
-  double wifi_signal_pct_avg = 32;
+  bool wifi_connected = 31;             // associated to an AP
+  double wifi_signal_pct_avg = 32;      // signal quality %, averaged over the window
   double wifi_signal_pct_min = 33;
   double wifi_signal_pct_max = 34;
   string wifi_ssid = 35;
+
+  // Battery health/wear (laptops). battery_health_pct = full-charged / designed
+  // capacity * 100 (100 = like-new, lower = worn). 0 = unknown / no battery.
+  double battery_health_pct = 36;
+  int32  battery_cycle_count = 37; // charge cycles, 0 = unknown (many firmwares don't report it)
 }
 
+// PatchBaseline is the tiny snapshot the server pushes on sync: "for your build,
+// the latest known KBs are these." The agent caches it and, while offline,
+// compares its installed KBs against it to flag "likely missing" locally
+// (best-effort; the authoritative diff is server-side on reconnect).
 message PatchBaseline {
-  string build = 1;
-  repeated string latest_kbs = 2;
-  int64 issued_at = 3;
+  string build = 1;               // the build this baseline applies to
+  repeated string latest_kbs = 2; // KBs expected for the latest state of that build
+  int64 issued_at = 3;            // unix seconds
 }
 
+// CabManifest tells the agent the current wsusscn2.cab version the server has.
+// The agent compares it to its locally cached cab version and, if different,
+// fetches the new cab via peer-cache (one-way: internet → catalog server →
+// peer-cache → endpoint; the endpoint never fetches from Microsoft).
 message CabManifest {
-  string version = 1;
-  string sha256 = 2;
+  string version = 1; // opaque version/manifest id of the current cab
+  string sha256 = 2;  // integrity of the cab to fetch
 }
 
 message ServerMessage {
@@ -460,65 +812,143 @@ message ServerMessage {
   }
 }
 
+// ContentRequest asks the server (peer-cache) for a file by kind+id. The agent
+// never fetches from the internet — only from the server/peer-cache over this
+// same mTLS channel.
 message ContentRequest {
-  string kind = 1;
-  string id = 2;
-  string sha256 = 3;
+  string kind = 1;   // "cab" | "patch" | "package" (software distribution)
+  string id = 2;     // cab version, patch id (e.g. KB), or package content_id
+  string sha256 = 3; // expected digest, verified after download
+  // offset is the byte position to resume streaming from (checkpoint restart).
+  // 0 = from the start. On a mid-transfer disconnect the agent keeps the bytes
+  // it already wrote and re-requests with offset = bytes-on-disk, so a large
+  // package is not re-sent from zero. The server seeks to this offset and
+  // streams the remainder; an offset past the file's end is rejected so the
+  // agent restarts cleanly. End-to-end SHA-256 still verifies the whole file.
   int64 offset = 4;
 }
 
+// ContentChunk is one slice of the streamed file.
 message ContentChunk {
   bytes data = 1;
 }
 
+// EnrollRequest is the agent's one-time enrollment call (Option B). The agent has
+// no client cert yet, so this runs over SERVER-AUTH TLS (agent verifies the server
+// via the embedded CA) and is authenticated by the per-tenant enroll_token. The
+// agent generates its own keypair locally and sends only a CSR — the private key
+// never leaves the device.
 message EnrollRequest {
-  string enroll_token = 1;
-  string device_id = 2;
-  string csr_pem = 3;
-  string system_uuid = 4;
-  string machine_guid = 5;
-  string hostname = 6;
+  string enroll_token = 1;   // per-tenant bootstrap token (license-gated server side)
+  string device_id = 2;      // agent's persisted UUID (may be empty on first ever enroll)
+  string csr_pem = 3;        // PEM CSR, CN = device_id; server CA signs it
+  string system_uuid = 4;    // SMBIOS System UUID (primary dedup key)
+  string machine_guid = 5;   // registry MachineGuid (secondary dedup key)
+  string hostname = 6;       // display attribute only — never a dedup key
   string os = 7;
   string agent_version = 8;
-  string tpm_ek = 9;
+  string tpm_ek = 9;         // TPM Endorsement Key fingerprint (strongest dedup key when present)
+  // schema_version — same semantics as Heartbeat.schema_version. Captured
+  // at enroll so the server knows the contract version before the first
+  // heartbeat arrives (and can reject a protocol-incompatible agent).
   string schema_version = 10;
+  // agent_capabilities — same semantics as Heartbeat.agent_capabilities,
+  // captured at enroll so the server records the capability profile
+  // atomically with issuing the per-device client certificate.
   repeated string agent_capabilities = 11;
+  // device_type — "endpoint" | "probe" (Phase 2). Captured at enroll so
+  // the server stores the device's role alongside the issued cert.
   string device_type = 12;
 }
 
+// EnrollResponse returns the signed per-device client certificate. assigned_device_id
+// is the server-reconciled id (may differ from the requested one after dedup). A
+// non-empty error means the enrollment was rejected (bad token, over license, etc.).
 message EnrollResponse {
-  string client_cert_pem = 1;
-  string ca_chain_pem = 2;
+  string client_cert_pem = 1; // signed per-device client certificate
+  string ca_chain_pem = 2;    // CA chain (optional; may already be provisioned)
   string assigned_device_id = 3;
   string error = 4;
-  string computer_id = 5;
+  string computer_id = 5;     // server-assigned numeric console id (e.g. 10-digit, expandable)
 }
 
+service AgentControlPlane {
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+  // FetchContent streams a cab/patch file to the agent (peer-cache delivery).
+  rpc FetchContent(ContentRequest) returns (stream ContentChunk);
+  // UploadContent streams one endpoint-local file FROM the agent TO the server
+  // (the on-demand reverse of FetchContent, mTLS-authenticated). Used by the
+  // "collect_file" task so the console can pull install/app logs, config files
+  // or script output on demand — never pushed by the agent on its own, same model
+  // as BigFix/BladeLogic log collection. First chunk MUST carry the header fields;
+  // subsequent chunks carry only data. Server replies once at end with the stored
+  // location and whether the per-chunk SHA-256 chain matched.
+  rpc UploadContent(stream UploadChunk) returns (UploadAck);
+  // Enroll issues a per-device client cert from a CSR (server-auth TLS + token).
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  // Renew re-issues the client cert BEFORE expiry over the existing mTLS channel.
+  // The device is authenticated by its CURRENT client cert (no token) — the server
+  // signs the new CSR for that same device_id. This is how long-lived certs rotate
+  // without re-enrollment.
+  rpc Renew(RenewRequest) returns (RenewResponse);
+  // ShellSession is a live bidirectional shell pipe (BladeLogic nexec model, NOT
+  // RDP / remote desktop — pure text streaming). The server opens it with a prior
+  // signed "open_shell" command the agent received on Connect; the agent dials
+  // this RPC with that session_id, spawns cmd.exe as LocalSystem, and pipes stdin
+  // in / stdout+stderr out. Session is on its OWN stream so a slow shell cannot
+  // block patch/status traffic; every byte in and out is also written to a local
+  // transcript the agent uploads on close for audit.
+  // Agent sends ShellOutput (stdout/stderr/close), receives ShellInput (stdin/
+  // control) — matches which side holds the shell process.
+  rpc ShellSession(stream ShellOutput) returns (stream ShellInput);
+}
+
+// CollectFileSpec is the payload of a signed "collect_file" command — the agent
+// uploads the named endpoint-local files to the server via UploadContent. The
+// agent is a faithful executor: it reads only what the signed command names, caps
+// per file and per task, and never pushes on its own.
 message CollectFileSpec {
+  // paths lists files to upload, each either an absolute path or a shell-style
+  // glob (e.g. "C:\\temp\\deploy.log", "C:\\Program Files\\App\\logs\\*.log").
   repeated string paths = 1;
+  // max_bytes_each caps the bytes uploaded per file (safety / bandwidth). A file
+  // larger than the cap is handled per tail_bytes below. 0 = agent default.
   int64 max_bytes_each = 2;
+  // tail_bytes, when > 0, uploads ONLY the last N bytes of each file (log tail).
+  // 0 = upload the whole file (subject to max_bytes_each; over-cap → tail of cap).
   int64 tail_bytes = 3;
+  // max_total_bytes caps the SUM across all files in this task (DoS brake).
+  // 0 = agent default (e.g. 500 MB).
   int64 max_total_bytes = 4;
+  // Per-task upload rate cap in bytes per second for the agent-to-server
+  // UploadContent stream. 0 = no per-task cap. The agent applies BigFix-
+  // style "lower wins": effective rate is min of this and the agent's
+  // config cap (AEGIS_UPLOAD_MAX_BYTES_PER_SECOND). Signed command cannot
+  // bypass the agent's admin-set cap.
   int64 max_upload_bytes_per_second = 5;
 }
 
+// UploadChunk is one slice of a file being uploaded. The FIRST chunk must set
+// action_id + name (+ optional total_size), subsequent chunks only data (and the
+// last chunk sets sha256_full for end-to-end integrity).
 message UploadChunk {
-  string action_id = 1;
-  string name = 2;
-  bytes data = 3;
-  int64 total_size = 4;
-  string sha256_full = 5;
+  string action_id = 1;   // the collect_file command_id (also the console grouping key)
+  string name = 2;        // relative stored name (e.g. "deploy.log" or "logs/app.log")
+  bytes data = 3;         // chunk payload (typically 1 MiB)
+  int64 total_size = 4;   // optional; agent's intended total upload size (first chunk)
+  string sha256_full = 5; // hex SHA-256 of the full payload (final chunk)
 }
 
+// UploadAck is returned once per uploaded file.
 message UploadAck {
-  string stored_path = 1;
+  string stored_path = 1;   // where the server put it (e.g. "uploads/<device>/<action>/<name>")
   int64 received_bytes = 2;
-  bool integrity_ok = 3;
-  string error = 4;
+  bool integrity_ok = 3;    // true when the computed SHA-256 matches sha256_full
+  string error = 4;         // non-empty on refusal / verify failure
 }
 
 message RenewRequest {
-  string csr_pem = 1;
+  string csr_pem = 1; // new CSR; the server signs it for the authenticated device
 }
 
 message RenewResponse {
@@ -526,47 +956,95 @@ message RenewResponse {
   string error = 2;
 }
 
+// OpenShellSpec is the payload of a signed "open_shell" command — it reserves a
+// shell session on the agent. The agent dials ShellSession with session_id to
+// pump stdin/stdout. The admin never sees this spec; it is the server↔agent
+// contract. The session is single-use — session_id MUST NOT be reused.
 message OpenShellSpec {
+  // session_id — the ID the agent presents on its first ShellInput chunk.
+  // Opaque, 32+ bytes recommended; one-shot (second use is refused).
   string session_id = 1;
+  // ttl_seconds — the signed command is honored only this long after issue;
+  // after that the open_shell is refused ("expired"). Defaults to 60s.
   int32 ttl_seconds = 2;
+  // idle_timeout_seconds — the agent kills the session after this many seconds
+  // with no stdin AND no stdout. 0 = agent default (600 = 10 minutes).
   int32 idle_timeout_seconds = 3;
+  // max_duration_seconds — hard upper bound regardless of activity.
+  // 0 = agent default (3600 = 1 hour).
   int32 max_duration_seconds = 4;
+  // issued_at — server timestamp (unix seconds) used with ttl_seconds.
   int64 issued_at = 5;
 }
 
+// ShellInput — from server to agent (received on the ShellSession stream). Each
+// chunk carries stdin bytes, an out-of-band control signal, or a session end.
 message ShellInput {
-  bytes stdin = 1;
+  bytes stdin = 1;   // raw bytes to write to the shell's stdin
+  // control: "close" ends the session cleanly; "break" is best-effort Ctrl+C
+  // (the LocalSystem service has no console → the agent terminates the shell).
   string control = 2;
 }
 
+// ShellOutput — from agent to server (sent on the ShellSession stream). The
+// FIRST chunk MUST set session_id (binds the stream to the signed open_shell
+// command). Subsequent chunks carry stdout/stderr; the final chunk sets closed
+// with the exit code and a reason.
 message ShellOutput {
-  string session_id = 1;
-  bytes stdout = 2;
-  bytes stderr = 3;
-  bool closed = 4;
-  int32 exit_code = 5;
-  string reason = 6;
+  string session_id = 1; // required on FIRST chunk; ignored thereafter
+  bytes stdout = 2;      // bytes from the shell's stdout
+  bytes stderr = 3;      // bytes from the shell's stderr
+  bool closed = 4;       // final chunk when the session ends
+  int32 exit_code = 5;   // shell process exit code (final chunk)
+  string reason = 6;     // "exited" | "idle_timeout" | "max_duration" | "close" | error text
 }
 
+// RunCommandSpec is the payload of a signed "run_command" task — a one-shot
+// command execution (BigFix WebUI / BladeLogic Type-1 equivalent) that returns
+// stdout+stderr+exit as ActionStatus. Live interactive sessions are open_shell
+// instead; this is the atom for ad-hoc queries, scripted multi-host workflows,
+// and future console-authored tasks. Server-side filesystem is NOT required —
+// output optionally streams back as a file via UploadContent (reuses the same
+// upload channel as collect_file).
 message RunCommandSpec {
+  // command — the exact text to execute (interpreted by `shell`). Nothing is
+  // guessed: whatever the admin wrote is what runs. ${name} parameter tokens
+  // are substituted the same way softdist does (same engine).
   string command = 1;
+  // shell — the interpreter. "cmd" / "powershell" / "pwsh" (Windows), "bash" /
+  // "sh" / "zsh" (Linux/macOS). "" or "auto" picks the OS-native shell. An
+  // unsupported value on this OS is reported honestly (NOT_APPLICABLE).
   string shell = 2;
+  // timeout_seconds — hard upper bound on execution. 0 = agent default (300).
   int32 timeout_seconds = 3;
+  // max_output_bytes — caps combined stdout+stderr returned inline (ActionStatus
+  // Detail). Over-cap output is truncated with a notice; use upload_as to save
+  // the FULL output as a server-side file instead. 0 = agent default (1 MiB).
   int64 max_output_bytes = 4;
+  // upload_as — when non-empty, the agent streams stdout to the server via
+  // UploadContent with this name (relative path under the device's upload
+  // area). stderr still returns inline. Reuses collect_file plumbing.
   string upload_as = 5;
+  // parameters — ${name} substitution values (same engine as softdist).
   map<string, string> parameters = 6;
+  // working_dir — process CWD. Empty = agent default (SKVC\tmp).
   string working_dir = 7;
+  // run_as — reserved for a future per-user context. v1 is LocalSystem only.
   string run_as = 8;
 }
 
+// RunCommandResult is embedded in the ActionStatus.Detail as JSON so the REPL
+// / console can parse it structurally (shell_used, bytes_out, truncated, etc.)
+// WITHOUT re-encoding every field onto ActionStatus. ActionStatus's Reason
+// still carries a human-readable summary.
 message RunCommandResult {
   int32 exit_code = 1;
   string shell_used = 2;
   int64 stdout_bytes = 3;
   int64 stderr_bytes = 4;
-  string stdout = 5;
-  string stderr = 6;
-  bool truncated = 7;
-  string uploaded_path = 8;
+  string stdout = 5;    // inline, up to max_output_bytes (may be truncated)
+  string stderr = 6;    // inline, same cap
+  bool truncated = 7;   // true when the inline capture was cut
+  string uploaded_path = 8; // non-empty when upload_as was set and upload succeeded
   int64 duration_ms = 9;
 }

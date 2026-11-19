@@ -1,19 +1,16 @@
 // =====================================================================================
-// AEGIS ONE - Agent <-> Server contract, as implemented by the shipped agent.
+// AEGIS ONE - Agent <-> Server contract (package aegisone.v1).
 //
-// SOURCE OF TRUTH: the agent team's aegis_one_proto module (grpc/agent.proto,
-// owner: Vijay). That source was not available, so this file was RECOVERED from
-// the FileDescriptorProto that protoc-gen-go embeds in the compiled agent
-// (dist/AegisOneClient.exe) and mockserver (dist/mockserver.exe); both binaries
-// carry byte-identical descriptors. It is checked against that descriptor
-// (same package, messages, fields, numbers, types, reserved ranges, service);
-// only the file name and go_package differ, neither of which is on the wire.
-// Replace it with the agent team's real file as soon as that is available, and
-// regenerate.
+// SOURCE OF TRUTH: the agent team's aegis_one_proto module, grpc/agent.proto
+// (owner: Vijay). This file is that file verbatim as of upstream commit d1fed59
+// (2026-11-19) with ONE change: go_package points at this module's gen/ tree.
+// Do not edit anything else here. To change the contract, change it upstream,
+// copy the file again, then run
+//   buf generate --path proto/aegisone/v1/agent.proto
+//   buf breaking --against '.git#branch=main'
 //
-// Last re-verified 2026-11-08 against agent zip 4 (proto commits 88b3709,
-// 2240a16, e1d3d6b): inventory, audit events, resume offset, command
-// attribution, software deploy v2 fields. Normalized descriptors are identical.
+// Until 2026-11-19 this file was recovered from the descriptor embedded in the
+// shipped agent binary; that copy matched the upstream file field for field.
 //
 // Command signatures (Command.signature) are not described by this file: they
 // are Ed25519 over commandsign.CanonicalBytes - see internal/signing.
@@ -53,10 +50,32 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type AgentControlPlaneClient interface {
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentMessage, ServerMessage], error)
+	// FetchContent streams a cab/patch file to the agent (peer-cache delivery).
 	FetchContent(ctx context.Context, in *ContentRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ContentChunk], error)
+	// UploadContent streams one endpoint-local file FROM the agent TO the server
+	// (the on-demand reverse of FetchContent, mTLS-authenticated). Used by the
+	// "collect_file" task so the console can pull install/app logs, config files
+	// or script output on demand — never pushed by the agent on its own, same model
+	// as BigFix/BladeLogic log collection. First chunk MUST carry the header fields;
+	// subsequent chunks carry only data. Server replies once at end with the stored
+	// location and whether the per-chunk SHA-256 chain matched.
 	UploadContent(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadChunk, UploadAck], error)
+	// Enroll issues a per-device client cert from a CSR (server-auth TLS + token).
 	Enroll(ctx context.Context, in *EnrollRequest, opts ...grpc.CallOption) (*EnrollResponse, error)
+	// Renew re-issues the client cert BEFORE expiry over the existing mTLS channel.
+	// The device is authenticated by its CURRENT client cert (no token) — the server
+	// signs the new CSR for that same device_id. This is how long-lived certs rotate
+	// without re-enrollment.
 	Renew(ctx context.Context, in *RenewRequest, opts ...grpc.CallOption) (*RenewResponse, error)
+	// ShellSession is a live bidirectional shell pipe (BladeLogic nexec model, NOT
+	// RDP / remote desktop — pure text streaming). The server opens it with a prior
+	// signed "open_shell" command the agent received on Connect; the agent dials
+	// this RPC with that session_id, spawns cmd.exe as LocalSystem, and pipes stdin
+	// in / stdout+stderr out. Session is on its OWN stream so a slow shell cannot
+	// block patch/status traffic; every byte in and out is also written to a local
+	// transcript the agent uploads on close for audit.
+	// Agent sends ShellOutput (stdout/stderr/close), receives ShellInput (stdin/
+	// control) — matches which side holds the shell process.
 	ShellSession(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ShellOutput, ShellInput], error)
 }
 
@@ -151,10 +170,32 @@ type AgentControlPlane_ShellSessionClient = grpc.BidiStreamingClient[ShellOutput
 // for forward compatibility.
 type AgentControlPlaneServer interface {
 	Connect(grpc.BidiStreamingServer[AgentMessage, ServerMessage]) error
+	// FetchContent streams a cab/patch file to the agent (peer-cache delivery).
 	FetchContent(*ContentRequest, grpc.ServerStreamingServer[ContentChunk]) error
+	// UploadContent streams one endpoint-local file FROM the agent TO the server
+	// (the on-demand reverse of FetchContent, mTLS-authenticated). Used by the
+	// "collect_file" task so the console can pull install/app logs, config files
+	// or script output on demand — never pushed by the agent on its own, same model
+	// as BigFix/BladeLogic log collection. First chunk MUST carry the header fields;
+	// subsequent chunks carry only data. Server replies once at end with the stored
+	// location and whether the per-chunk SHA-256 chain matched.
 	UploadContent(grpc.ClientStreamingServer[UploadChunk, UploadAck]) error
+	// Enroll issues a per-device client cert from a CSR (server-auth TLS + token).
 	Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error)
+	// Renew re-issues the client cert BEFORE expiry over the existing mTLS channel.
+	// The device is authenticated by its CURRENT client cert (no token) — the server
+	// signs the new CSR for that same device_id. This is how long-lived certs rotate
+	// without re-enrollment.
 	Renew(context.Context, *RenewRequest) (*RenewResponse, error)
+	// ShellSession is a live bidirectional shell pipe (BladeLogic nexec model, NOT
+	// RDP / remote desktop — pure text streaming). The server opens it with a prior
+	// signed "open_shell" command the agent received on Connect; the agent dials
+	// this RPC with that session_id, spawns cmd.exe as LocalSystem, and pipes stdin
+	// in / stdout+stderr out. Session is on its OWN stream so a slow shell cannot
+	// block patch/status traffic; every byte in and out is also written to a local
+	// transcript the agent uploads on close for audit.
+	// Agent sends ShellOutput (stdout/stderr/close), receives ShellInput (stdin/
+	// control) — matches which side holds the shell process.
 	ShellSession(grpc.BidiStreamingServer[ShellOutput, ShellInput]) error
 	mustEmbedUnimplementedAgentControlPlaneServer()
 }
