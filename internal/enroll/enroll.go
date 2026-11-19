@@ -10,11 +10,18 @@
 // transaction so a crash can't half-register a device.
 //
 // Reconciling only decides which device RECORD the agent belongs to (agent
-// track's TPM device identity spec); it never authorizes anything. Only a
-// strong signal (TPM EK, the agent's own device_id) reactivates an existing
-// record automatically. A weak one (SMBIOS UUID, MachineGuid), or a strong one
-// whose record has an agent connected right now, gets a new record plus a
-// device_merge_candidates row for an admin (see 0023). Hostname is never used.
+// track's TPM device identity spec); it never authorizes anything. A strong
+// signal (TPM EK, the agent's own device_id) reactivates an existing record
+// automatically ONLY when nothing can still prove that record's identity: it
+// is retired, or no agent of it holds an unrevoked, unexpired certificate. The
+// signals are plain strings any token holder can send (device_id is shown in
+// the console; the EK is not attested), so while a live certificate exists the
+// identity is re-claimable only over mTLS (Renew) or with an enrollment token
+// an admin bound to that device (scope {"reenroll_device_id": ...}). Any other
+// strong match on a live record, a strong match on a connected record, or a
+// weak one (SMBIOS UUID, MachineGuid) gets a new record plus a
+// device_merge_candidates row for an admin (see 0023), and the live-record
+// case also opens an alert. Hostname is never used.
 //
 // Renew: called over an existing mTLS connection (no token); signs a fresh cert
 // for the already-authenticated device.
@@ -78,7 +85,21 @@ type rejection string
 
 func (r rejection) Error() string { return string(r) }
 
-const errBadToken = rejection("enrollment token is invalid, expired, revoked or used up")
+const (
+	errBadToken   = rejection("enrollment token is invalid, expired, revoked or used up")
+	errTokenScope = rejection("enrollment token is bound to another device")
+)
+
+// Alert types raised by enrollment (alerts table, 0007).
+const (
+	// AlertIdentityConflict: an enrollment claimed the identity (device_id or
+	// TPM EK) of a record that still holds a live certificate or is connected.
+	// The enrollment got a new record; the existing one is untouched.
+	AlertIdentityConflict = "enrollment_identity_conflict"
+	// AlertReenrolled: an active (not retired) record was re-enrolled - its
+	// certificates had expired, or an admin issued a device-bound token.
+	AlertReenrolled = "device_reenrolled"
+)
 
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
@@ -141,16 +162,22 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 		return nil, err
 	}
 
-	tokenID, err := checkToken(ctx, tx, req.GetEnrollToken())
+	tok, err := checkToken(ctx, tx, req.GetEnrollToken())
 	if err != nil {
 		return nil, err
 	}
+	tokenID := tok.id
 
 	m, err := reconcile(ctx, tx, sig)
 	if err != nil {
 		return nil, err
 	}
-	m, review := classify(m, s.live)
+	m, review := classify(m, s.live, tok.reenrollDeviceID)
+	// A device-bound token does exactly one thing: re-enroll that device. It
+	// never creates a record or reactivates another one.
+	if tok.reenrollDeviceID != "" && (m == nil || m.dev.deviceID != tok.reenrollDeviceID) {
+		return nil, errTokenScope
+	}
 	var dev *device
 	matchedBy := ""
 	if m != nil {
@@ -240,6 +267,20 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 			}); err != nil {
 				return nil, err
 			}
+			if review.strong {
+				// Someone presented an existing device's identity with only a
+				// token: a cloned image, a stale install, or an attempt to take
+				// the record over. Admins see it, the record is unaffected.
+				if err := alert(ctx, tx, AlertIdentityConflict, "high", review.dev.id, "enroll-conflict:"+review.dev.id,
+					fmt.Sprintf("Enrollment claimed the identity of %s (%s)", review.dev.deviceID, matchLabel(review.by)),
+					map[string]any{
+						"existing_device_id": review.dev.deviceID, "existing_state": review.dev.state,
+						"new_device_id": dev.deviceID, "matched_by": review.by, "hostname": clip(req.GetHostname(), 255),
+						"enrollment_token_id": tokenID,
+					}); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 
@@ -275,8 +316,27 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 			"requested_device_id": req.GetDeviceId(),
 			"device_id":           dev.deviceID,
 			"commands_failed":     commandsFailed,
+			"device_bound_token":  tok.reenrollDeviceID != "",
 		}); err != nil {
 			return nil, err
+		}
+		// Re-enrolling a record that was never retired re-issues its identity
+		// to a new key: expected after a cert expired or on an admin's
+		// device-bound token, but worth a look either way.
+		if dev.state == "online" || dev.state == "offline" || dev.state == "stale" {
+			how := "its certificates had expired"
+			if tok.reenrollDeviceID != "" {
+				how = "with a device-bound enrollment token"
+			}
+			if err := alert(ctx, tx, AlertReenrolled, "medium", dev.id, "reenroll:"+dev.id,
+				fmt.Sprintf("Device %s re-enrolled while %s (%s)", dev.deviceID, dev.state, how),
+				map[string]any{
+					"device_id": dev.deviceID, "previous_status": dev.state, "matched_by": matchedBy,
+					"device_bound_token": tok.reenrollDeviceID != "", "hostname": clip(req.GetHostname(), 255),
+					"enrollment_token_id": tokenID, "commands_failed": commandsFailed,
+				}); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -298,30 +358,47 @@ func (s *Service) enroll(ctx context.Context, req *aegisonev1.EnrollRequest) (*a
 	}, nil
 }
 
-func checkToken(ctx context.Context, tx pgx.Tx, raw string) (string, error) {
-	var id string
+// tokenInfo is a valid enrollment token.
+type tokenInfo struct {
+	id string
+	// reenrollDeviceID is set for a device-bound token (enrollment_tokens.scope
+	// {"reenroll_device_id": "<device_id>"}, cmd/enrolltoken mint -reenroll):
+	// it may only re-enroll that device.
+	reenrollDeviceID string
+}
+
+func checkToken(ctx context.Context, tx pgx.Tx, raw string) (tokenInfo, error) {
+	var t tokenInfo
 	var maxUses, useCount int
 	var expires time.Time
 	var revoked *time.Time
+	var scoped *string
 	err := tx.QueryRow(ctx, `
-		SELECT id, max_uses, use_count, expires_at, revoked_at
+		SELECT id, max_uses, use_count, expires_at, revoked_at, scope->>'reenroll_device_id'
 		FROM enrollment_tokens WHERE token_hash = $1 FOR UPDATE`, HashToken(strings.TrimSpace(raw)),
-	).Scan(&id, &maxUses, &useCount, &expires, &revoked)
+	).Scan(&t.id, &maxUses, &useCount, &expires, &revoked, &scoped)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return "", errBadToken
+		return t, errBadToken
 	case err != nil:
-		return "", err
+		return t, err
 	case revoked != nil, time.Now().After(expires), useCount >= maxUses:
-		return "", errBadToken
+		return t, errBadToken
 	}
-	return id, nil
+	if scoped != nil {
+		t.reenrollDeviceID = strings.ToLower(strings.TrimSpace(*scoped))
+	}
+	return t, nil
 }
 
 type device struct {
 	id, deviceID, status, hostname string
 	state                          string // online/offline/stale/retired/unmanaged when matched
 	computerID                     int64
+	// liveCert: an unrevoked agent of this record still holds an unrevoked,
+	// unexpired certificate - the record's identity can still be proven over
+	// mTLS, so a bare token must not take it over.
+	liveCert bool
 }
 
 // match is the existing record an enrollment's signals point at.
@@ -329,7 +406,7 @@ type match struct {
 	dev    device
 	by     string // tpm_ek, device_id, system_uuid, machine_guid
 	value  string
-	strong bool // tpm_ek / device_id: may reactivate without review
+	strong bool // tpm_ek / device_id: may reactivate without review (see classify)
 }
 
 // matchSQL reads a candidate record with its lifecycle state (same rules as
@@ -340,7 +417,10 @@ const matchSQL = `
 	            WHEN status = 'unmanaged' THEN 'unmanaged'
 	            WHEN last_seen_at >= now() - make_interval(mins => setting_int('agent.offline_after_minutes', 15)) THEN 'online'
 	            WHEN last_seen_at >= now() - make_interval(days => setting_int('device.stale_after_days', 30)) THEN 'offline'
-	            ELSE 'stale' END
+	            ELSE 'stale' END,
+	       EXISTS (SELECT 1 FROM agents a JOIN agent_certificates c ON c.agent_id = a.id
+	               WHERE a.device_id = devices.id AND a.revoked_at IS NULL
+	                 AND c.revoked_at IS NULL AND c.not_after > now())
 	FROM devices WHERE merged_into_device_id IS NULL AND `
 
 // reconcile finds the existing device for these signals, strongest first:
@@ -368,7 +448,7 @@ func reconcile(ctx context.Context, tx pgx.Tx, s signals) (*match, error) {
 		var found []device
 		for rows.Next() {
 			var d device
-			if err := rows.Scan(&d.id, &d.deviceID, &d.status, &d.computerID, &d.hostname, &d.state); err != nil {
+			if err := rows.Scan(&d.id, &d.deviceID, &d.status, &d.computerID, &d.hostname, &d.state, &d.liveCert); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -396,16 +476,26 @@ func reconcile(ctx context.Context, tx pgx.Tx, s signals) (*match, error) {
 	return nil, nil
 }
 
-// classify splits a match into what enrollment acts on now (a strong match:
-// reactivate that record) and what an admin must review (a weak match, or a
-// strong one whose record has an agent connected right now - a cloned VM, or
-// someone else's identity). At most one of the two is set.
-func classify(m *match, live Live) (act, review *match) {
+// classify splits a match into what enrollment acts on now (reactivate that
+// record) and what an admin must review. At most one of the two is set.
+//
+// A strong match (TPM EK, device_id) reactivates only when the record cannot
+// prove its identity any more - it is retired, or no live certificate exists -
+// or when the token is bound to exactly this device (reenrollFor); and never
+// while the record's agent is connected (a cloned VM, or someone else's
+// identity). Everything else - a weak match, or a strong one against a live
+// or connected record - becomes a review (device_merge_candidates).
+func classify(m *match, live Live, reenrollFor string) (act, review *match) {
 	if m == nil {
 		return nil, nil
 	}
-	if m.strong && (live == nil || !live.Connected(m.dev.deviceID)) {
-		return m, nil
+	if m.strong {
+		connected := live != nil && live.Connected(m.dev.deviceID)
+		unclaimed := m.dev.state == "retired" || !m.dev.liveCert
+		bound := reenrollFor != "" && reenrollFor == m.dev.deviceID
+		if !connected && (unclaimed || bound) {
+			return m, nil
+		}
 	}
 	r := *m
 	if r.strong {
@@ -428,6 +518,29 @@ func matchLabel(by string) string {
 // not an identity signal, but admins want to see renames.
 func Renamed(from, to string) map[string]any {
 	return map[string]any{"message": fmt.Sprintf("Device renamed from %s to %s", from, to), "from": from, "to": to}
+}
+
+// alert opens (or bumps) an alert for a device; one open alert per dedupKey.
+func alert(ctx context.Context, tx pgx.Tx, alertType, severity, deviceUUID, dedupKey, title string, details map[string]any) error {
+	b, _ := json.Marshal(details)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO alerts (alert_type, severity, device_id, title, details, dedup_key)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+		ON CONFLICT (dedup_key) WHERE status <> 'resolved' AND dedup_key IS NOT NULL
+		DO UPDATE SET occurrence_count = alerts.occurrence_count + 1, last_seen_at = now(),
+		    details = alerts.details || EXCLUDED.details`,
+		alertType, severity, deviceUUID, title, string(b), dedupKey); err != nil {
+		return fmt.Errorf("alert %s: %w", alertType, err)
+	}
+	return nil
+}
+
+func clip(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }
 
 func audit(ctx context.Context, tx pgx.Tx, action, deviceID, deviceUUID string, details map[string]any) error {

@@ -130,14 +130,17 @@ type, because results can hold command output.
   - Nothing is deleted.
 - **Coming back:** only by enrolling again with an enrollment token, which checks the license again. With trust-on-first-use (dev, no enrollment CA), a retired device can't bind a new certificate.
 
-**Returning devices (reimage / reinstall).** Enrollment matches the request to an existing record. The match only picks the record; it never grants trust, which stays with mTLS and signed commands.
+**Returning devices (reimage / reinstall).** Enrollment matches the request to an existing record. The match only picks the record; it never grants trust, which stays with mTLS and signed commands. The signals are plain strings any token holder can send (the device_id is shown in the console, the TPM EK is not attested), so a record whose agent still holds a valid certificate is never handed over on a plain token.
 
 | Signal | Result |
 |---|---|
-| TPM EK, or the agent's own device_id | The existing record is reactivated with its history and `computer_id`. Audit `device.reactivate`: "Device reactivated via TPM match - previous status: X". Commands still open for the old install are failed (`device re-enrolled`). |
-| Same, but that record's agent is connected right now (cloned VM, copied identity) | Not reactivated. New record, and a duplicate (`tpm_ek_conflict` / `device_id_conflict`) for review. |
+| TPM EK, or the agent's own device_id, and the record is **retired** or **no agent of it holds an unrevoked, unexpired certificate** | The existing record is reactivated with its history and `computer_id`. Audit `device.reactivate`: "Device reactivated via TPM match - previous status: X". Commands still open for the old install are failed (`device re-enrolled`). If the record was not retired (certs had simply expired) an alert `device_reenrolled` (medium) opens. |
+| Same, with an enrollment token **bound to that device** (`enrolltoken mint -reenroll <device_id>`: single use, at most 7 days) | Reactivated as above, the old certificates revoked (`re-enrolled`), alert `device_reenrolled`. The admin's way to reinstall the agent without retiring the device first. A bound token can do nothing else: used for another device or a new one it is refused ("enrollment token is bound to another device"). |
+| Same, but the record **still holds a live certificate** (plain token), or its agent is **connected right now** (cloned VM, copied identity) | Not reactivated and nothing on the existing record changes. New record, a duplicate (`tpm_ek_conflict` / `device_id_conflict`) for review, and an alert `enrollment_identity_conflict` (high) on the existing device; repeats bump the open alert. |
 | SMBIOS UUID or MachineGuid only, matching exactly one record | Never merged automatically. New record, and a duplicate (`system_uuid` / `machine_guid`) for review. Audit `device.duplicate_flagged`. |
 | Nothing | New record. |
+
+Retiring a device revokes its certificates, so "retire, then enroll again" keeps working with a plain token.
 
 - **Confirming a duplicate** moves the new record's agent onto the existing record:
   - The existing record keeps its history and `computer_id`, and takes over the agent's `device_id` and TPM EK.

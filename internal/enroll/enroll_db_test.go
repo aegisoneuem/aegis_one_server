@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,9 +202,114 @@ func TestEnrollReconcileDB(t *testing.T) {
 		t.Errorf("clone candidate matched_by = %q", matchedBy)
 	}
 
-	// 5. Reinstall on the same OS (agent kept its device_id): reactivates, no candidate.
-	re := enroll(&aegisonev1.EnrollRequest{DeviceId: weak.GetAssignedDeviceId(), SystemUuid: smbios, Hostname: host})
-	if re.GetAssignedDeviceId() != weak.GetAssignedDeviceId() {
-		t.Errorf("device_id match: got %s, want %s", re.GetAssignedDeviceId(), weak.GetAssignedDeviceId())
+	// 5. Someone presents an EXISTING device's device_id with a plain token while
+	//    that device is offline but still holds a valid certificate (the record
+	//    created in step 3 was enrolled a moment ago). Not reactivated: new
+	//    record, device_id_conflict for review, the existing certs untouched,
+	//    and a high alert.
+	victim := weak.GetAssignedDeviceId()
+	certsBefore := liveCerts(t, pool, victim)
+	if certsBefore != 1 {
+		t.Fatalf("victim live certs = %d, want 1", certsBefore)
 	}
+	imp := enroll(&aegisonev1.EnrollRequest{DeviceId: victim, Hostname: "EVIL-" + rnd()})
+	if imp.GetAssignedDeviceId() == victim {
+		t.Fatal("a plain token took over a device that still holds a live certificate")
+	}
+	if liveCerts(t, pool, victim) != 1 {
+		t.Errorf("victim certs after the attempt: %d live, want 1", liveCerts(t, pool, victim))
+	}
+	pool.QueryRow(ctx, `SELECT c.matched_by FROM device_merge_candidates c JOIN devices n ON n.id = c.new_device_id
+		WHERE n.agent_reported_id = $1`, imp.GetAssignedDeviceId()).Scan(&matchedBy)
+	if matchedBy != "device_id_conflict" {
+		t.Errorf("impersonation candidate matched_by = %q", matchedBy)
+	}
+	var sev, title string
+	if err := pool.QueryRow(ctx, `SELECT a.severity, a.title FROM alerts a JOIN devices d ON d.id = a.device_id
+		WHERE a.alert_type = $1 AND d.agent_reported_id = $2`, AlertIdentityConflict, victim).Scan(&sev, &title); err != nil {
+		t.Fatalf("no identity-conflict alert: %v", err)
+	}
+	if sev != "high" || !strings.Contains(title, victim) {
+		t.Errorf("conflict alert: %s %q", sev, title)
+	}
+	// The same attempt again bumps the open alert instead of opening another.
+	enroll(&aegisonev1.EnrollRequest{DeviceId: victim, Hostname: "EVIL2-" + rnd()})
+	var open, occurrences int
+	pool.QueryRow(ctx, `SELECT count(*), max(occurrence_count) FROM alerts a JOIN devices d ON d.id = a.device_id
+		WHERE a.alert_type = $1 AND d.agent_reported_id = $2 AND a.status <> 'resolved'`, AlertIdentityConflict, victim).Scan(&open, &occurrences)
+	if open != 1 || occurrences != 2 {
+		t.Errorf("conflict alerts open %d occurrences %d, want 1/2", open, occurrences)
+	}
+
+	// 6. A token bound to another device is good for nothing here.
+	other := boundToken(t, pool, dev)
+	resp := svc.Enroll(ctx, &aegisonev1.EnrollRequest{EnrollToken: other, CsrPem: csr(t), DeviceId: victim, Hostname: host}, "test")
+	if resp.GetError() != string(errTokenScope) {
+		t.Errorf("bound token for another device: %q", resp.GetError())
+	}
+	resp = svc.Enroll(ctx, &aegisonev1.EnrollRequest{EnrollToken: other, CsrPem: csr(t), DeviceId: newUUIDT(t), Hostname: "NEW-" + rnd()}, "test")
+	if resp.GetError() != string(errTokenScope) {
+		t.Errorf("bound token for a new device: %q", resp.GetError())
+	}
+
+	// 7. The admin's way to reinstall without retiring: a token bound to the
+	//    device. Reactivates, the old cert is revoked, alert device_reenrolled.
+	bound := boundToken(t, pool, victim)
+	resp = svc.Enroll(ctx, &aegisonev1.EnrollRequest{EnrollToken: bound, CsrPem: csr(t), DeviceId: victim, SystemUuid: smbios, Hostname: host}, "test")
+	if resp.GetError() != "" || resp.GetAssignedDeviceId() != victim {
+		t.Fatalf("bound re-enroll: err %q id %s, want %s", resp.GetError(), resp.GetAssignedDeviceId(), victim)
+	}
+	if liveCerts(t, pool, victim) != 1 {
+		t.Errorf("after bound re-enroll: %d live certs, want 1 (the new one)", liveCerts(t, pool, victim))
+	}
+	var revokedReason string
+	pool.QueryRow(ctx, `SELECT c.revoked_reason FROM agent_certificates c JOIN agents a ON a.id = c.agent_id JOIN devices d ON d.id = a.device_id
+		WHERE d.agent_reported_id = $1 AND c.revoked_at IS NOT NULL`, victim).Scan(&revokedReason)
+	if revokedReason != "re-enrolled" {
+		t.Errorf("old cert revoked_reason = %q", revokedReason)
+	}
+	if err := pool.QueryRow(ctx, `SELECT a.severity FROM alerts a JOIN devices d ON d.id = a.device_id
+		WHERE a.alert_type = $1 AND d.agent_reported_id = $2`, AlertReenrolled, victim).Scan(&sev); err != nil || sev != "medium" {
+		t.Errorf("reenrolled alert: %v %q", err, sev)
+	}
+	// Single use: the bound token is spent.
+	resp = svc.Enroll(ctx, &aegisonev1.EnrollRequest{EnrollToken: bound, CsrPem: csr(t), DeviceId: victim, Hostname: host}, "test")
+	if resp.GetError() != string(errBadToken) {
+		t.Errorf("reused bound token: %q", resp.GetError())
+	}
+
+	// 8. Certificates expired (agent dead for longer than the cert lifetime):
+	//    a plain token brings the record back - nothing can prove it any more.
+	if _, err := pool.Exec(ctx, `UPDATE agent_certificates SET not_before = now() - interval '2 days', not_after = now() - interval '1 day'
+		WHERE agent_id IN (SELECT a.id FROM agents a JOIN devices d ON d.id = a.device_id WHERE d.agent_reported_id = $1)`, victim); err != nil {
+		t.Fatal(err)
+	}
+	re := enroll(&aegisonev1.EnrollRequest{DeviceId: victim, SystemUuid: smbios, Hostname: host})
+	if re.GetAssignedDeviceId() != victim {
+		t.Errorf("device_id match with expired certs: got %s, want %s", re.GetAssignedDeviceId(), victim)
+	}
+}
+
+// liveCerts counts the device's unrevoked, unexpired certificates on unrevoked agents.
+func liveCerts(t *testing.T, pool *pgxpool.Pool, deviceID string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM agent_certificates c JOIN agents a ON a.id = c.agent_id JOIN devices d ON d.id = a.device_id
+		WHERE d.agent_reported_id = $1 AND a.revoked_at IS NULL AND c.revoked_at IS NULL AND c.not_after > now()`, deviceID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// boundToken mints a single-use token bound to deviceID (enrolltoken mint -reenroll).
+func boundToken(t *testing.T, pool *pgxpool.Pool, deviceID string) string {
+	t.Helper()
+	raw := "tok-" + rnd()
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO enrollment_tokens (token_hash, max_uses, expires_at, scope)
+		VALUES ($1, 1, now() + interval '1 hour', jsonb_build_object('reenroll_device_id', $2::text))`, HashToken(raw), deviceID); err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
