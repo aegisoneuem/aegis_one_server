@@ -25,8 +25,9 @@ package grpcserver
 // (internal/patchcontent), looked up by the SHA-256 from the signed command.
 // kind "package" (software_deploy installers) serves packages uploaded to
 // internal/softwaredist, only to a device with a deployment of that package in
-// progress. kind "nsh-file" serves a file transfer's archive to the one
-// destination its content id was minted for (internal/remoteops).
+// progress. kind "svsh-file" serves a file transfer's archive to the one
+// destination its content id was minted for (internal/remoteops); agents
+// before the NSH -> SVSH rename (agent 496343e) ask for it as "nsh-file".
 
 import (
 	"context"
@@ -253,7 +254,7 @@ func (s *Server) FetchContent(req *aegisonev1.ContentRequest, stream aegisonev1.
 		f, err = s.patchFile(ctx, req)
 	case "package":
 		f, err = s.packageFile(ctx, known.DeviceUUID, req)
-	case "nsh-file":
+	case "svsh-file", "nsh-file":
 		f, err = s.transferFile(ctx, known.DeviceUUID, req)
 	default:
 		return status.Errorf(codes.InvalidArgument, "unknown content kind %q", req.GetKind())
@@ -360,7 +361,7 @@ func (s *Server) transferFile(ctx context.Context, deviceUUID string, req *aegis
 	}
 	sum := strings.ToLower(strings.TrimSpace(req.GetSha256()))
 	if !isSHA256Hex(sum) || strings.TrimSpace(req.GetId()) == "" {
-		return contentFile{}, status.Error(codes.InvalidArgument, "nsh-file fetch needs the content_id and sha256 from the file_operation")
+		return contentFile{}, status.Error(codes.InvalidArgument, "svsh-file fetch needs the content_id and sha256 from the file_operation")
 	}
 	path, size, err := s.transfers.Content(ctx, strings.TrimSpace(req.GetId()), sum, deviceUUID)
 	if err != nil {

@@ -118,7 +118,7 @@ func (s *Server) EnablePatchDiff(d *patchdiff.Differ) {
 }
 
 // EnableRemoteOps turns on UploadContent, ShellSession and FetchContent kind
-// "nsh-file". Call before serving.
+// "svsh-file" (and its pre-rename spelling "nsh-file"). Call before serving.
 func (s *Server) EnableRemoteOps(u *remoteops.Uploads, t *remoteops.Transfers, sh *remoteops.Shells) {
 	s.uploads, s.transfers, s.shells = u, t, sh
 }

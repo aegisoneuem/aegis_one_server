@@ -307,7 +307,7 @@ func (t *Transfers) pack(ctx context.Context, x transfer) error {
 		WHERE id = $1`, x.id, uploadID, strings.ToLower(res.SHA256), string(entries)); err != nil {
 		return err
 	}
-	// One random content id per destination: FetchContent "nsh-file" serves
+	// One random content id per destination: FetchContent "svsh-file" serves
 	// the archive only to that device.
 	trows, err := tx.Query(ctx, `SELECT device_id::text FROM file_transfer_targets WHERE transfer_id = $1`, x.id)
 	if err != nil {
@@ -483,7 +483,7 @@ func (t *Transfers) close(ctx context.Context, x transfer, status, reason string
 	return nil
 }
 
-// Content resolves FetchContent{kind:"nsh-file"}: the content id must belong
+// Content resolves FetchContent{kind:"svsh-file"}: the content id must belong
 // to this device's in-progress unpack, with the same archive digest.
 func (t *Transfers) Content(ctx context.Context, contentID, sha256Hex, deviceUUID string) (path string, size int64, err error) {
 	var stored string
